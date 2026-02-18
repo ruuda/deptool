@@ -1,0 +1,9 @@
+[package]
+name = "deptool"
+version = "0.1.0"
+authors = ["Ruud van Asseldonk <dev@veniogames.com>"]
+description = "A simple deployment tool"
+license = "Apache-2.0"
+edition = "2024"
+
+[dependencies]
