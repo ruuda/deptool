@@ -127,7 +127,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::store::set_ref;
+    use crate::store::{RefUpdate, set_ref};
     use crate::testutil::{commit_dir, TempDir};
 
     #[test]
@@ -163,7 +163,7 @@ mod tests {
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
 
-        set_ref(&repo, "refs/remotes/web1/current", c1)?;
+        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
 
         fs::write(input.path().join("web1/nginx/conf"), "v2")?;
         commit_dir(&repo, input.path())?;
@@ -186,7 +186,7 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1)?;
+        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
 
         fs::remove_dir_all(input.path().join("web1/rofld"))?;
         commit_dir(&repo, input.path())?;
@@ -208,7 +208,7 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1)?;
+        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
 
         fs::create_dir_all(input.path().join("web2/rofld"))?;
         fs::write(input.path().join("web2/rofld/conf"), "b")?;
@@ -231,7 +231,7 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1)?;
+        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
 
         commit_dir(&repo, input.path())?;
 

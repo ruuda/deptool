@@ -74,8 +74,17 @@ pub fn checkout_profile(
     Ok(())
 }
 
-pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid) -> Result<()> {
-    repo.reference(refname, oid, true, "")?;
+pub enum RefUpdate {
+    SetTarget,
+    SetCurrent,
+}
+
+pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid, reason: RefUpdate) -> Result<()> {
+    let reflog_msg = match reason {
+        RefUpdate::SetTarget => "apply: begin deployment, set target",
+        RefUpdate::SetCurrent => "apply: conclude deployment, set current",
+    };
+    repo.reference(refname, oid, true, reflog_msg)?;
     Ok(())
 }
 
@@ -125,7 +134,7 @@ pub fn apply(
         "Stale plan: expected current ref {expected_current:?} but found {actual_current:?}",
     );
 
-    set_ref(repo, "refs/heads/target", commit_oid)?;
+    set_ref(repo, "refs/heads/target", commit_oid, RefUpdate::SetTarget)?;
 
     let target_tree = repo.find_commit(commit_oid)?.tree()?;
     let target_profiles = get_host_profiles(repo, &target_tree, host)?;
@@ -151,7 +160,7 @@ pub fn apply(
         }
     }
 
-    set_ref(repo, "refs/heads/current", commit_oid)?;
+    set_ref(repo, "refs/heads/current", commit_oid, RefUpdate::SetCurrent)?;
     Ok(())
 }
 
