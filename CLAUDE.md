@@ -23,3 +23,4 @@
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Property-based tests are better than mere examples.
  - Testing things with side effects is hard. Separating IO from pure parts usually makes things easier to test, and it makes the tests faster and mores table.
+ - In assertions and `.expect()`, the message is the thing you expect to be true.

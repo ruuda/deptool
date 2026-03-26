@@ -69,3 +69,12 @@ When the plan is approved, we apply it:
    services, also to be fleshed out later. Record the output of `systemctl
    status` for reporting back to the operator.
  * This machine is done, move the `current` ref to the same commit as `target`.
+
+## Unresolved questions
+
+ * Removing _all_ profiles from a host is currently not something we can do
+   because you can't have empty directories in Git trees. Maybe we can just
+   leave a file `EMPTY` in the tree for that host. Or maybe we should have a
+   file `META` in every host besides its profile to clarify inventory? Or maybe
+   we should have a top-level inventory file. But `META` per dir sounds kinda
+   nice, I think, in case we need to track more in the future.
