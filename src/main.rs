@@ -18,6 +18,13 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
+    /// Show the deployment plan.
+    #[bpaf(command)]
+    Plan {
+        /// Path to the bare Git store.
+        #[bpaf(positional("STORE"))]
+        store: PathBuf,
+    },
     /// Check out a profile for a host from a commit.
     #[bpaf(command)]
     Apply {
@@ -156,6 +163,18 @@ struct Plan {
     hosts: BTreeMap<Hostname, HostPlan>,
 }
 
+/// Get the profile tree oids for a host from a cluster tree.
+fn get_host_profiles(
+    repo: &Repository,
+    cluster_tree: &git2::Tree,
+    host: &str,
+) -> Result<BTreeMap<String, git2::Oid>> {
+    match cluster_tree.get_name(host) {
+        Some(e) => Ok(tree_entries(&repo.find_tree(e.id())?)),
+        None => Ok(BTreeMap::new()),
+    }
+}
+
 /// Get the tree entries (name -> oid) one level deep.
 fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
     let mut entries = BTreeMap::new();
@@ -222,17 +241,13 @@ fn make_plan(repo: &Repository) -> Result<Plan> {
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        let target_host_tree = repo.find_tree(entry.id())?;
-        let target_profiles = tree_entries(&target_host_tree);
+        let target_profiles = get_host_profiles(repo, &main_tree, &host.0)?;
 
         let current_profiles = match repo.find_reference(&format!("refs/remotes/{host}/current")) {
             Err(_) => BTreeMap::new(),
             Ok(r) => {
                 let tree = r.peel_to_commit()?.tree()?;
-                match tree.get_name(&host.0) {
-                    None => BTreeMap::new(),
-                    Some(e) => tree_entries(&repo.find_tree(e.id())?),
-                }
+                get_host_profiles(repo, &tree, &host.0)?
             }
         };
 
@@ -247,7 +262,7 @@ fn make_plan(repo: &Repository) -> Result<Plan> {
 }
 
 /// Check out a subtree (host/profile) from a commit into a target directory.
-fn apply(
+fn checkout_profile(
     repo: &Repository,
     commit_oid: git2::Oid,
     host: &str,
@@ -259,8 +274,66 @@ fn apply(
     let entry = tree.get_path(Path::new(host).join(profile).as_ref())?;
     let subtree = repo.find_tree(entry.id())?;
     let mut cb = git2::build::CheckoutBuilder::new();
-    cb.target_dir(target);
+    cb.target_dir(target).force();
     repo.checkout_tree(subtree.as_object(), Some(&mut cb))?;
+    Ok(())
+}
+
+fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid) -> Result<()> {
+    repo.reference(refname, oid, true, "")?;
+    Ok(())
+}
+
+/// Apply a deployment: set target ref, check out changed profiles, set current ref.
+///
+/// This runs on the target host. It compares `refs/heads/current` against
+/// `expected_current` (None for first deploy) to ensure the plan is not stale,
+/// then diffs current against the target commit and applies the changes.
+fn apply(
+    repo: &Repository,
+    commit_oid: git2::Oid,
+    expected_current: Option<git2::Oid>,
+    host: &str,
+    target_dir: &Path,
+) -> Result<()> {
+    let actual_current = repo
+        .find_reference("refs/heads/current")
+        .ok()
+        .map(|r| r.peel_to_commit().map(|c| c.id()))
+        .transpose()?;
+
+    assert_eq!(
+        actual_current, expected_current,
+        "Stale plan: expected current ref {expected_current:?} but found {actual_current:?}",
+    );
+
+    set_ref(repo, "refs/heads/target", commit_oid)?;
+
+    let target_tree = repo.find_commit(commit_oid)?.tree()?;
+    let target_profiles = get_host_profiles(repo, &target_tree, host)?;
+
+    let current_profiles = match actual_current {
+        None => BTreeMap::new(),
+        Some(oid) => {
+            let tree = repo.find_commit(oid)?.tree()?;
+            get_host_profiles(repo, &tree, host)?
+        }
+    };
+
+    let diff = diff_profiles(&current_profiles, &target_profiles);
+
+    for (profile, change) in &diff {
+        match change {
+            ProfileDiff::Add { .. } | ProfileDiff::Update { .. } => {
+                checkout_profile(repo, commit_oid, host, profile, target_dir)?;
+            }
+            ProfileDiff::Remove => {
+                // TODO: Remove the profile directory.
+            }
+        }
+    }
+
+    set_ref(repo, "refs/heads/current", commit_oid)?;
     Ok(())
 }
 
@@ -277,6 +350,11 @@ fn run() -> Result<()> {
             let commit_oid = commit_tree(&repo, tree_oid)?;
             println!("{commit_oid}");
         }
+        Cmd::Plan { store } => {
+            let repo = Repository::open(&store)?;
+            let plan = make_plan(&repo)?;
+            println!("{plan:?}");
+        }
         Cmd::Apply {
             store,
             commit,
@@ -286,7 +364,7 @@ fn run() -> Result<()> {
         } => {
             let repo = Repository::open(&store)?;
             let oid = git2::Oid::from_str(&commit)?;
-            apply(&repo, oid, &host, &profile, &target)?;
+            checkout_profile(&repo, oid, &host, &profile, &target)?;
         }
     }
 
@@ -374,7 +452,7 @@ mod tests {
         let commit_oid = commit_tree(&repo, tree_oid)?;
 
         let output = TempDir::new("output");
-        apply(&repo, commit_oid, "web1", "nginx", output.path())?;
+        checkout_profile(&repo, commit_oid, "web1", "nginx", output.path())?;
 
         let out = output.path();
         let expected = input.path().join("web1/nginx");
@@ -388,11 +466,6 @@ mod tests {
     fn commit_dir(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
         let tree_oid = build_tree(repo, dir)?;
         commit_tree(repo, tree_oid)
-    }
-
-    fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid) -> Result<()> {
-        repo.reference(refname, oid, true, "")?;
-        Ok(())
     }
 
     #[test]
@@ -512,6 +585,54 @@ mod tests {
         let plan = make_plan(&repo)?;
         assert!(plan.hosts.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn apply_sets_target_and_current_refs() -> Result<()> {
+        let input = TempDir::new("input");
+        fs::create_dir_all(input.path().join("web1/nginx"))?;
+        fs::write(input.path().join("web1/nginx/conf"), "v1")?;
+
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path())?;
+        let c1 = commit_dir(&repo, input.path())?;
+
+        let output = TempDir::new("output");
+        apply(&repo, c1, None, "web1", output.path())?;
+
+        let current = repo
+            .find_reference("refs/heads/current")?
+            .peel_to_commit()?
+            .id();
+        let target = repo
+            .find_reference("refs/heads/target")?
+            .peel_to_commit()?
+            .id();
+        assert_eq!(current, c1);
+        assert_eq!(target, c1);
+        Ok(())
+    }
+
+    #[test]
+    #[should_panic(expected = "Stale plan")]
+    fn apply_panics_on_stale_expected_current() {
+        let input = TempDir::new("input");
+        fs::create_dir_all(input.path().join("web1/nginx")).unwrap();
+        fs::write(input.path().join("web1/nginx/conf"), "v1").unwrap();
+
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path()).unwrap();
+        let c1 = commit_dir(&repo, input.path()).unwrap();
+
+        let output = TempDir::new("output");
+        apply(&repo, c1, None, "web1", output.path()).unwrap();
+
+        // Second deploy with wrong expected current.
+        fs::write(input.path().join("web1/nginx/conf"), "v2").unwrap();
+        let c2 = commit_dir(&repo, input.path()).unwrap();
+
+        let stale_oid = git2::Oid::from_str("0000000000000000000000000000000000000000").unwrap();
+        apply(&repo, c2, Some(stale_oid), "web1", output.path()).unwrap();
     }
 
     #[test]
