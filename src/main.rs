@@ -45,15 +45,18 @@ fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
     for entry in entries {
         let name = entry.file_name();
         let name = name.to_str().ok_or(Error::NonUtf8FileName)?;
-        let ft = entry.file_type()?;
 
-        if ft.is_dir() {
-            let oid = build_tree(repo, &entry.path())?;
-            tb.insert(name, oid, 0o040000)?;
-        } else if ft.is_file() {
-            let contents = fs::read(entry.path())?;
-            let oid = repo.blob(&contents)?;
-            tb.insert(name, oid, 0o100644)?;
+        match entry.file_type()? {
+            ft if ft.is_dir() => {
+                let oid = build_tree(repo, &entry.path())?;
+                tb.insert(name, oid, 0o040000)?;
+            }
+            ft if ft.is_file() => {
+                let contents = fs::read(entry.path())?;
+                let oid = repo.blob(&contents)?;
+                tb.insert(name, oid, 0o100644)?;
+            }
+            _ => panic!("Unsupported directory entry: {name}"),
         }
     }
 
