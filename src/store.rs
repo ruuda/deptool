@@ -84,7 +84,8 @@ pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid, reason: RefUpda
         RefUpdate::SetTarget => "apply: begin deployment, set target",
         RefUpdate::SetCurrent => "apply: conclude deployment, set current",
     };
-    repo.reference(refname, oid, true, reflog_msg)?;
+    let force = true;
+    repo.reference(refname, oid, force, reflog_msg)?;
     Ok(())
 }
 

@@ -24,3 +24,4 @@
  - Property-based tests are better than mere examples.
  - Testing things with side effects is hard. Separating IO from pure parts usually makes things easier to test, and it makes the tests faster and mores table.
  - In assertions and `.expect()`, the message is the thing you expect to be true.
+ - Avoid the boolean parameter trap. At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
