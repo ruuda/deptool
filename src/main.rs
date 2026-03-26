@@ -110,13 +110,26 @@ mod tests {
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    /// Create a unique temporary directory for this test.
-    fn test_dir(label: &str) -> std::path::PathBuf {
-        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let dir = std::env::temp_dir().join(format!("deptool-test-{pid}-{id}-{label}"));
-        fs::create_dir_all(&dir).unwrap();
-        dir
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let pid = std::process::id();
+            let dir = std::env::temp_dir().join(format!("deptool-test-{pid}-{id}-{label}"));
+            fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
     }
 
     /// Checkout a commit's tree into a directory.
@@ -155,26 +168,22 @@ mod tests {
 
     #[test]
     fn checkout_after_commit_reproduces_the_original_files() -> Result<()> {
-        let input = test_dir("input");
-        fs::create_dir_all(input.join("web1/nginx/etc/nginx"))?;
-        fs::write(input.join("web1/nginx/etc/nginx/nginx.conf"), "server {}")?;
-        fs::create_dir_all(input.join("web1/myapp/etc/myapp"))?;
-        fs::write(input.join("web1/myapp/etc/myapp/config.toml"), "[server]\nport = 8080\n")?;
+        let input = TempDir::new("input");
+        fs::create_dir_all(input.path().join("web1/nginx/etc/nginx"))?;
+        fs::write(input.path().join("web1/nginx/etc/nginx/nginx.conf"), "server {}")?;
+        fs::create_dir_all(input.path().join("web1/myapp/etc/myapp"))?;
+        fs::write(input.path().join("web1/myapp/etc/myapp/config.toml"), "[server]\nport = 8080\n")?;
 
-        let store = test_dir("store");
-        let repo = Repository::init_bare(&store)?;
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path())?;
 
-        let tree_oid = build_tree(&repo, &input)?;
+        let tree_oid = build_tree(&repo, input.path())?;
         let commit_oid = commit_tree(&repo, tree_oid)?;
 
-        let output = test_dir("output");
-        checkout_to(&repo, commit_oid, &output)?;
+        let output = TempDir::new("output");
+        checkout_to(&repo, commit_oid, output.path())?;
 
-        assert_eq!(read_tree(&input)?, read_tree(&output)?);
-
-        fs::remove_dir_all(&input)?;
-        fs::remove_dir_all(&store)?;
-        fs::remove_dir_all(&output)?;
+        assert_eq!(read_tree(input.path())?, read_tree(output.path())?);
         Ok(())
     }
 }
