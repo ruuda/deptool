@@ -67,21 +67,13 @@ fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> {
     let tree = repo.find_tree(tree_oid)?;
     let sig = repo.signature()?;
 
-    // If main exists, use it as parent.
-    let parent = repo
-        .find_reference("refs/heads/main")
-        .ok()
-        .map(|r| r.peel_to_commit())
-        .transpose()?;
-    let parents: Vec<&git2::Commit> = parent.iter().collect();
-
     Ok(repo.commit(
         Some("refs/heads/main"),
         &sig,
         &sig,
         "Update cluster state",
         &tree,
-        &parents,
+        &[],
     )?)
 }
 
