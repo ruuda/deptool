@@ -1,8 +1,42 @@
 use std::fmt;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use bpaf::{Bpaf, Parser};
 use git2::Repository;
+
+#[derive(Debug, Clone, Bpaf)]
+enum Cmd {
+    /// Record a directory as a new commit in the store.
+    #[bpaf(command)]
+    Commit {
+        /// Path to the bare Git store.
+        #[bpaf(positional("STORE"))]
+        store: PathBuf,
+        /// Directory to commit.
+        #[bpaf(positional("DIR"))]
+        dir: PathBuf,
+    },
+    /// Check out a profile for a host from a commit.
+    #[bpaf(command)]
+    Apply {
+        /// Path to the bare Git store.
+        #[bpaf(positional("STORE"))]
+        store: PathBuf,
+        /// Commit hash to check out from.
+        #[bpaf(positional("COMMIT"))]
+        commit: String,
+        /// Host name.
+        #[bpaf(positional("HOST"))]
+        host: String,
+        /// Profile name.
+        #[bpaf(positional("PROFILE"))]
+        profile: String,
+        /// Target directory to check out into.
+        #[bpaf(positional("TARGET"))]
+        target: PathBuf,
+    },
+}
 
 #[derive(Debug)]
 enum Error {
@@ -77,22 +111,38 @@ fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> {
     )?)
 }
 
+/// Check out a subtree (host/profile) from a commit into a target directory.
+fn apply(repo: &Repository, commit_oid: git2::Oid, host: &str, profile: &str, target: &Path) -> Result<()> {
+    let commit = repo.find_commit(commit_oid)?;
+    let tree = commit.tree()?;
+    let entry = tree.get_path(Path::new(host).join(profile).as_ref())?;
+    let subtree = repo.find_tree(entry.id())?;
+    let mut cb = git2::build::CheckoutBuilder::new();
+    cb.target_dir(target);
+    repo.checkout_tree(subtree.as_object(), Some(&mut cb))?;
+    Ok(())
+}
+
 fn run() -> Result<()> {
-    let store_path = std::env::args()
-        .nth(1)
-        .expect("usage: deptool <store-repo> <dir>");
-    let dir = std::env::args()
-        .nth(2)
-        .expect("usage: deptool <store-repo> <dir>");
+    let cmd = cmd().to_options().run();
 
-    let repo = match Repository::open(&store_path) {
-        Ok(r) => r,
-        Err(_) => Repository::init_bare(&store_path)?,
-    };
+    match cmd {
+        Cmd::Commit { store, dir } => {
+            let repo = match Repository::open(&store) {
+                Ok(r) => r,
+                Err(_) => Repository::init_bare(&store)?,
+            };
+            let tree_oid = build_tree(&repo, &dir)?;
+            let commit_oid = commit_tree(&repo, tree_oid)?;
+            println!("{commit_oid}");
+        }
+        Cmd::Apply { store, commit, host, profile, target } => {
+            let repo = Repository::open(&store)?;
+            let oid = git2::Oid::from_str(&commit)?;
+            apply(&repo, oid, &host, &profile, &target)?;
+        }
+    }
 
-    let tree_oid = build_tree(&repo, Path::new(&dir))?;
-    let commit_oid = commit_tree(&repo, tree_oid)?;
-    println!("{commit_oid}");
     Ok(())
 }
 
@@ -132,42 +182,26 @@ mod tests {
         }
     }
 
-    /// Checkout a commit's tree into a directory.
-    fn checkout_to(repo: &Repository, commit_oid: git2::Oid, target: &Path) -> Result<()> {
-        let commit = repo.find_commit(commit_oid)?;
-        let tree = commit.tree()?;
-        let mut cb = git2::build::CheckoutBuilder::new();
-        cb.target_dir(target);
-        repo.checkout_tree(tree.as_object(), Some(&mut cb))?;
-        Ok(())
-    }
-
     /// Recursively collect all files under a directory as (relative_path, contents).
-    fn read_tree(root: &Path) -> Result<Vec<(String, Vec<u8>)>> {
+    fn read_dir_recursive(root: &Path, dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         let mut result = Vec::new();
-        read_tree_rec(root, root, &mut result)?;
-        result.sort();
-        Ok(result)
-    }
-
-    fn read_tree_rec(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
         let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
         entries.sort_by_key(|e| e.file_name());
         for entry in entries {
             let ft = entry.file_type()?;
             if ft.is_dir() {
-                read_tree_rec(root, &entry.path(), out)?;
+                result.extend(read_dir_recursive(root, &entry.path())?);
             } else if ft.is_file() {
                 let rel = entry.path().strip_prefix(root).unwrap().to_str().unwrap().to_string();
                 let contents = fs::read(entry.path())?;
-                out.push((rel, contents));
+                result.push((rel, contents));
             }
         }
-        Ok(())
+        Ok(result)
     }
 
     #[test]
-    fn checkout_after_commit_reproduces_the_original_files() -> Result<()> {
+    fn apply_after_commit_reproduces_the_profile_files() -> Result<()> {
         let input = TempDir::new("input");
         fs::create_dir_all(input.path().join("web1/nginx/etc/nginx"))?;
         fs::write(input.path().join("web1/nginx/etc/nginx/nginx.conf"), "server {}")?;
@@ -181,9 +215,14 @@ mod tests {
         let commit_oid = commit_tree(&repo, tree_oid)?;
 
         let output = TempDir::new("output");
-        checkout_to(&repo, commit_oid, output.path())?;
+        apply(&repo, commit_oid, "web1", "nginx", output.path())?;
 
-        assert_eq!(read_tree(input.path())?, read_tree(output.path())?);
+        let out = output.path();
+        let expected = input.path().join("web1/nginx");
+        assert_eq!(
+            read_dir_recursive(out, out)?,
+            read_dir_recursive(&expected, &expected)?,
+        );
         Ok(())
     }
 }

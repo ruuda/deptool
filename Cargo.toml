@@ -7,4 +7,5 @@ license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
+bpaf = { version = "0.9", features = ["derive"] }
 git2 = { version = "0.20", default-features = false }
