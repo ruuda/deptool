@@ -7,3 +7,4 @@ license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
+git2 = { version = "0.20", default-features = false }
