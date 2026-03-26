@@ -13,28 +13,59 @@ available on the host.
 Deptool manages _clusters_. A cluster is a set of _hosts_. Deptool manages
 configuration in two layers:
 
- * A _profile_ is a related collection of configuration files (usually for a
-   single application), specialized for a single machine. Profiles are
+ * A _profile_ is a related collection of configuration files, usually for a
+   single application, specialized for a single machine. Profiles are
    versioned.
  * A _cluster_ is a set of machines, and per machine the profiles that are
-   enabled on them, and the profile versions.
+   enabled on them, and the profile versions. The cluster as a whole is
+   versioned too.
 
-Therefore, with Deptool you define the desired state of your entire cluster.
-Changes to the desired state are tracked atomically (backed by Git). Deployment
-is more fine-grained however. Per machine, Deptool compares the set of profiles
-currently enabled on that machine against the desired set. If there is a
-difference, it aligns the profiles with the desired state. Changing (or enabling
-or disabling) a single profile is atomic, but updates to multiple profiles on
-the same machine are not atomic. This strikes a balance between immutability and
-efficiency. To update one application, we don't need to replace the entire world
-with a modified copy, we only need to touch that single profile.
+Together, this is how you define the desired state of your entire cluster.
+Changes to the desired cluster state are tracked atomically (backed by Git, more
+on that below). Deployment is more fine-grained however. Per machine, Deptool
+compares the set of profiles currently enabled on that machine against the
+desired set. If there is a difference, it aligns the profiles with the desired
+state. Changing (or enabling or disabling) a single profile is atomic, but
+updates to multiple profiles on the same machine are not atomic. This strikes a
+balance between immutability and efficiency. To update one application, we don't
+need to replace the entire world with a modified copy, we only need to touch
+that single profile.
 
-## Implementation
+After Deptool enables or updates a profile on a machine, it has the ability to
+restart or reload an associated systemd service.
+
+## Push-based
+
+Deptool runs are initiated by the operator from their developer machine. Deptool
+then establishes SSH connections with the machines that are part of the cluster,
+collects their current states, and if the desired configuration is newer than
+what is present on the machine, it applies updates.
+
+The fact that it's push-based does not mean that no agent runs on the target
+machines in the cluster. In fact, a statically linked agent binary is how
+Deptool can be efficient: unlike Ansible, it does not have to copy over
+lots of Python code on every connection. It can also avoid the fragility of Bash
+over SSH. Deptool just starts the agent remotely over SSH, and then speaks its
+own protocol against the agent, the same way that e.g. Git works.
+
+## Configuration Store
 
 The desired cluster state is tracked in a Git repository. This enables us to
 leverage Git's diffing capabilities to see what will change when we apply a
 configuation change. It also gives us a convenient way to efficiently transport
 trees of files and to materialize them on disk.
+
+When Deptool runs, it acts based on the configuration store on the operator's
+developer machine, but of course it can be synced to remotes. This is how
+multiple operators can collaborate on the same cluster: by sharing the same
+store.
+
+When Deptool runs and it visits a machine, it first queries the current state
+version present on that machine. With Git's commit graph it is possible to
+determine if that state is an ancestor of the desired state. If it is, we can
+deploy the newer config. If it's not an ancestor, something is wrong (possibly
+the operator is running from an outdated store), and deployment against this
+machine should abort.
 
 ## License
 
