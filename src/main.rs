@@ -56,15 +56,15 @@ enum Cmd {
         /// Path to the bare Git store.
         #[bpaf(positional("STORE"))]
         store: PathBuf,
-        /// Output file for the plan.
-        #[bpaf(positional("OUTPUT"))]
+        /// Output file for the plan (default: plan.json).
+        #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
         output: PathBuf,
     },
     /// Apply a saved plan to all hosts.
     #[bpaf(command)]
     Apply {
-        /// Path to a plan.json file.
-        #[bpaf(positional("PLAN"))]
+        /// Path to the plan file (default: plan.json).
+        #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
         plan: PathBuf,
     },
     /// Commands that run on target hosts.
