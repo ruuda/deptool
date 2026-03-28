@@ -165,19 +165,22 @@ mod tests {
     }
 
     fn test_connection(host: &Hostname) -> Result<Box<dyn Connection>> {
+        test_connection_with_version(host, protocol::VERSION)
+    }
+
+    fn test_connection_with_version(host: &Hostname, version: &str) -> Result<Box<dyn Connection>> {
         let store = TempDir::new("store");
         let repo = git2::Repository::init_bare(store.path())?;
         let session = HostSession::new(repo);
         let hello = Hello {
-            version: protocol::VERSION.to_string(),
+            version: version.to_string(),
             hostname: host.0.clone(),
         };
         Ok(Box::new(LocalConnection::new(session, hello, store)))
     }
 
-    #[test]
-    fn execute_plan_emits_apply_complete_for_fresh_host() -> Result<()> {
-        let plan = Plan {
+    fn single_host_plan() -> Plan {
+        Plan {
             commit: Oid::from("0000000000000000000000000000000000000000"),
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
@@ -186,10 +189,21 @@ mod tests {
                     expected_current: None,
                 },
             )]),
-        };
+        }
+    }
 
+    fn collect_messages(
+        plan: &Plan,
+        connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
+    ) -> Result<Vec<Message>> {
         let mut messages = Vec::new();
-        execute_plan(&plan, test_connection, |_, msg| messages.push(msg.clone()))?;
+        execute_plan(plan, connect, |_, msg| messages.push(msg.clone()))?;
+        Ok(messages)
+    }
+
+    #[test]
+    fn execute_plan_emits_apply_complete_for_fresh_host() -> Result<()> {
+        let messages = collect_messages(&single_host_plan(), test_connection)?;
 
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0], Message::ApplyComplete { .. }));
@@ -210,18 +224,6 @@ mod tests {
             crate::store::RefUpdate::SetCurrent,
         )?;
 
-        // The plan expects no prior commit, but the host already has one.
-        let plan = Plan {
-            commit: Oid::from("0000000000000000000000000000000000000000"),
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::new(),
-                    expected_current: None,
-                },
-            )]),
-        };
-
         let session = HostSession::new(repo);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
@@ -230,15 +232,27 @@ mod tests {
         let mut conn: Option<Box<dyn Connection>> =
             Some(Box::new(LocalConnection::new(session, hello, store)));
 
-        let mut messages = Vec::new();
-        execute_plan(
-            &plan,
-            |_| Ok(conn.take().expect("connect is called once per host")),
-            |_, msg| messages.push(msg.clone()),
-        )?;
+        // The plan expects no prior commit, but the host already has one.
+        let messages = collect_messages(&single_host_plan(), |_| {
+            Ok(conn.take().expect("connect is called once per host"))
+        })?;
 
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0], Message::Stale { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn execute_plan_skips_host_on_version_mismatch() -> Result<()> {
+        let messages = collect_messages(&single_host_plan(), |host| {
+            test_connection_with_version(host, "0.0.0-fake")
+        })?;
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            Message::Error { message } if message.contains("version mismatch") => { /* Ok */ }
+            other => panic!("Expected version mismatch error, got {other:?}"),
+        }
         Ok(())
     }
 }
