@@ -5,6 +5,7 @@
  - Keep the diff small if possible to aid review.
  - Do not Git commit, I will do that once I'm satisfied with a change.
  - Always use `rcl` for json processing, it's better suiter for this than `jq`.
+ - Run `cargo test --quiet` to avoid verbose output. Do not run `cargo fmt`.
  - Feel free to update this file when I give relevant instructions.
 
 ## Current project priorities

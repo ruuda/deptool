@@ -4,6 +4,7 @@ use std::fmt;
 pub enum Error {
     Io(std::io::Error),
     Git(git2::Error),
+    Json(serde_json::Error),
     NonUtf8FileName,
 }
 
@@ -19,11 +20,18 @@ impl From<git2::Error> for Error {
     }
 }
 
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Json(e)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Io(e) => write!(f, "{e}"),
             Error::Git(e) => write!(f, "{e}"),
+            Error::Json(e) => write!(f, "{e}"),
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
         }
     }

@@ -2,11 +2,13 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use git2::Repository;
+use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
+use crate::oid::Oid;
 use crate::store::get_host_apps;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Hostname(pub String);
 
 impl From<&str> for Hostname {
@@ -21,26 +23,23 @@ impl fmt::Display for Hostname {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
-    Add {
-        new_tree: git2::Oid,
-    },
+    Add { new_tree: Oid },
     Remove,
-    Update {
-        old_tree: git2::Oid,
-        new_tree: git2::Oid,
-    },
+    Update { old_tree: Oid, new_tree: Oid },
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostPlan {
     pub apps: BTreeMap<String, AppDiff>,
+    pub expected_current: Option<Oid>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub hosts: BTreeMap<Hostname, HostPlan>,
+    pub commit: Oid,
 }
 
 /// Diff two sets of app tree oids for a single host.
@@ -56,7 +55,7 @@ pub fn diff_apps(
                 changes.insert(
                     name.clone(),
                     AppDiff::Add {
-                        new_tree: *target_oid,
+                        new_tree: (*target_oid).into(),
                     },
                 );
             }
@@ -64,8 +63,8 @@ pub fn diff_apps(
                 changes.insert(
                     name.clone(),
                     AppDiff::Update {
-                        old_tree: *cur_oid,
-                        new_tree: *target_oid,
+                        old_tree: (*cur_oid).into(),
+                        new_tree: (*target_oid).into(),
                     },
                 );
             }
@@ -91,6 +90,7 @@ pub fn diff_apps(
 /// and plan again. We could just use the same plan function for that though.
 pub fn make_plan(repo: &Repository) -> Result<Plan> {
     let main_commit = repo.find_reference("refs/heads/main")?.peel_to_commit()?;
+    let commit = main_commit.id();
     let main_tree = main_commit.tree()?;
 
     let mut hosts = BTreeMap::new();
@@ -100,22 +100,33 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
 
         let target_apps = get_host_apps(repo, &main_tree, &host.0)?;
 
-        let current_apps = match repo.find_reference(&format!("refs/remotes/{host}/current")) {
-            Err(_) => BTreeMap::new(),
-            Ok(r) => {
-                let tree = r.peel_to_commit()?.tree()?;
-                get_host_apps(repo, &tree, &host.0)?
-            }
-        };
+        let (expected_current, current_apps) =
+            match repo.find_reference(&format!("refs/remotes/{host}/current")) {
+                Err(_) => (None, BTreeMap::new()),
+                Ok(r) => {
+                    let c = r.peel_to_commit()?;
+                    let tree = c.tree()?;
+                    (Some(c.id().into()), get_host_apps(repo, &tree, &host.0)?)
+                }
+            };
 
         let apps = diff_apps(&current_apps, &target_apps);
 
         if !apps.is_empty() {
-            hosts.insert(host, HostPlan { apps });
+            hosts.insert(
+                host,
+                HostPlan {
+                    apps,
+                    expected_current,
+                },
+            );
         }
     }
 
-    Ok(Plan { hosts })
+    Ok(Plan {
+        hosts,
+        commit: commit.into(),
+    })
 }
 
 #[cfg(test)]
