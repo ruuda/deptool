@@ -1,3 +1,5 @@
+//! Git store operations: commit, checkout, and apply configs.
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;

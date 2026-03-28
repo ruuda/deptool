@@ -1,3 +1,5 @@
+//! Request and response types for the host session protocol.
+
 use serde::{Deserialize, Serialize};
 
 use crate::oid::Oid;
@@ -13,7 +15,7 @@ pub enum Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub enum Response {
+pub enum Message {
     Hello {
         version: String,
         hostname: String,

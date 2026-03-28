@@ -1,7 +1,9 @@
+//! Host-side session logic: handles requests and applies changes.
+
 use git2::Repository;
 
 use crate::oid::Oid;
-use crate::protocol::{Request, Response};
+use crate::protocol::{Message, Request};
 
 pub struct HostSession {
     repo: Repository,
@@ -12,7 +14,7 @@ impl HostSession {
         HostSession { repo }
     }
 
-    pub fn handle_request(&self, request: Request, emit_message: &mut impl FnMut(Response)) {
+    pub fn handle_request(&self, request: Request, emit_message: &mut impl FnMut(Message)) {
         match request {
             Request::Apply {
                 expected_current_commit,
@@ -26,7 +28,7 @@ impl HostSession {
                     .map(|c| c.id().into());
 
                 if actual_current_commit != expected_current_commit {
-                    emit_message(Response::Stale {
+                    emit_message(Message::Stale {
                         expected_commit: expected_current_commit,
                         actual_commit: actual_current_commit,
                     });
@@ -35,7 +37,7 @@ impl HostSession {
 
                 // TODO: Actually apply the commit using store::apply,
                 // emitting per-app events along the way.
-                emit_message(Response::ApplyComplete {
+                emit_message(Message::ApplyComplete {
                     commit: target_commit,
                 });
             }
@@ -55,7 +57,7 @@ mod tests {
         HostSession::new(repo)
     }
 
-    fn collect(session: &HostSession, request: Request) -> Vec<Response> {
+    fn collect(session: &HostSession, request: Request) -> Vec<Message> {
         let mut responses = Vec::new();
         session.handle_request(request, &mut |r| responses.push(r));
         responses
@@ -72,7 +74,7 @@ mod tests {
         };
         let responses = collect(&session, req);
         assert_eq!(responses.len(), 1);
-        assert!(matches!(&responses[0], Response::Stale { .. }));
+        assert!(matches!(&responses[0], Message::Stale { .. }));
     }
 
     #[test]
@@ -88,7 +90,7 @@ mod tests {
         let responses = collect(&session, req);
         assert_eq!(responses.len(), 1);
         match &responses[0] {
-            Response::ApplyComplete { commit: c } => assert_eq!(c, &commit),
+            Message::ApplyComplete { commit: c } => assert_eq!(c, &commit),
             other => panic!("Expected Applied, got {other:?}"),
         }
     }

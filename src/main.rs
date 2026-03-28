@@ -1,3 +1,6 @@
+//! Deptool: a simple declarative deployment tool.
+
+mod deploy;
 mod error;
 mod oid;
 mod plan;
@@ -11,6 +14,7 @@ mod testutil;
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
+use std::process::Command;
 
 use bpaf::{Bpaf, Parser};
 use git2::Repository;
@@ -36,6 +40,12 @@ enum HostCmd {
         #[bpaf(positional("STORE"))]
         store: PathBuf,
     },
+}
+
+#[derive(Debug, Clone)]
+enum DeployMode {
+    Local,
+    Remote,
 }
 
 #[derive(Debug, Clone, Bpaf)]
@@ -66,6 +76,12 @@ enum Cmd {
         /// Path to the plan file (default: plan.json).
         #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
         plan: PathBuf,
+        /// Path to the store on the remote host.
+        #[bpaf(long("remote-store"))]
+        remote_store: String,
+        /// Run deptool locally instead of over SSH (for testing).
+        #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote))]
+        mode: DeployMode,
     },
     /// Commands that run on target hosts.
     #[bpaf(command)]
@@ -95,15 +111,30 @@ fn run() -> Result<()> {
             fs::write(&output, json)?;
             eprintln!("Plan written to {}", output.display());
         }
-        Cmd::Apply { plan: plan_path } => {
+        Cmd::Apply {
+            plan: plan_path,
+            remote_store,
+            mode,
+        } => {
             let json = fs::read_to_string(&plan_path)?;
             let plan: plan::Plan = serde_json::from_str(&json)?;
-            for (host, host_plan) in &plan.hosts {
-                eprintln!(
-                    "Would deploy to {host}: {} app(s) to change",
-                    host_plan.apps.len()
-                );
-            }
+            deploy::execute_plan(&plan, |host| match mode {
+                DeployMode::Local => {
+                    let mut cmd =
+                        Command::new(std::env::current_exe().expect("current exe is known"));
+                    cmd.args(["host", "session", &remote_store]);
+                    cmd
+                }
+                DeployMode::Remote => {
+                    // SSH concatenates remote arguments into a single string
+                    // and passes them to the user's login shell. This is safe
+                    // as long as the store path and hostname contain no spaces
+                    // or shell metacharacters, which holds for our setup.
+                    let mut cmd = Command::new("ssh");
+                    cmd.args([&host.0, "deptool", "host", "session", &remote_store]);
+                    cmd
+                }
+            })?;
         }
         Cmd::Host { cmd } => run_host(cmd)?,
     }
@@ -134,7 +165,7 @@ fn run_host(cmd: HostCmd) -> Result<()> {
                 .unwrap_or("(unknown hostname)".into())
                 .trim()
                 .to_string();
-            let hello = protocol::Response::Hello {
+            let hello = protocol::Message::Hello {
                 version: protocol::VERSION.to_string(),
                 hostname,
             };

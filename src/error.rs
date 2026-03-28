@@ -1,3 +1,5 @@
+//! Error type and Result alias.
+
 use std::fmt;
 
 #[derive(Debug)]

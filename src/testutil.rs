@@ -1,3 +1,5 @@
+//! Shared test helpers: temp directories and convenience functions.
+
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};

@@ -1,3 +1,5 @@
+//! Deployment plan: diff the desired config against each host's current state.
+
 use std::collections::BTreeMap;
 use std::fmt;
 
