@@ -6,12 +6,30 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
-    Apply { commit: Oid },
+    Apply {
+        expected_current_commit: Option<Oid>,
+        target_commit: Oid,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Hello { version: String, hostname: String },
-    Applied { commit: Oid },
-    Error { message: String },
+    Hello {
+        version: String,
+        hostname: String,
+    },
+    AppliedApp {
+        app: String,
+        diff: crate::plan::AppDiff,
+    },
+    ApplyComplete {
+        commit: Oid,
+    },
+    Stale {
+        expected_commit: Option<Oid>,
+        actual_commit: Option<Oid>,
+    },
+    Error {
+        message: String,
+    },
 }

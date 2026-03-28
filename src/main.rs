@@ -117,7 +117,8 @@ fn run_host(cmd: HostCmd) -> Result<()> {
             let repo = Repository::open(&store)?;
             let session = session::HostSession::new(repo);
             let request = protocol::Request::Apply {
-                commit: commit.as_str().into(),
+                target_commit: commit.as_str().into(),
+                expected_current_commit: None,
             };
             session.handle_request(request, &mut |response| {
                 eprintln!("{response:?}");
@@ -130,7 +131,7 @@ fn run_host(cmd: HostCmd) -> Result<()> {
             let mut stdout = std::io::stdout().lock();
 
             let hostname = fs::read_to_string("/etc/hostname")
-                .unwrap_or_default()
+                .unwrap_or("(unknown hostname)".into())
                 .trim()
                 .to_string();
             let hello = protocol::Response::Hello {
