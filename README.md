@@ -13,25 +13,24 @@ available on the host.
 Deptool manages _clusters_. A cluster is a set of _hosts_. Deptool manages
 configuration in two layers:
 
- * A _profile_ is a related collection of configuration files, usually for a
-   single application, specialized for a single machine. Profiles are
-   versioned.
- * A _cluster_ is a set of machines, and per machine the profiles that are
-   enabled on them, and the profile versions. The cluster as a whole is
-   versioned too.
+ * An _app_ is a related collection of configuration files, usually for a
+   single application, specialized for a single machine. Apps are versioned.
+ * A _config_ specifies the entire cluster: the set of hosts, and per host
+   the apps that are deployed on them, and the app versions. The config as a
+   whole is versioned too.
 
 Together, this is how you define the desired state of your entire cluster.
 Changes to the desired cluster state are tracked atomically (backed by Git, more
 on that below). Deployment is more fine-grained however. Per machine, Deptool
-compares the set of profiles currently enabled on that machine against the
-desired set. If there is a difference, it aligns the profiles with the desired
-state. Changing (or enabling or disabling) a single profile is atomic, but
-updates to multiple profiles on the same machine are not atomic. This strikes a
+compares the set of apps currently deployed on that machine against the
+desired set. If there is a difference, it aligns the apps with the desired
+state. Changing (or enabling or disabling) a single app is atomic, but
+updates to multiple apps on the same machine are not atomic. This strikes a
 balance between immutability and efficiency. To update one application, we don't
 need to replace the entire world with a modified copy, we only need to touch
-that single profile.
+that single app.
 
-After Deptool enables or updates a profile on a machine, it has the ability to
+After Deptool enables or updates an app on a machine, it has the ability to
 restart or reload an associated systemd service.
 
 ## Push-based

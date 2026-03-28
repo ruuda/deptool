@@ -31,7 +31,7 @@ enum Cmd {
         #[bpaf(positional("STORE"))]
         store: PathBuf,
     },
-    /// Check out a profile for a host from a commit.
+    /// Check out an app for a host from a commit.
     #[bpaf(command)]
     Apply {
         /// Path to the bare Git store.
@@ -43,9 +43,9 @@ enum Cmd {
         /// Host name.
         #[bpaf(positional("HOST"))]
         host: String,
-        /// Profile name.
-        #[bpaf(positional("PROFILE"))]
-        profile: String,
+        /// App name.
+        #[bpaf(positional("APP"))]
+        app: String,
         /// Target directory to check out into.
         #[bpaf(positional("TARGET"))]
         target: PathBuf,
@@ -74,12 +74,12 @@ fn run() -> Result<()> {
             store,
             commit,
             host,
-            profile,
+            app,
             target,
         } => {
             let repo = Repository::open(&store)?;
             let oid = git2::Oid::from_str(&commit)?;
-            store::checkout_profile(&repo, oid, &host, &profile, &target)?;
+            store::checkout_app(&repo, oid, &host, &app, &target)?;
         }
     }
 

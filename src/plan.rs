@@ -1,10 +1,10 @@
-use std::fmt;
 use std::collections::BTreeMap;
+use std::fmt;
 
 use git2::Repository;
 
 use crate::error::Result;
-use crate::store::get_host_profiles;
+use crate::store::get_host_apps;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Hostname(pub String);
@@ -22,7 +22,7 @@ impl fmt::Display for Hostname {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ProfileDiff {
+pub enum AppDiff {
     Add {
         new_tree: git2::Oid,
     },
@@ -35,7 +35,7 @@ pub enum ProfileDiff {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct HostPlan {
-    pub profiles: BTreeMap<String, ProfileDiff>,
+    pub apps: BTreeMap<String, AppDiff>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,11 +43,11 @@ pub struct Plan {
     pub hosts: BTreeMap<Hostname, HostPlan>,
 }
 
-/// Diff two sets of profile tree oids for a single host.
-pub fn diff_profiles(
+/// Diff two sets of app tree oids for a single host.
+pub fn diff_apps(
     current: &BTreeMap<String, git2::Oid>,
     target: &BTreeMap<String, git2::Oid>,
-) -> BTreeMap<String, ProfileDiff> {
+) -> BTreeMap<String, AppDiff> {
     let mut changes = BTreeMap::new();
 
     for (name, target_oid) in target {
@@ -55,7 +55,7 @@ pub fn diff_profiles(
             None => {
                 changes.insert(
                     name.clone(),
-                    ProfileDiff::Add {
+                    AppDiff::Add {
                         new_tree: *target_oid,
                     },
                 );
@@ -63,7 +63,7 @@ pub fn diff_profiles(
             Some(cur_oid) if cur_oid != target_oid => {
                 changes.insert(
                     name.clone(),
-                    ProfileDiff::Update {
+                    AppDiff::Update {
                         old_tree: *cur_oid,
                         new_tree: *target_oid,
                     },
@@ -75,7 +75,7 @@ pub fn diff_profiles(
 
     for name in current.keys() {
         if !target.contains_key(name) {
-            changes.insert(name.clone(), ProfileDiff::Remove);
+            changes.insert(name.clone(), AppDiff::Remove);
         }
     }
 
@@ -98,20 +98,20 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        let target_profiles = get_host_profiles(repo, &main_tree, &host.0)?;
+        let target_apps = get_host_apps(repo, &main_tree, &host.0)?;
 
-        let current_profiles = match repo.find_reference(&format!("refs/remotes/{host}/current")) {
+        let current_apps = match repo.find_reference(&format!("refs/remotes/{host}/current")) {
             Err(_) => BTreeMap::new(),
             Ok(r) => {
                 let tree = r.peel_to_commit()?.tree()?;
-                get_host_profiles(repo, &tree, &host.0)?
+                get_host_apps(repo, &tree, &host.0)?
             }
         };
 
-        let profiles = diff_profiles(&current_profiles, &target_profiles);
+        let apps = diff_apps(&current_apps, &target_apps);
 
-        if !profiles.is_empty() {
-            hosts.insert(host, HostPlan { profiles });
+        if !apps.is_empty() {
+            hosts.insert(host, HostPlan { apps });
         }
     }
 
@@ -128,10 +128,10 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::store::{RefUpdate, set_ref};
-    use crate::testutil::{commit_dir, TempDir};
+    use crate::testutil::{TempDir, commit_dir};
 
     #[test]
-    fn plan_shows_all_profiles_as_add_for_new_host() -> Result<()> {
+    fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
         let input = TempDir::new("input");
         fs::create_dir_all(input.path().join("web1/nginx"))?;
         fs::write(input.path().join("web1/nginx/conf"), "a")?;
@@ -144,15 +144,15 @@ mod tests {
 
         let plan = make_plan(&repo)?;
         assert_eq!(plan.hosts.len(), 1);
-        let profiles = &plan.hosts[&"web1".into()].profiles;
-        assert_eq!(profiles.len(), 2);
-        assert!(matches!(profiles["rofld"], ProfileDiff::Add { .. }));
-        assert!(matches!(profiles["nginx"], ProfileDiff::Add { .. }));
+        let apps = &plan.hosts[&"web1".into()].apps;
+        assert_eq!(apps.len(), 2);
+        assert!(matches!(apps["rofld"], AppDiff::Add { .. }));
+        assert!(matches!(apps["nginx"], AppDiff::Add { .. }));
         Ok(())
     }
 
     #[test]
-    fn plan_detects_updated_and_unchanged_profiles() -> Result<()> {
+    fn plan_detects_updated_and_unchanged_apps() -> Result<()> {
         let input = TempDir::new("input");
         fs::create_dir_all(input.path().join("web1/nginx"))?;
         fs::write(input.path().join("web1/nginx/conf"), "v1")?;
@@ -163,20 +163,25 @@ mod tests {
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
 
-        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
+        set_ref(
+            &repo,
+            "refs/remotes/web1/current",
+            c1,
+            RefUpdate::SetCurrent,
+        )?;
 
         fs::write(input.path().join("web1/nginx/conf"), "v2")?;
         commit_dir(&repo, input.path())?;
 
         let plan = make_plan(&repo)?;
-        let profiles = &plan.hosts[&"web1".into()].profiles;
-        assert_eq!(profiles.len(), 1);
-        assert!(matches!(profiles["nginx"], ProfileDiff::Update { .. }));
+        let apps = &plan.hosts[&"web1".into()].apps;
+        assert_eq!(apps.len(), 1);
+        assert!(matches!(apps["nginx"], AppDiff::Update { .. }));
         Ok(())
     }
 
     #[test]
-    fn plan_detects_removed_profiles() -> Result<()> {
+    fn plan_detects_removed_apps() -> Result<()> {
         let input = TempDir::new("input");
         fs::create_dir_all(input.path().join("web1/nginx"))?;
         fs::write(input.path().join("web1/nginx/conf"), "a")?;
@@ -186,15 +191,20 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
+        set_ref(
+            &repo,
+            "refs/remotes/web1/current",
+            c1,
+            RefUpdate::SetCurrent,
+        )?;
 
         fs::remove_dir_all(input.path().join("web1/rofld"))?;
         commit_dir(&repo, input.path())?;
 
         let plan = make_plan(&repo)?;
         assert_eq!(
-            plan.hosts[&"web1".into()].profiles,
-            BTreeMap::from([("rofld".into(), ProfileDiff::Remove)]),
+            plan.hosts[&"web1".into()].apps,
+            BTreeMap::from([("rofld".into(), AppDiff::Remove)]),
         );
         Ok(())
     }
@@ -208,7 +218,12 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
+        set_ref(
+            &repo,
+            "refs/remotes/web1/current",
+            c1,
+            RefUpdate::SetCurrent,
+        )?;
 
         fs::create_dir_all(input.path().join("web2/rofld"))?;
         fs::write(input.path().join("web2/rofld/conf"), "b")?;
@@ -216,9 +231,9 @@ mod tests {
 
         let plan = make_plan(&repo)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
-        let profiles = &plan.hosts[&"web2".into()].profiles;
-        assert_eq!(profiles.len(), 1);
-        assert!(matches!(profiles["rofld"], ProfileDiff::Add { .. }));
+        let apps = &plan.hosts[&"web2".into()].apps;
+        assert_eq!(apps.len(), 1);
+        assert!(matches!(apps["rofld"], AppDiff::Add { .. }));
         Ok(())
     }
 
@@ -231,7 +246,12 @@ mod tests {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
         let c1 = commit_dir(&repo, input.path())?;
-        set_ref(&repo, "refs/remotes/web1/current", c1, RefUpdate::SetCurrent)?;
+        set_ref(
+            &repo,
+            "refs/remotes/web1/current",
+            c1,
+            RefUpdate::SetCurrent,
+        )?;
 
         commit_dir(&repo, input.path())?;
 

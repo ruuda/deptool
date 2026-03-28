@@ -5,7 +5,7 @@ use std::path::Path;
 use git2::Repository;
 
 use crate::error::{Error, Result};
-use crate::plan::ProfileDiff;
+use crate::plan::AppDiff;
 
 /// Recursively build a Git tree from a directory on disk.
 pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
@@ -50,23 +50,23 @@ pub fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> 
         Some("refs/heads/main"),
         &sig,
         &sig,
-        "Update cluster state",
+        "Update config",
         &tree,
         &parents,
     )?)
 }
 
-/// Check out a subtree (host/profile) from a commit into a target directory.
-pub fn checkout_profile(
+/// Check out a subtree (host/app) from a commit into a target directory.
+pub fn checkout_app(
     repo: &Repository,
     commit_oid: git2::Oid,
     host: &str,
-    profile: &str,
+    app: &str,
     target: &Path,
 ) -> Result<()> {
     let commit = repo.find_commit(commit_oid)?;
     let tree = commit.tree()?;
-    let entry = tree.get_path(Path::new(host).join(profile).as_ref())?;
+    let entry = tree.get_path(Path::new(host).join(app).as_ref())?;
     let subtree = repo.find_tree(entry.id())?;
     let mut cb = git2::build::CheckoutBuilder::new();
     cb.target_dir(target).force();
@@ -100,19 +100,19 @@ pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
     entries
 }
 
-/// Get the profile tree oids for a host from a cluster tree.
-pub fn get_host_profiles(
+/// Get the app tree oids for a host from a config tree.
+pub fn get_host_apps(
     repo: &Repository,
-    cluster_tree: &git2::Tree,
+    config_tree: &git2::Tree,
     host: &str,
 ) -> Result<BTreeMap<String, git2::Oid>> {
-    match cluster_tree.get_name(host) {
+    match config_tree.get_name(host) {
         Some(e) => Ok(tree_entries(&repo.find_tree(e.id())?)),
         None => Ok(BTreeMap::new()),
     }
 }
 
-/// Apply a deployment: set target ref, check out changed profiles, set current ref.
+/// Apply a deployment: set target ref, check out changed apps, set current ref.
 ///
 /// This runs on the target host. It compares `refs/heads/current` against
 /// `expected_current` (None for first deploy) to ensure the plan is not stale,
@@ -138,30 +138,35 @@ pub fn apply(
     set_ref(repo, "refs/heads/target", commit_oid, RefUpdate::SetTarget)?;
 
     let target_tree = repo.find_commit(commit_oid)?.tree()?;
-    let target_profiles = get_host_profiles(repo, &target_tree, host)?;
+    let target_apps = get_host_apps(repo, &target_tree, host)?;
 
-    let current_profiles = match actual_current {
+    let current_apps = match actual_current {
         None => BTreeMap::new(),
         Some(oid) => {
             let tree = repo.find_commit(oid)?.tree()?;
-            get_host_profiles(repo, &tree, host)?
+            get_host_apps(repo, &tree, host)?
         }
     };
 
-    let diff = crate::plan::diff_profiles(&current_profiles, &target_profiles);
+    let diff = crate::plan::diff_apps(&current_apps, &target_apps);
 
-    for (profile, change) in &diff {
+    for (app, change) in &diff {
         match change {
-            ProfileDiff::Add { .. } | ProfileDiff::Update { .. } => {
-                checkout_profile(repo, commit_oid, host, profile, target_dir)?;
+            AppDiff::Add { .. } | AppDiff::Update { .. } => {
+                checkout_app(repo, commit_oid, host, app, target_dir)?;
             }
-            ProfileDiff::Remove => {
-                // TODO: Remove the profile directory.
+            AppDiff::Remove => {
+                // TODO: Remove the app directory.
             }
         }
     }
 
-    set_ref(repo, "refs/heads/current", commit_oid, RefUpdate::SetCurrent)?;
+    set_ref(
+        repo,
+        "refs/heads/current",
+        commit_oid,
+        RefUpdate::SetCurrent,
+    )?;
     Ok(())
 }
 
@@ -172,7 +177,7 @@ mod tests {
     use git2::Repository;
 
     use super::*;
-    use crate::testutil::{commit_dir, TempDir};
+    use crate::testutil::{TempDir, commit_dir};
 
     fn read_dir_recursive(root: &Path, dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         let mut result = Vec::new();
@@ -198,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_after_commit_reproduces_the_profile_files() -> Result<()> {
+    fn checkout_after_commit_reproduces_the_app_files() -> Result<()> {
         let input = TempDir::new("input");
         fs::create_dir_all(input.path().join("web1/nginx/etc/nginx"))?;
         fs::write(
@@ -218,7 +223,7 @@ mod tests {
         let commit_oid = commit_tree(&repo, tree_oid)?;
 
         let output = TempDir::new("output");
-        checkout_profile(&repo, commit_oid, "web1", "nginx", output.path())?;
+        checkout_app(&repo, commit_oid, "web1", "nginx", output.path())?;
 
         let out = output.path();
         let expected = input.path().join("web1/nginx");
