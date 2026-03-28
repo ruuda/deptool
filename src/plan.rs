@@ -25,7 +25,7 @@ impl fmt::Display for Hostname {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
     Add { new_tree: Oid },
     Remove,
@@ -134,26 +134,22 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::fs;
 
     use git2::Repository;
 
     use super::*;
     use crate::error::Result;
     use crate::store::{RefUpdate, set_ref};
-    use crate::testutil::{TempDir, commit_dir};
+    use crate::testutil::{TempDir, commit_files};
 
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "a")?;
-        fs::create_dir_all(input.path().join("web1/rofld"))?;
-        fs::write(input.path().join("web1/rofld/conf"), "b")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        commit_dir(&repo, input.path())?;
+        commit_files(
+            &repo,
+            &[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")],
+        )?;
 
         let plan = make_plan(&repo)?;
         assert_eq!(plan.hosts.len(), 1);
@@ -166,16 +162,12 @@ mod tests {
 
     #[test]
     fn plan_detects_updated_and_unchanged_apps() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "v1")?;
-        fs::create_dir_all(input.path().join("web1/rofld"))?;
-        fs::write(input.path().join("web1/rofld/conf"), "v1")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_dir(&repo, input.path())?;
-
+        let c1 = commit_files(
+            &repo,
+            &[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")],
+        )?;
         set_ref(
             &repo,
             "refs/remotes/web1/current",
@@ -183,8 +175,10 @@ mod tests {
             RefUpdate::SetCurrent,
         )?;
 
-        fs::write(input.path().join("web1/nginx/conf"), "v2")?;
-        commit_dir(&repo, input.path())?;
+        commit_files(
+            &repo,
+            &[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")],
+        )?;
 
         let plan = make_plan(&repo)?;
         let apps = &plan.hosts[&"web1".into()].apps;
@@ -195,15 +189,12 @@ mod tests {
 
     #[test]
     fn plan_detects_removed_apps() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "a")?;
-        fs::create_dir_all(input.path().join("web1/rofld"))?;
-        fs::write(input.path().join("web1/rofld/conf"), "b")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_dir(&repo, input.path())?;
+        let c1 = commit_files(
+            &repo,
+            &[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")],
+        )?;
         set_ref(
             &repo,
             "refs/remotes/web1/current",
@@ -211,8 +202,7 @@ mod tests {
             RefUpdate::SetCurrent,
         )?;
 
-        fs::remove_dir_all(input.path().join("web1/rofld"))?;
-        commit_dir(&repo, input.path())?;
+        commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
 
         let plan = make_plan(&repo)?;
         assert_eq!(
@@ -224,13 +214,9 @@ mod tests {
 
     #[test]
     fn plan_includes_new_host_alongside_up_to_date_host() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "a")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_dir(&repo, input.path())?;
+        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
         set_ref(
             &repo,
             "refs/remotes/web1/current",
@@ -238,9 +224,10 @@ mod tests {
             RefUpdate::SetCurrent,
         )?;
 
-        fs::create_dir_all(input.path().join("web2/rofld"))?;
-        fs::write(input.path().join("web2/rofld/conf"), "b")?;
-        commit_dir(&repo, input.path())?;
+        commit_files(
+            &repo,
+            &[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")],
+        )?;
 
         let plan = make_plan(&repo)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
@@ -252,13 +239,9 @@ mod tests {
 
     #[test]
     fn plan_omits_hosts_that_are_up_to_date() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "a")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_dir(&repo, input.path())?;
+        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
         set_ref(
             &repo,
             "refs/remotes/web1/current",
@@ -266,7 +249,7 @@ mod tests {
             RefUpdate::SetCurrent,
         )?;
 
-        commit_dir(&repo, input.path())?;
+        commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
 
         let plan = make_plan(&repo)?;
         assert!(plan.hosts.is_empty());

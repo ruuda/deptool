@@ -118,7 +118,7 @@ fn run() -> Result<()> {
         } => {
             let json = fs::read_to_string(&plan_path)?;
             let plan: plan::Plan = serde_json::from_str(&json)?;
-            deploy::execute_plan(&plan, |host| match mode {
+            let make_command = |host: &plan::Hostname| match mode {
                 DeployMode::Local => {
                     let mut cmd =
                         Command::new(std::env::current_exe().expect("current exe is known"));
@@ -134,7 +134,12 @@ fn run() -> Result<()> {
                     cmd.args([&host.0, "deptool", "host", "session", &remote_store]);
                     cmd
                 }
-            })?;
+            };
+            deploy::execute_plan(
+                &plan,
+                |host| Ok(Box::new(deploy::RemoteSession::new(make_command(host))?)),
+                |host, message| eprintln!("{host}: {message:?}"),
+            )?;
         }
         Cmd::Host { cmd } => run_host(cmd)?,
     }
@@ -165,7 +170,7 @@ fn run_host(cmd: HostCmd) -> Result<()> {
                 .unwrap_or("(unknown hostname)".into())
                 .trim()
                 .to_string();
-            let hello = protocol::Message::Hello {
+            let hello = protocol::Hello {
                 version: protocol::VERSION.to_string(),
                 hostname,
             };

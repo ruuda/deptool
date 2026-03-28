@@ -179,7 +179,7 @@ mod tests {
     use git2::Repository;
 
     use super::*;
-    use crate::testutil::{TempDir, commit_dir};
+    use crate::testutil::{TempDir, commit_files};
 
     fn read_dir_recursive(root: &Path, dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
         let mut result = Vec::new();
@@ -238,19 +238,11 @@ mod tests {
 
     #[test]
     fn commit_appends_to_main_branch() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/app"))?;
-        fs::write(input.path().join("web1/app/config"), "v1")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
 
-        let t1 = build_tree(&repo, input.path())?;
-        let c1 = commit_tree(&repo, t1)?;
-
-        fs::write(input.path().join("web1/app/config"), "v2")?;
-        let t2 = build_tree(&repo, input.path())?;
-        let c2 = commit_tree(&repo, t2)?;
+        let c1 = commit_files(&repo, &[("web1/app/config", b"v1")])?;
+        let c2 = commit_files(&repo, &[("web1/app/config", b"v2")])?;
 
         let commit = repo.find_commit(c2)?;
         assert_eq!(commit.parent_count(), 1);
@@ -260,13 +252,9 @@ mod tests {
 
     #[test]
     fn apply_sets_target_and_current_refs() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx"))?;
-        fs::write(input.path().join("web1/nginx/conf"), "v1")?;
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_dir(&repo, input.path())?;
+        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"v1")])?;
 
         let output = TempDir::new("output");
         apply(&repo, c1, None, "web1", output.path())?;
@@ -287,19 +275,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "Stale plan")]
     fn apply_panics_on_stale_expected_current() {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx")).unwrap();
-        fs::write(input.path().join("web1/nginx/conf"), "v1").unwrap();
-
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path()).unwrap();
-        let c1 = commit_dir(&repo, input.path()).unwrap();
+        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"v1")]).unwrap();
 
         let output = TempDir::new("output");
         apply(&repo, c1, None, "web1", output.path()).unwrap();
 
-        fs::write(input.path().join("web1/nginx/conf"), "v2").unwrap();
-        let c2 = commit_dir(&repo, input.path()).unwrap();
+        let c2 = commit_files(&repo, &[("web1/nginx/conf", b"v2")]).unwrap();
 
         let stale_oid = git2::Oid::from_str("0000000000000000000000000000000000000000").unwrap();
         apply(&repo, c2, Some(stale_oid), "web1", output.path()).unwrap();

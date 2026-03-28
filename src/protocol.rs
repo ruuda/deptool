@@ -6,7 +6,7 @@ use crate::oid::Oid;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
     Apply {
         expected_current_commit: Option<Oid>,
@@ -14,12 +14,14 @@ pub enum Request {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Hello {
+    pub version: String,
+    pub hostname: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
-    Hello {
-        version: String,
-        hostname: String,
-    },
     AppliedApp {
         app: String,
         diff: crate::plan::AppDiff,

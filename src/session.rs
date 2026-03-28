@@ -50,11 +50,10 @@ mod tests {
     use super::*;
     use crate::testutil::TempDir;
 
-    fn test_session() -> HostSession {
+    fn test_session() -> (HostSession, TempDir) {
         let store = TempDir::new("store");
         let repo = Repository::init_bare(store.path()).expect("repo is created");
-        std::mem::forget(store);
-        HostSession::new(repo)
+        (HostSession::new(repo), store)
     }
 
     fn collect(session: &HostSession, request: Request) -> Vec<Message> {
@@ -65,7 +64,7 @@ mod tests {
 
     #[test]
     fn apply_reports_stale_when_expected_current_mismatches() {
-        let session = test_session();
+        let (session, _store) = test_session();
         let commit: Oid = "0000000000000000000000000000000000000000".into();
         let fake_current: Oid = "1111111111111111111111111111111111111111".into();
         let req = Request::Apply {
@@ -79,7 +78,7 @@ mod tests {
 
     #[test]
     fn apply_emit_messages_applied_with_same_commit() {
-        let session = test_session();
+        let (session, _store) = test_session();
         let commit = Oid::from(
             git2::Oid::from_str("0000000000000000000000000000000000000000").expect("oid is valid"),
         );
