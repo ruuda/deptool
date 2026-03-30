@@ -1,0 +1,84 @@
+# Applying an App
+
+This document describes how deptool materializes an app on a target host.
+
+## On-disk layout
+
+    /var/lib/deptool/apps/<app>/<oid-prefix>/    checked-out app tree
+    /var/lib/deptool/apps/<app>/current          symlink to <oid-prefix>
+
+The oid prefix is the first 10 hex digits of the commit oid. Each checkout
+is an immutable directory. We never mutate a checkout in place. Old
+checkouts are small (just config files) and are kept indefinitely.
+
+A typical app directory:
+
+    /var/lib/deptool/apps/nginx/current/
+    ├── nginx.service
+    ├── nginx.conf
+    └── mime.types
+
+Everything the app needs — config files, systemd units, environment files —
+lives in one flat (or shallow) directory. A human operator can `ls` and
+`readlink current` to understand the state of any app.
+
+## Deploy flow for a changed app
+
+When the plan indicates an app has changed (Add or Update):
+
+ 1. Check out the new app tree into `<oid-prefix>/`. If the directory
+    already exists (e.g. during a rollback or interrupted deploy), remove
+    it first and re-checkout. Config is small so this is fast, and it
+    avoids trusting a potentially incomplete checkout.
+ 2. Atomically swap the `current` symlink: create a temp symlink, then
+    `rename(2)` it over `current`.
+ 3. Reconcile systemd unit symlinks (see below).
+ 4. `systemctl daemon-reload` + `systemctl restart <unit>`.
+
+For apps that did not change: do nothing. No checkout, no restart.
+Files keep their original mtime/ctime, which aids debugging.
+
+## Systemd units
+
+Systemd expects unit files in `/etc/systemd/system/`. Deptool manages this
+with symlinks:
+
+    /etc/systemd/system/nginx.service -> /var/lib/deptool/apps/nginx/current/nginx.service
+
+Unit files reference config through the `current` symlink path:
+
+    [Service]
+    BindPaths=/var/lib/deptool/apps/nginx/current/nginx.conf:/etc/nginx/nginx.conf
+    EnvironmentFile=/var/lib/deptool/apps/nginx/current/env
+
+Because bind mounts resolve symlinks at mount time, the running service
+keeps seeing the old files until it is restarted. The restart is what picks
+up the new config.
+
+Deptool identifies its own symlinks in `/etc/systemd/system/` by checking
+whether they point into `/var/lib/deptool/`. This makes the operation
+convergent: it does not matter what state the system was in before. Crashed
+mid-deploy, manually tampered with, fresh boot — the result is the same.
+
+After all per-app checkouts and symlink swaps are done, deptool reconciles
+unit symlinks once for the entire host:
+
+ 1. Scan `/etc/systemd/system/` for symlinks pointing into
+    `/var/lib/deptool/`. This is the set of currently installed units.
+ 2. Collect all unit files across all deployed apps (everything under
+    `/var/lib/deptool/apps/*/current/`). This is the desired set.
+ 3. Create symlinks for units in the desired set but not installed.
+    Remove symlinks for units installed but not in the desired set.
+
+This single pass handles added, updated, and removed apps uniformly.
+After reconciliation, `systemctl daemon-reload`. Then restart the units
+for apps that changed. Deptool always restarts, never just reloads —
+restart is simpler, safer, and subsumes reload.
+
+## Reboot resilience
+
+Nothing is ephemeral. The `current` symlinks and the `/etc/systemd/system/`
+symlinks are persistent filesystem objects. After a reboot, systemd finds
+the unit symlinks, resolves them through `current` to the checked-out
+version, and starts services normally. No boot-time restore service is
+needed.
