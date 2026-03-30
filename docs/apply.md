@@ -82,3 +82,13 @@ symlinks are persistent filesystem objects. After a reboot, systemd finds
 the unit symlinks, resolves them through `current` to the checked-out
 version, and starts services normally. No boot-time restore service is
 needed.
+
+## Convergence
+
+Applying a commit is idempotent. Regardless of what is currently on disk, the
+system will be put in the target state. If the deployment is interrupted
+mid-way, for example due to a power outage, the deployment is safe to restart.
+An unfinished deployment is also detectable, and due to the use of symlinks per
+app, app deployments are atomic (even if the state of the host itself is not),
+so even after an interrupted deployment, applications do not observe torn writes
+in their configuration.

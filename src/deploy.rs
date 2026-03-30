@@ -15,6 +15,7 @@ pub trait Connection {
 // TODO: Maybe we should rename "session" to "agent" after all. Then this can be
 // AgentSession or something, the thing on the controller/initiator/operator
 // side that enables us to talk to the agent.
+// TODO: This struct needs a docstring that documents its purpose.
 pub struct RemoteSession {
     // Drop order is declaration order: close stdin first so the child can
     // finish, then close our reader, then reap the child process.

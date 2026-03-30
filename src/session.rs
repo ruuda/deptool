@@ -72,35 +72,10 @@ impl HostSession {
                     return;
                 }
 
-                let commit_git_oid =
-                    match git2::Oid::from_str(&target_commit.to_string()) {
-                        Ok(oid) => oid,
-                        Err(e) => {
-                            emit_message(Message::Error {
-                                message: format!("invalid commit oid: {e}"),
-                            });
-                            return;
-                        }
-                    };
-
-                let actual_current_git_oid = actual_current_commit
-                    .as_ref()
-                    .map(|oid| git2::Oid::from_str(&oid.to_string()))
-                    .transpose();
-                let actual_current_git_oid = match actual_current_git_oid {
-                    Ok(oid) => oid,
-                    Err(e) => {
-                        emit_message(Message::Error {
-                            message: format!("invalid current oid: {e}"),
-                        });
-                        return;
-                    }
-                };
-
                 let result = crate::apply::apply_host(
                     &self.repo,
-                    commit_git_oid,
-                    actual_current_git_oid,
+                    git2::Oid::from(&target_commit),
+                    actual_current_commit.map(git2::Oid::from),
                     &self.hostname,
                     &self.apps_dir,
                     &self.unit_dir,
@@ -112,24 +87,29 @@ impl HostSession {
                     },
                 );
 
-                match result {
-                    Ok(changed_units) => {
-                        if !changed_units.is_empty() {
-                            if let Err(e) = (self.on_units_changed)(&changed_units) {
-                                emit_message(Message::Error {
-                                    message: format!("systemd restart failed: {e}"),
-                                });
-                                return;
-                            }
-                        }
-                        emit_message(Message::ApplyComplete {
-                            commit: target_commit,
-                        });
-                    }
-                    Err(e) => {
+                let changed_units = match result {
+                    Ok(units) => units,
+                    Err(err) => {
                         emit_message(Message::Error {
-                            message: format!("apply failed: {e}"),
+                            message: format!("apply failed: {err}"),
                         });
+                        return;
+                    }
+                };
+
+                if !changed_units.is_empty() {
+                    match (self.on_units_changed)(&changed_units) {
+                        Ok(()) => {
+                            // TODO: Emit message about restart.
+                            // Should we do it unconditionally to simplify the
+                            // protocol, so there is always a message?
+                            // We can return a list of restarted units, which may be empty.
+                        }
+                        Err(err) => {
+                            emit_message(Message::Error {
+                                message: format!("systemd restart failed: {err}"),
+                            });
+                        }
                     }
                 }
             }

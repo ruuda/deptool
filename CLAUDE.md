@@ -26,3 +26,4 @@
  - Testing things with side effects is hard. Separating IO from pure parts usually makes things easier to test, and it makes the tests faster and mores table.
  - In assertions and `.expect()`, the message is the thing you expect to be true.
  - Avoid the boolean parameter trap. At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
+ - Rust doc comments should have a 1-line summary that fits in 80-ish columns, and then optionally a body separated from the summary by a blank line.

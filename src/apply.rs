@@ -11,9 +11,11 @@ use crate::store;
 
 const OID_PREFIX_LEN: usize = 10;
 
-/// Truncate a git2::Oid to a short prefix for use in directory names.
+/// Truncate an oid to a short prefix for use in directory names.
 fn oid_prefix(oid: git2::Oid) -> String {
-    oid.to_string()[..OID_PREFIX_LEN].to_string()
+    let mut buf = oid.to_string();
+    buf.truncate(OID_PREFIX_LEN);
+    buf
 }
 
 /// Check out an app and atomically swap the `current` symlink.
@@ -38,16 +40,16 @@ pub fn apply_app(
         fs::remove_dir_all(&version_dir)?;
     }
     fs::create_dir_all(&version_dir)?;
-    crate::store::checkout_app(repo, commit_oid, host, app, &version_dir)?;
+    store::checkout_app(repo, commit_oid, host, app, &version_dir)?;
 
     // Atomic symlink swap: create temp symlink, rename over `current`.
     let current = app_dir.join("current");
-    let tmp = app_dir.join(".current.tmp");
-    if tmp.exists() {
-        fs::remove_file(&tmp)?;
+    let next = app_dir.join("next");
+    if next.exists() {
+        fs::remove_file(&next)?;
     }
-    unix_fs::symlink(&prefix, &tmp)?;
-    fs::rename(&tmp, &current)?;
+    unix_fs::symlink(&prefix, &next)?;
+    fs::rename(&next, &current)?;
 
     Ok(())
 }
@@ -66,6 +68,8 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// Sets the target ref, diffs current vs target apps, checks out or removes
 /// each changed app, reconciles unit symlinks, and sets the current ref.
 /// Calls `on_app` for each changed app. Returns the list of changed unit names.
+/// TODO: This return type is confusing, you'd expect apps, not systemd units,
+/// let's wrap this in a struct to clarify.
 pub fn apply_host(
     repo: &git2::Repository,
     commit_oid: git2::Oid,
@@ -115,6 +119,10 @@ pub fn apply_host(
 /// Collects all unit files from `<apps_dir>/*/current/`. Creates missing
 /// symlinks and removes stale ones. Returns the list of unit names that
 /// were added or removed (i.e. units that need daemon-reload + restart).
+/// TODO: The return value here is not very useful. In the end we want to know
+/// which units to restart, but we return removed units, and e.g. timer units
+/// or oneshot units should not be restarted. We need to revisit this idea of
+/// restarting units, probably we do need to configure something.
 pub fn reconcile_units(apps_dir: &Path, unit_dir: &Path) -> Result<Vec<String>> {
     let mut changed = Vec::new();
 
@@ -124,7 +132,6 @@ pub fn reconcile_units(apps_dir: &Path, unit_dir: &Path) -> Result<Vec<String>> 
     // Actual: symlinks in unit_dir that point into apps_dir.
     let actual = collect_actual_units(apps_dir, unit_dir)?;
 
-    // Remove stale symlinks.
     for name in actual.keys() {
         if !desired.contains_key(name) {
             fs::remove_file(unit_dir.join(name))?;
@@ -132,7 +139,6 @@ pub fn reconcile_units(apps_dir: &Path, unit_dir: &Path) -> Result<Vec<String>> 
         }
     }
 
-    // Create or update symlinks.
     for (name, desired_target) in &desired {
         let needs_update = match actual.get(name) {
             None => true,
@@ -152,6 +158,7 @@ pub fn reconcile_units(apps_dir: &Path, unit_dir: &Path) -> Result<Vec<String>> 
 }
 
 /// Collect desired unit files from all apps' `current/` directories.
+///
 /// Returns a map from unit filename to the symlink target path.
 fn collect_desired_units(apps_dir: &Path) -> Result<BTreeMap<String, std::path::PathBuf>> {
     let mut units = BTreeMap::new();
@@ -170,10 +177,14 @@ fn collect_desired_units(apps_dir: &Path) -> Result<BTreeMap<String, std::path::
         }
         let dir_entries = match fs::read_dir(&current) {
             Ok(entries) => entries,
+            // TODO: Why is it ok to ignore this error? And if we do, why do we
+            // need an explicit `exists()` check above?
             Err(_) => continue,
         };
         for file in dir_entries {
             let file = file?;
+            // TODO: The conversion should not be lossy, if there are bytes in
+            // the path that make the conversion fail we should report an error.
             let name = file.file_name().to_string_lossy().to_string();
             if is_systemd_unit(&name) {
                 units.insert(name, file.path());
@@ -196,6 +207,7 @@ fn collect_actual_units(
     let mut units = BTreeMap::new();
     let apps_canonical = match apps_dir.canonicalize() {
         Ok(p) => p,
+        // TODO: Why is it ok to return empty map when the apps dir cannot be canonicalized?
         Err(_) => return Ok(units),
     };
 
@@ -212,6 +224,11 @@ fn collect_actual_units(
             continue;
         }
         let target = fs::read_link(&path)?;
+        // TODO: This below is too generic. We can just pick how we make our
+        // symlinks, and let's just make our symlinks absolute, then we do not
+        // need to worry about relative symlinks and canonicalization. Don't
+        // solve problems you don't have.
+
         // Resolve relative symlinks against unit_dir, but don't canonicalize
         // (the target may not exist).
         let resolved = if target.is_absolute() {
@@ -241,6 +258,9 @@ fn collect_actual_units(
     Ok(units)
 }
 
+// TODO: This feels fragile, what if there are files named like this in the apps
+// dir that are there for different reasons. Let's make subdirs in the apps dir
+// after all, so store path `<host>/<app>/systemd/<unitfile>`.
 fn is_systemd_unit(name: &str) -> bool {
     let extensions = [".service", ".timer", ".socket", ".path", ".mount"];
     extensions.iter().any(|ext| name.ends_with(ext))
@@ -288,6 +308,10 @@ mod tests {
 
         apply_app(&repo, c1, "web1", "nginx", apps.path())?;
 
+        // TODO: Better to assert the full contents of the dir. Similar to the
+        // args for commit_files, we can have one function that takes a slice of
+        // path name and expected contents. We can put that in testutil and
+        // reuse it across all tests where it's useful.
         assert!(!corrupt_dir.join("garbage").exists(), "old file is gone");
         let contents = fs::read_to_string(corrupt_dir.join("nginx.conf"))?;
         assert_eq!(contents, "v1");
@@ -296,22 +320,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_app_swaps_symlink_atomically_on_update() -> Result<()> {
+    fn apply_app_swaps_symlink_on_update() -> Result<()> {
         let store = TempDir::new("store");
         let repo = git2::Repository::init_bare(store.path())?;
         let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
         let c2 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v2")])?;
 
         let apps = TempDir::new("apps");
-        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
-        apply_app(&repo, c2, "web1", "nginx", apps.path())?;
-
         let current = apps.path().join("nginx/current");
+
+        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
-        assert_eq!(
-            target.to_str().expect("target is utf-8"),
-            oid_prefix(c2),
-        );
+        assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
+
+        apply_app(&repo, c2, "web1", "nginx", apps.path())?;
+        let target = fs::read_link(&current)?;
+        assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
         // Both versions still exist on disk.
         assert!(apps.path().join("nginx").join(oid_prefix(c1)).exists());
@@ -336,6 +360,7 @@ mod tests {
         Ok(())
     }
 
+    // TODO: Wtf were you smoking claude how is this an idempotency test.
     #[test]
     fn remove_app_is_idempotent() -> Result<()> {
         let apps = TempDir::new("apps");
@@ -387,6 +412,8 @@ mod tests {
         Ok(())
     }
 
+    // TODO: This is no longer needed when we change the convention to be that
+    // systemd units go in the `systemd` subdir of the app dir.
     #[test]
     fn reconcile_ignores_non_unit_files() -> Result<()> {
         let apps = TempDir::new("apps");
@@ -404,7 +431,7 @@ mod tests {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
-        // A symlink that doesn't point into apps_dir — not ours.
+        // A symlink that doesn't point into apps_dir, not ours.
         unix_fs::symlink("/usr/lib/systemd/system/sshd.service", units.path().join("sshd.service"))?;
 
         let changed = reconcile_units(apps.path(), units.path())?;
@@ -415,16 +442,17 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_is_convergent() -> Result<()> {
+    fn reconcile_is_idempotent() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         setup_app(apps.path(), "nginx", &["nginx.service"]);
 
         reconcile_units(apps.path(), units.path())?;
-        // Running again with no changes returns empty.
-        let changed = reconcile_units(apps.path(), units.path())?;
 
+        // The second time there are no changes.
+        let changed = reconcile_units(apps.path(), units.path())?;
         assert!(changed.is_empty());
+
         Ok(())
     }
 
@@ -436,6 +464,8 @@ mod tests {
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
+        // TODO(claude): remember to name non-obvious args. What does the None
+        // mean, what is this no-op closure?
         apply_host(&repo, c1, None, "web1", apps.path(), units.path(), |_, _| {})?;
 
         let current = repo.find_reference("refs/heads/current")?.peel_to_commit()?.id();

@@ -8,9 +8,25 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Oid(String);
 
+// TODO: We use both this and git2::Oid extensively across the codebase and it
+// gets messy. Is it possible to just pick one and be consistent, or at least
+// push all conversions into a single module?
+
 impl From<git2::Oid> for Oid {
     fn from(oid: git2::Oid) -> Self {
         Oid(oid.to_string())
+    }
+}
+
+impl From<&Oid> for git2::Oid {
+    fn from(oid: &Oid) -> Self {
+        git2::Oid::from_str(&oid.0).expect("Oid wrapper contains valid oids.")
+    }
+}
+
+impl From<Oid> for git2::Oid {
+    fn from(oid: Oid) -> Self {
+        git2::Oid::from_str(&oid.0).expect("Oid wrapper contains valid oids.")
     }
 }
 
