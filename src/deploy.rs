@@ -133,23 +133,15 @@ mod tests {
     use crate::oid::Oid;
     use crate::plan::HostPlan;
     use crate::session::HostSession;
-    use crate::testutil::TempDir;
+    use crate::testutil::{TempDir, commit_files};
 
     /// In-memory connection that wraps a HostSession directly.
     struct LocalConnection {
         session: HostSession,
         hello: Hello,
         _store: TempDir,
-    }
-
-    impl LocalConnection {
-        fn new(session: HostSession, hello: Hello, store: TempDir) -> Self {
-            LocalConnection {
-                session,
-                hello,
-                _store: store,
-            }
-        }
+        _apps: TempDir,
+        _units: TempDir,
     }
 
     impl Connection for LocalConnection {
@@ -164,24 +156,51 @@ mod tests {
         }
     }
 
-    fn test_connection(host: &Hostname) -> Result<Box<dyn Connection>> {
-        test_connection_with_version(host, protocol::VERSION)
+    struct TestHost {
+        conn: Box<dyn Connection>,
+        commit_oid: git2::Oid,
     }
 
-    fn test_connection_with_version(host: &Hostname, version: &str) -> Result<Box<dyn Connection>> {
+    fn test_host() -> Result<TestHost> {
+        test_host_with_version(protocol::VERSION)
+    }
+
+    fn test_host_with_version(protocol_version: &str) -> Result<TestHost> {
         let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
         let repo = git2::Repository::init_bare(store.path())?;
-        let session = HostSession::new(repo);
+        let commit_oid = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
+        // In tests, skip the daemon-reload + restart step.
+        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        let session = HostSession::new(
+            repo,
+            "web1".to_string(),
+            apps.path().to_path_buf(),
+            units.path().to_path_buf(),
+            on_units_changed,
+        );
         let hello = Hello {
-            version: version.to_string(),
-            hostname: host.0.clone(),
+            version: protocol_version.to_string(),
+            hostname: "web1".to_string(),
         };
-        Ok(Box::new(LocalConnection::new(session, hello, store)))
+        let conn = Box::new(LocalConnection {
+            session,
+            hello,
+            _store: store,
+            _apps: apps,
+            _units: units,
+        });
+        Ok(TestHost { conn, commit_oid })
     }
 
-    fn single_host_plan() -> Plan {
-        Plan {
-            commit: Oid::from("0000000000000000000000000000000000000000"),
+    /// Execute a plan with a single host, returning all messages.
+    fn run_single_host(
+        commit: Oid,
+        conn: Box<dyn Connection>,
+    ) -> Result<Vec<Message>> {
+        let plan = Plan {
+            commit,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
@@ -189,24 +208,23 @@ mod tests {
                     expected_current: None,
                 },
             )]),
-        }
-    }
-
-    fn collect_messages(
-        plan: &Plan,
-        connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
-    ) -> Result<Vec<Message>> {
+        };
         let mut messages = Vec::new();
-        execute_plan(plan, connect, |_, msg| messages.push(msg.clone()))?;
+        let mut conn = Some(conn);
+        execute_plan(
+            &plan,
+            |_| Ok(conn.take().expect("connect is called once per host")),
+            |_, msg| messages.push(msg.clone()),
+        )?;
         Ok(messages)
     }
 
     #[test]
     fn execute_plan_emits_apply_complete_for_fresh_host() -> Result<()> {
-        let messages = collect_messages(&single_host_plan(), test_connection)?;
+        let host = test_host()?;
+        let messages = run_single_host(host.commit_oid.into(), host.conn)?;
 
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(messages[0], Message::ApplyComplete { .. }));
+        assert!(matches!(messages.last(), Some(Message::ApplyComplete { .. })));
         Ok(())
     }
 
@@ -215,8 +233,7 @@ mod tests {
         let store = TempDir::new("store");
         let repo = git2::Repository::init_bare(store.path())?;
 
-        // Create a commit and point the host's current ref at it.
-        let actual_commit = crate::testutil::commit_files(&repo, &[("web1/nginx/conf", b"v1")])?;
+        let actual_commit = commit_files(&repo, &[("web1/nginx/conf", b"v1")])?;
         crate::store::set_ref(
             &repo,
             "refs/heads/current",
@@ -224,18 +241,31 @@ mod tests {
             crate::store::RefUpdate::SetCurrent,
         )?;
 
-        let session = HostSession::new(repo);
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        let session = HostSession::new(
+            repo,
+            "web1".to_string(),
+            apps.path().to_path_buf(),
+            units.path().to_path_buf(),
+            on_units_changed,
+        );
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             hostname: "web1".to_string(),
         };
-        let mut conn: Option<Box<dyn Connection>> =
-            Some(Box::new(LocalConnection::new(session, hello, store)));
+        let conn = Box::new(LocalConnection {
+            session,
+            hello,
+            _store: store,
+            _apps: apps,
+            _units: units,
+        });
 
         // The plan expects no prior commit, but the host already has one.
-        let messages = collect_messages(&single_host_plan(), |_| {
-            Ok(conn.take().expect("connect is called once per host"))
-        })?;
+        let fake_commit = Oid::from("0000000000000000000000000000000000000000");
+        let messages = run_single_host(fake_commit, conn)?;
 
         assert_eq!(messages.len(), 1);
         assert!(matches!(messages[0], Message::Stale { .. }));
@@ -244,9 +274,8 @@ mod tests {
 
     #[test]
     fn execute_plan_skips_host_on_version_mismatch() -> Result<()> {
-        let messages = collect_messages(&single_host_plan(), |host| {
-            test_connection_with_version(host, "0.0.0-fake")
-        })?;
+        let host = test_host_with_version("0.0.0-fake")?;
+        let messages = run_single_host(host.commit_oid.into(), host.conn)?;
 
         assert_eq!(messages.len(), 1);
         match &messages[0] {
@@ -255,4 +284,7 @@ mod tests {
         }
         Ok(())
     }
+
+    // TODO: Add an integration test that spawns the real deptool binary in
+    // local mode and exercises the full stdin/stdout protocol roundtrip.
 }

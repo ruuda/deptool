@@ -1,5 +1,7 @@
 //! Host-side session logic: handles requests and applies changes.
 
+use std::path::PathBuf;
+
 use git2::Repository;
 
 use crate::oid::Oid;
@@ -7,11 +9,46 @@ use crate::protocol::{Message, Request};
 
 pub struct HostSession {
     repo: Repository,
+    hostname: String,
+    apps_dir: PathBuf,
+    unit_dir: PathBuf,
+    on_units_changed: Box<dyn Fn(&[String]) -> crate::error::Result<()>>,
 }
 
 impl HostSession {
-    pub fn new(repo: Repository) -> Self {
-        HostSession { repo }
+    pub fn new(
+        repo: Repository,
+        hostname: String,
+        apps_dir: PathBuf,
+        unit_dir: PathBuf,
+        on_units_changed: Box<dyn Fn(&[String]) -> crate::error::Result<()>>,
+    ) -> Self {
+        HostSession {
+            repo,
+            hostname,
+            apps_dir,
+            unit_dir,
+            on_units_changed,
+        }
+    }
+
+    /// Create a session for testing that does not touch systemd.
+    #[cfg(test)]
+    fn new_test(
+        repo: Repository,
+        hostname: &str,
+        apps_dir: &std::path::Path,
+        unit_dir: &std::path::Path,
+    ) -> Self {
+        // In tests, skip the daemon-reload + restart step.
+        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        HostSession::new(
+            repo,
+            hostname.to_string(),
+            apps_dir.to_path_buf(),
+            unit_dir.to_path_buf(),
+            on_units_changed,
+        )
     }
 
     pub fn handle_request(&self, request: Request, emit_message: &mut impl FnMut(Message)) {
@@ -35,11 +72,66 @@ impl HostSession {
                     return;
                 }
 
-                // TODO: Actually apply the commit using store::apply,
-                // emitting per-app events along the way.
-                emit_message(Message::ApplyComplete {
-                    commit: target_commit,
-                });
+                let commit_git_oid =
+                    match git2::Oid::from_str(&target_commit.to_string()) {
+                        Ok(oid) => oid,
+                        Err(e) => {
+                            emit_message(Message::Error {
+                                message: format!("invalid commit oid: {e}"),
+                            });
+                            return;
+                        }
+                    };
+
+                let actual_current_git_oid = actual_current_commit
+                    .as_ref()
+                    .map(|oid| git2::Oid::from_str(&oid.to_string()))
+                    .transpose();
+                let actual_current_git_oid = match actual_current_git_oid {
+                    Ok(oid) => oid,
+                    Err(e) => {
+                        emit_message(Message::Error {
+                            message: format!("invalid current oid: {e}"),
+                        });
+                        return;
+                    }
+                };
+
+                let result = crate::apply::apply_host(
+                    &self.repo,
+                    commit_git_oid,
+                    actual_current_git_oid,
+                    &self.hostname,
+                    &self.apps_dir,
+                    &self.unit_dir,
+                    |app, diff| {
+                        emit_message(Message::AppliedApp {
+                            app: app.to_string(),
+                            diff: diff.clone(),
+                        });
+                    },
+                );
+
+                match result {
+                    Ok(changed_units) => {
+                        if !changed_units.is_empty() {
+                            if let Err(e) = (self.on_units_changed)(&changed_units) {
+                                emit_message(Message::Error {
+                                    message: format!("systemd restart failed: {e}"),
+                                });
+                                return;
+                            }
+                        }
+                        emit_message(Message::ApplyComplete {
+                            commit: target_commit,
+                        });
+                    }
+                    Err(e) => {
+                        emit_message(Message::Error {
+                            message: format!("apply failed: {e}"),
+                        });
+                    }
+                }
             }
         }
     }
@@ -48,12 +140,46 @@ impl HostSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::TempDir;
+    use crate::plan::AppDiff;
+    use crate::testutil::{TempDir, commit_files};
 
-    fn test_session() -> (HostSession, TempDir) {
+    struct TestEnv {
+        session: HostSession,
+        _store: TempDir,
+        _apps: TempDir,
+        _units: TempDir,
+    }
+
+    fn test_env() -> TestEnv {
         let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
         let repo = Repository::init_bare(store.path()).expect("repo is created");
-        (HostSession::new(repo), store)
+        let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
+        TestEnv {
+            session,
+            _store: store,
+            _apps: apps,
+            _units: units,
+        }
+    }
+
+    fn test_env_with_commit(files: &[(&str, &[u8])]) -> (TestEnv, git2::Oid) {
+        let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        let oid = commit_files(&repo, files).expect("commit succeeds");
+        let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
+        (
+            TestEnv {
+                session,
+                _store: store,
+                _apps: apps,
+                _units: units,
+            },
+            oid,
+        )
     }
 
     fn collect(session: &HostSession, request: Request) -> Vec<Message> {
@@ -64,33 +190,38 @@ mod tests {
 
     #[test]
     fn apply_reports_stale_when_expected_current_mismatches() {
-        let (session, _store) = test_session();
+        let env = test_env();
         let commit: Oid = "0000000000000000000000000000000000000000".into();
         let fake_current: Oid = "1111111111111111111111111111111111111111".into();
         let req = Request::Apply {
             target_commit: commit,
             expected_current_commit: Some(fake_current),
         };
-        let responses = collect(&session, req);
+        let responses = collect(&env.session, req);
         assert_eq!(responses.len(), 1);
         assert!(matches!(&responses[0], Message::Stale { .. }));
     }
 
     #[test]
-    fn apply_emit_messages_applied_with_same_commit() {
-        let (session, _store) = test_session();
-        let commit = Oid::from(
-            git2::Oid::from_str("0000000000000000000000000000000000000000").expect("oid is valid"),
-        );
+    fn apply_checks_out_app_and_emits_per_app_messages() {
+        let (env, oid) = test_env_with_commit(&[
+            ("web1/nginx/nginx.conf", b"server {}"),
+        ]);
         let req = Request::Apply {
-            target_commit: commit.clone(),
+            target_commit: oid.into(),
             expected_current_commit: None,
         };
-        let responses = collect(&session, req);
-        assert_eq!(responses.len(), 1);
+        let responses = collect(&env.session, req);
+
+        // Should have AppliedApp for nginx, then ApplyComplete.
+        assert_eq!(responses.len(), 2);
         match &responses[0] {
-            Message::ApplyComplete { commit: c } => assert_eq!(c, &commit),
-            other => panic!("Expected Applied, got {other:?}"),
+            Message::AppliedApp { app, diff } => {
+                assert_eq!(app, "nginx");
+                assert!(matches!(diff, AppDiff::Add { .. }));
+            }
+            other => panic!("Expected AppliedApp, got {other:?}"),
         }
+        assert!(matches!(&responses[1], Message::ApplyComplete { .. }));
     }
 }

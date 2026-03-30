@@ -1,5 +1,6 @@
 //! Deptool: a simple declarative deployment tool.
 
+mod apply;
 mod deploy;
 mod error;
 mod oid;
@@ -91,6 +92,9 @@ enum Cmd {
     },
 }
 
+// TODO: CLI ergonomics pass: set sensible defaults for store location and
+// remote-store path so most invocations don't need to specify them.
+
 fn run() -> Result<()> {
     let cmd = cmd().to_options().run();
 
@@ -147,11 +151,47 @@ fn run() -> Result<()> {
     Ok(())
 }
 
+const DEFAULT_APPS_DIR: &str = "/var/lib/deptool/apps";
+const DEFAULT_UNIT_DIR: &str = "/etc/systemd/system";
+
+fn read_hostname() -> String {
+    fs::read_to_string("/etc/hostname")
+        .unwrap_or("(unknown hostname)".into())
+        .trim()
+        .to_string()
+}
+
+fn systemd_restart(changed_units: &[String]) -> error::Result<()> {
+    std::process::Command::new("systemctl")
+        .arg("daemon-reload")
+        .status()?;
+    for unit in changed_units {
+        std::process::Command::new("systemctl")
+            .args(["restart", unit])
+            .status()?;
+        // TODO: Capture `systemctl status <unit>` output and report it
+        // back to the operator, so they can see startup logs or failure
+        // reasons without having to SSH in.
+    }
+    Ok(())
+}
+
+fn make_host_session(repo: Repository, hostname: String) -> session::HostSession {
+    session::HostSession::new(
+        repo,
+        hostname,
+        PathBuf::from(DEFAULT_APPS_DIR),
+        PathBuf::from(DEFAULT_UNIT_DIR),
+        Box::new(systemd_restart),
+    )
+}
+
 fn run_host(cmd: HostCmd) -> Result<()> {
     match cmd {
         HostCmd::Apply { store, commit } => {
             let repo = Repository::open(&store)?;
-            let session = session::HostSession::new(repo);
+            let hostname = read_hostname();
+            let session = make_host_session(repo, hostname);
             let request = protocol::Request::Apply {
                 target_commit: commit.as_str().into(),
                 expected_current_commit: None,
@@ -162,14 +202,11 @@ fn run_host(cmd: HostCmd) -> Result<()> {
         }
         HostCmd::Session { store } => {
             let repo = Repository::open(&store)?;
-            let session = session::HostSession::new(repo);
+            let hostname = read_hostname();
+            let session = make_host_session(repo, hostname.clone());
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
 
-            let hostname = fs::read_to_string("/etc/hostname")
-                .unwrap_or("(unknown hostname)".into())
-                .trim()
-                .to_string();
             let hello = protocol::Hello {
                 version: protocol::VERSION.to_string(),
                 hostname,
