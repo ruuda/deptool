@@ -12,7 +12,7 @@ pub struct HostSession {
     hostname: String,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
-    on_units_changed: Box<dyn Fn(&[String]) -> crate::error::Result<()>>,
+    on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
 }
 
 impl HostSession {
@@ -21,7 +21,7 @@ impl HostSession {
         hostname: String,
         apps_dir: PathBuf,
         unit_dir: PathBuf,
-        on_units_changed: Box<dyn Fn(&[String]) -> crate::error::Result<()>>,
+        on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
     ) -> Self {
         HostSession {
             repo,
@@ -41,7 +41,7 @@ impl HostSession {
         unit_dir: &std::path::Path,
     ) -> Self {
         // In tests, skip the daemon-reload + restart step.
-        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        let on_units_changed = Box::new(|_: &_| Ok(()));
         HostSession::new(
             repo,
             hostname.to_string(),
@@ -87,8 +87,8 @@ impl HostSession {
                     },
                 );
 
-                let changed_units = match result {
-                    Ok(units) => units,
+                let unit_changes = match result {
+                    Ok(changes) => changes,
                     Err(err) => {
                         emit_message(Message::Error {
                             message: format!("apply failed: {err}"),
@@ -97,8 +97,8 @@ impl HostSession {
                     }
                 };
 
-                if !changed_units.is_empty() {
-                    if let Err(err) = (self.on_units_changed)(&changed_units) {
+                if !unit_changes.is_empty() {
+                    if let Err(err) = (self.on_units_changed)(&unit_changes) {
                         emit_message(Message::Error {
                             message: format!("systemd restart failed: {err}"),
                         });
@@ -108,7 +108,9 @@ impl HostSession {
 
                 emit_message(Message::ApplyComplete {
                     commit: target_commit,
-                    restarted_units: changed_units,
+                    enabled_units: unit_changes.enable,
+                    restarted_units: unit_changes.restart,
+                    disabled_units: unit_changes.disable,
                 });
             }
         }
@@ -182,9 +184,7 @@ mod tests {
 
     #[test]
     fn apply_checks_out_app_and_emits_per_app_messages() {
-        let (env, oid) = test_env_with_commit(&[
-            ("web1/nginx/nginx.conf", b"server {}"),
-        ]);
+        let (env, oid) = test_env_with_commit(&[("web1/nginx/nginx.conf", b"server {}")]);
         let req = Request::Apply {
             target_commit: oid.into(),
             expected_current_commit: None,

@@ -70,11 +70,17 @@ pub fn assert_dir_contents(dir: &Path, expected: &[(&str, &[u8])]) {
     let mut actual: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     collect_files(dir, dir, &mut actual);
 
-    let expected: BTreeMap<String, &[u8]> = expected.iter().map(|&(p, c)| (p.to_string(), c)).collect();
+    let expected: BTreeMap<String, &[u8]> =
+        expected.iter().map(|&(p, c)| (p.to_string(), c)).collect();
 
     let actual_keys: Vec<&String> = actual.keys().collect();
     let expected_keys: Vec<&String> = expected.keys().collect();
-    assert_eq!(actual_keys, expected_keys, "file list mismatch in {}", dir.display());
+    assert_eq!(
+        actual_keys,
+        expected_keys,
+        "file list mismatch in {}",
+        dir.display()
+    );
 
     for (path, expected_content) in &expected {
         let actual_content = &actual[path];

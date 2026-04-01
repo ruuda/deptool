@@ -190,5 +190,4 @@ mod tests {
         assert_eq!(commit.parent_id(0)?, c1);
         Ok(())
     }
-
 }

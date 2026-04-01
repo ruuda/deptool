@@ -28,7 +28,9 @@ pub enum Message {
     },
     ApplyComplete {
         commit: Oid,
+        enabled_units: Vec<String>,
         restarted_units: Vec<String>,
+        disabled_units: Vec<String>,
     },
     Stale {
         expected_commit: Option<Oid>,

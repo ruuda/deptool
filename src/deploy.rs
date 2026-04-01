@@ -173,7 +173,7 @@ mod tests {
         let repo = git2::Repository::init_bare(store.path())?;
         let commit_oid = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
         // In tests, skip the daemon-reload + restart step.
-        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        let on_units_changed = Box::new(|_: &_| Ok(()));
         let session = HostSession::new(
             repo,
             "web1".to_string(),
@@ -196,10 +196,7 @@ mod tests {
     }
 
     /// Execute a plan with a single host, returning all messages.
-    fn run_single_host(
-        commit: Oid,
-        conn: Box<dyn Connection>,
-    ) -> Result<Vec<Message>> {
+    fn run_single_host(commit: Oid, conn: Box<dyn Connection>) -> Result<Vec<Message>> {
         let plan = Plan {
             commit,
             hosts: BTreeMap::from([(
@@ -225,7 +222,10 @@ mod tests {
         let host = test_host()?;
         let messages = run_single_host(host.commit_oid.into(), host.conn)?;
 
-        assert!(matches!(messages.last(), Some(Message::ApplyComplete { .. })));
+        assert!(matches!(
+            messages.last(),
+            Some(Message::ApplyComplete { .. })
+        ));
         Ok(())
     }
 
@@ -244,7 +244,7 @@ mod tests {
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
-        let on_units_changed = Box::new(|_: &[String]| Ok(()));
+        let on_units_changed = Box::new(|_: &_| Ok(()));
         let session = HostSession::new(
             repo,
             "web1".to_string(),

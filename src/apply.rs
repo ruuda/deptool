@@ -1,13 +1,20 @@
 //! Materialize apps on the target host.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
+use serde::Deserialize;
+
 use crate::error::Result;
 use crate::plan::AppDiff;
 use crate::store;
+
+#[derive(Deserialize)]
+struct SystemdConfig {
+    units_enabled: Vec<String>,
+}
 
 const OID_PREFIX_LEN: usize = 10;
 
@@ -76,17 +83,23 @@ pub fn apply_host(
     apps_dir: &Path,
     unit_dir: &Path,
     mut on_app: impl FnMut(&str, &AppDiff),
-) -> Result<Vec<String>> {
-    store::set_ref(repo, "refs/heads/target", commit_oid, store::RefUpdate::SetTarget)?;
+) -> Result<UnitChanges> {
+    store::set_ref(
+        repo,
+        "refs/heads/target",
+        commit_oid,
+        store::RefUpdate::SetTarget,
+    )?;
 
     let target_tree = repo.find_commit(commit_oid)?.tree()?;
     let target_apps = store::get_host_apps(repo, &target_tree, host)?;
 
-    let current_apps = match actual_current {
-        None => BTreeMap::new(),
+    let (current_tree, current_apps) = match actual_current {
+        None => (None, BTreeMap::new()),
         Some(oid) => {
             let tree = repo.find_commit(oid)?.tree()?;
-            store::get_host_apps(repo, &tree, host)?
+            let apps = store::get_host_apps(repo, &tree, host)?;
+            (Some(tree), apps)
         }
     };
 
@@ -104,32 +117,69 @@ pub fn apply_host(
         on_app(app, change);
     }
 
+    // Make all units from the target tree available to systemd by
+    // symlinking them into the unit dir. This is independent of whether
+    // they are enabled or not.
     let desired_units = collect_desired_units(repo, &target_tree, host, apps_dir)?;
-    let changed_units = reconcile_units(&desired_units, apps_dir, unit_dir)?;
+    reconcile_symlinks(&desired_units, apps_dir, unit_dir)?;
 
-    store::set_ref(repo, "refs/heads/current", commit_oid, store::RefUpdate::SetCurrent)?;
+    // Compute unit lifecycle actions. We collect enabled units only from
+    // changed apps: unchanged apps need no action. This means a unit in
+    // both prev and target was enabled across a change, so we need to restart
+    // it so it picks up its new config.
+    let changed_apps: BTreeSet<&str> = diff.keys().map(|app| app.as_str()).collect();
+    let prev_enabled = match &current_tree {
+        None => BTreeSet::new(),
+        Some(tree) => collect_enabled_units(repo, tree, host, &changed_apps)?,
+    };
+    let target_enabled = collect_enabled_units(repo, &target_tree, host, &changed_apps)?;
+    let unit_changes = diff_enabled(&prev_enabled, &target_enabled);
 
-    Ok(changed_units)
+    store::set_ref(
+        repo,
+        "refs/heads/current",
+        commit_oid,
+        store::RefUpdate::SetCurrent,
+    )?;
+
+    Ok(unit_changes)
 }
 
-/// Reconcile systemd unit symlinks.
+/// Systemd unit lifecycle actions, derived from Git trees only.
 ///
-/// Compares `desired` (from the git tree) against actual symlinks in
-/// `unit_dir` that point into `apps_dir`. Creates missing symlinks and
-/// removes stale ones. Returns the list of unit names that changed.
-fn reconcile_units(
+/// We don't query actual system state; actions are based on comparing the
+/// previous and target commits. If the system drifts (e.g. a human disables
+/// a unit manually), the operator will see it in `systemctl status` output
+/// that we report after applying.
+pub struct UnitChanges {
+    /// Newly enabled units: `systemctl enable --now`.
+    pub enable: Vec<String>,
+    /// Still enabled, but app content changed: `systemctl restart`.
+    pub restart: Vec<String>,
+    /// No longer enabled: `systemctl disable --now`.
+    pub disable: Vec<String>,
+}
+
+impl UnitChanges {
+    pub fn is_empty(&self) -> bool {
+        self.enable.is_empty() && self.restart.is_empty() && self.disable.is_empty()
+    }
+}
+
+/// Reconcile unit symlinks: make unit_dir match desired.
+///
+/// Returns the set of unit names whose symlinks were added or changed.
+fn reconcile_symlinks(
     desired: &BTreeMap<String, std::path::PathBuf>,
     apps_dir: &Path,
     unit_dir: &Path,
-) -> Result<Vec<String>> {
-    let mut changed = Vec::new();
-
+) -> Result<BTreeSet<String>> {
     let actual = collect_actual_units(apps_dir, unit_dir)?;
+    let mut changed = BTreeSet::new();
 
     for name in actual.keys() {
         if !desired.contains_key(name) {
             fs::remove_file(unit_dir.join(name))?;
-            changed.push(name.clone());
         }
     }
 
@@ -144,14 +194,39 @@ fn reconcile_units(
                 fs::remove_file(&link_path)?;
             }
             unix_fs::symlink(desired_target, &link_path)?;
-            changed.push(name.clone());
+            changed.insert(name.clone());
         }
     }
 
     Ok(changed)
 }
 
-/// Collect desired unit files by walking the git tree.
+/// Compute unit lifecycle actions from two enabled sets.
+///
+/// Both sets are pre-filtered to changed apps only, so a unit appearing
+/// in both means its app changed while it stayed enabled → restart.
+fn diff_enabled(prev_enabled: &BTreeSet<String>, target_enabled: &BTreeSet<String>) -> UnitChanges {
+    let mut changes = UnitChanges {
+        enable: Vec::new(),
+        restart: Vec::new(),
+        disable: Vec::new(),
+    };
+    for name in target_enabled {
+        if prev_enabled.contains(name) {
+            changes.restart.push(name.clone());
+        } else {
+            changes.enable.push(name.clone());
+        }
+    }
+    for name in prev_enabled {
+        if !target_enabled.contains(name) {
+            changes.disable.push(name.clone());
+        }
+    }
+    changes
+}
+
+/// Collect desired unit files by walking the Git tree.
 ///
 /// For each app, checks for a `systemd/` subtree and maps unit filenames
 /// to their absolute path under `apps_dir/<app>/current/systemd/`.
@@ -172,12 +247,43 @@ fn collect_desired_units(
         let systemd_tree = repo.find_tree(systemd_entry.id())?;
         for entry in systemd_tree.iter() {
             if let Some(name) = entry.name() {
-                let target = apps_dir.join(app).join("current").join("systemd").join(name);
+                let target = apps_dir
+                    .join(app)
+                    .join("current")
+                    .join("systemd")
+                    .join(name);
                 units.insert(name.to_string(), target);
             }
         }
     }
     Ok(units)
+}
+
+/// Collect enabled unit names from `systemd.json`, filtered to given apps.
+///
+/// If an app has no `systemd.json`, none of its units are enabled.
+fn collect_enabled_units(
+    repo: &git2::Repository,
+    config_tree: &git2::Tree,
+    host: &str,
+    filter_apps: &BTreeSet<&str>,
+) -> Result<BTreeSet<String>> {
+    let host_apps = store::get_host_apps(repo, config_tree, host)?;
+    let mut enabled = BTreeSet::new();
+    for (app, app_tree_oid) in &host_apps {
+        if !filter_apps.contains(app.as_str()) {
+            continue;
+        }
+        let app_tree = repo.find_tree(*app_tree_oid)?;
+        let entry = match app_tree.get_name("systemd.json") {
+            Some(entry) => entry,
+            None => continue,
+        };
+        let blob = repo.find_blob(entry.id())?;
+        let config: SystemdConfig = serde_json::from_slice(blob.content())?;
+        enabled.extend(config.units_enabled);
+    }
+    Ok(enabled)
 }
 
 /// Collect actual unit symlinks in unit_dir that point into apps_dir.
@@ -215,7 +321,6 @@ fn collect_actual_units(
 
     Ok(units)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -312,22 +417,24 @@ mod tests {
         Ok(())
     }
 
-#[test]
-    fn reconcile_creates_symlinks_for_new_units() -> Result<()> {
+    // reconcile_symlinks tests (which need filesystem access)
+
+    #[test]
+    fn reconcile_symlinks_creates_symlink_for_desired_unit() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        let changed = reconcile_units(&desired, apps.path(), units.path())?;
+        let changed = reconcile_symlinks(&desired, apps.path(), units.path())?;
 
-        assert_eq!(changed, vec!["nginx.service"]);
+        assert_eq!(changed, BTreeSet::from(["nginx.service".to_string()]));
         assert!(units.path().join("nginx.service").is_symlink());
         Ok(())
     }
 
     #[test]
-    fn reconcile_removes_stale_symlinks_for_removed_app() -> Result<()> {
+    fn reconcile_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
@@ -335,25 +442,25 @@ mod tests {
         // Create a symlink as if a previous reconcile put it there.
         unix_fs::symlink(&target, units.path().join("nginx.service"))?;
 
-        // Reconcile with empty desired set — the unit should be removed.
-        let desired = BTreeMap::new();
-        let changed = reconcile_units(&desired, apps.path(), units.path())?;
+        let changed = reconcile_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
-        assert_eq!(changed, vec!["nginx.service"]);
+        assert!(changed.is_empty());
         assert!(!units.path().join("nginx.service").exists());
         Ok(())
     }
 
     #[test]
-    fn reconcile_ignores_unmanaged_symlinks() -> Result<()> {
+    fn reconcile_symlinks_leaves_unmanaged_symlinks_intact() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
-        // A symlink that doesn't point into apps_dir — not ours.
-        unix_fs::symlink("/usr/lib/systemd/system/sshd.service", units.path().join("sshd.service"))?;
+        // A symlink that doesn't point into apps_dir, not ours.
+        unix_fs::symlink(
+            "/usr/lib/systemd/system/sshd.service",
+            units.path().join("sshd.service"),
+        )?;
 
-        let desired = BTreeMap::new();
-        let changed = reconcile_units(&desired, apps.path(), units.path())?;
+        let changed = reconcile_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         assert!(units.path().join("sshd.service").is_symlink());
@@ -361,19 +468,50 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_is_idempotent() -> Result<()> {
+    fn reconcile_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        reconcile_units(&desired, apps.path(), units.path())?;
+        reconcile_symlinks(&desired, apps.path(), units.path())?;
+        let changed = reconcile_symlinks(&desired, apps.path(), units.path())?;
 
-        // The second time there are no changes.
-        let changed = reconcile_units(&desired, apps.path(), units.path())?;
         assert!(changed.is_empty());
-
         Ok(())
+    }
+
+    #[test]
+    fn diff_enabled_enables_units_only_in_target() {
+        let prev = BTreeSet::new();
+        let target = BTreeSet::from(["nginx.service".to_string()]);
+
+        let actions = diff_enabled(&prev, &target);
+
+        assert_eq!(actions.enable, vec!["nginx.service"]);
+        assert!(actions.disable.is_empty());
+    }
+
+    #[test]
+    fn diff_enabled_restarts_units_in_both_prev_and_target() {
+        let both = BTreeSet::from(["nginx.service".to_string()]);
+
+        let actions = diff_enabled(&both, &both);
+
+        assert!(actions.enable.is_empty());
+        assert_eq!(actions.restart, vec!["nginx.service"]);
+        assert!(actions.disable.is_empty());
+    }
+
+    #[test]
+    fn diff_enabled_disables_units_only_in_prev() {
+        let prev = BTreeSet::from(["nginx.service".to_string()]);
+        let target = BTreeSet::new();
+
+        let actions = diff_enabled(&prev, &target);
+
+        assert!(actions.enable.is_empty());
+        assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
     #[test]
@@ -385,10 +523,24 @@ mod tests {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let actual_current_commit = None;
-        apply_host(&repo, c1, actual_current_commit, "web1", apps.path(), units.path(), |_, _| {})?;
+        apply_host(
+            &repo,
+            c1,
+            actual_current_commit,
+            "web1",
+            apps.path(),
+            units.path(),
+            |_, _| {},
+        )?;
 
-        let current = repo.find_reference("refs/heads/current")?.peel_to_commit()?.id();
-        let target = repo.find_reference("refs/heads/target")?.peel_to_commit()?.id();
+        let current = repo
+            .find_reference("refs/heads/current")?
+            .peel_to_commit()?
+            .id();
+        let target = repo
+            .find_reference("refs/heads/target")?
+            .peel_to_commit()?
+            .id();
         assert_eq!(current, c1);
         assert_eq!(target, c1);
         Ok(())
@@ -404,13 +556,58 @@ mod tests {
         let units = TempDir::new("units");
         let mut applied = Vec::new();
         let actual_current_commit = None;
-        apply_host(&repo, c1, actual_current_commit, "web1", apps.path(), units.path(), |app, diff| {
-            applied.push((app.to_string(), diff.clone()));
-        })?;
+        apply_host(
+            &repo,
+            c1,
+            actual_current_commit,
+            "web1",
+            apps.path(),
+            units.path(),
+            |app, diff| {
+                applied.push((app.to_string(), diff.clone()));
+            },
+        )?;
 
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].0, "nginx");
         assert!(matches!(applied[0].1, AppDiff::Add { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_host_only_enables_units_from_systemd_json() -> Result<()> {
+        let store = TempDir::new("store");
+        let repo = git2::Repository::init_bare(store.path())?;
+        let systemd_json = br#"{"units_enabled": ["nginx.service"]}"#;
+        let c1 = commit_files(
+            &repo,
+            &[
+                ("web1/nginx/systemd/nginx.service", b"[Service]"),
+                ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
+                ("web1/nginx/systemd.json", systemd_json),
+            ],
+        )?;
+
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let actual_current_commit = None;
+        let changes = apply_host(
+            &repo,
+            c1,
+            actual_current_commit,
+            "web1",
+            apps.path(),
+            units.path(),
+            |_, _| {},
+        )?;
+
+        // Both units are symlinked (available).
+        assert!(units.path().join("nginx.service").is_symlink());
+        assert!(units.path().join("nginx-reload.timer").is_symlink());
+        // Only the enabled one gets an enable action.
+        assert_eq!(changes.enable, vec!["nginx.service"]);
+        assert!(changes.restart.is_empty());
+        assert!(changes.disable.is_empty());
         Ok(())
     }
 }

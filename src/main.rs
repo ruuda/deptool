@@ -161,18 +161,28 @@ fn read_hostname() -> String {
         .to_string()
 }
 
-fn systemd_restart(changed_units: &[String]) -> error::Result<()> {
+fn systemd_apply_changes(changes: &apply::UnitChanges) -> error::Result<()> {
     std::process::Command::new("systemctl")
         .arg("daemon-reload")
         .status()?;
-    for unit in changed_units {
+    for unit in &changes.disable {
+        std::process::Command::new("systemctl")
+            .args(["disable", "--now", unit])
+            .status()?;
+    }
+    for unit in &changes.enable {
+        std::process::Command::new("systemctl")
+            .args(["enable", "--now", unit])
+            .status()?;
+    }
+    for unit in &changes.restart {
         std::process::Command::new("systemctl")
             .args(["restart", unit])
             .status()?;
-        // TODO: Capture `systemctl status <unit>` output and report it
-        // back to the operator, so they can see startup logs or failure
-        // reasons without having to SSH in.
     }
+    // TODO: Capture `systemctl status <unit>` output and report it
+    // back to the operator, so they can see startup logs or failure
+    // reasons without having to SSH in.
     Ok(())
 }
 
@@ -182,7 +192,7 @@ fn make_host_session(repo: Repository, hostname: String) -> session::HostSession
         hostname,
         PathBuf::from(DEFAULT_APPS_DIR),
         PathBuf::from(DEFAULT_UNIT_DIR),
-        Box::new(systemd_restart),
+        Box::new(systemd_apply_changes),
     )
 }
 
