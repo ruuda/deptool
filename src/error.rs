@@ -8,6 +8,7 @@ pub enum Error {
     Git(git2::Error),
     Json(serde_json::Error),
     NonUtf8FileName,
+    InvalidConfig(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -35,6 +36,7 @@ impl fmt::Display for Error {
             Error::Git(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
+            Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
         }
     }
 }

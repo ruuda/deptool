@@ -5,16 +5,10 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
-use serde::Deserialize;
-
 use crate::error::Result;
-use crate::plan::AppDiff;
+use crate::plan::{AppDiff, SystemdConfig};
+use crate::prim::Hostname;
 use crate::store;
-
-#[derive(Deserialize)]
-struct SystemdConfig {
-    units_enabled: Vec<String>,
-}
 
 const OID_PREFIX_LEN: usize = 10;
 
@@ -34,7 +28,7 @@ fn oid_prefix(oid: git2::Oid) -> String {
 pub fn apply_app(
     repo: &git2::Repository,
     commit_oid: git2::Oid,
-    host: &str,
+    host: &Hostname,
     app: &str,
     apps_dir: &Path,
 ) -> Result<()> {
@@ -79,7 +73,7 @@ pub fn apply_host(
     repo: &git2::Repository,
     commit_oid: git2::Oid,
     actual_current: Option<git2::Oid>,
-    host: &str,
+    host: &Hostname,
     apps_dir: &Path,
     unit_dir: &Path,
     mut on_app: impl FnMut(&str, &AppDiff),
@@ -151,6 +145,7 @@ pub fn apply_host(
 /// previous and target commits. If the system drifts (e.g. a human disables
 /// a unit manually), the operator will see it in `systemctl status` output
 /// that we report after applying.
+#[derive(Debug)]
 pub struct UnitChanges {
     /// Newly enabled units: `systemctl enable --now`.
     pub enable: Vec<String>,
@@ -233,7 +228,7 @@ fn diff_enabled(prev_enabled: &BTreeSet<String>, target_enabled: &BTreeSet<Strin
 fn collect_desired_units(
     repo: &git2::Repository,
     config_tree: &git2::Tree,
-    host: &str,
+    host: &Hostname,
     apps_dir: &Path,
 ) -> Result<BTreeMap<String, std::path::PathBuf>> {
     let apps = store::get_host_apps(repo, config_tree, host)?;
@@ -265,7 +260,7 @@ fn collect_desired_units(
 fn collect_enabled_units(
     repo: &git2::Repository,
     config_tree: &git2::Tree,
-    host: &str,
+    host: &Hostname,
     filter_apps: &BTreeSet<&str>,
 ) -> Result<BTreeSet<String>> {
     let host_apps = store::get_host_apps(repo, config_tree, host)?;
@@ -335,7 +330,7 @@ mod tests {
         let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"server {}")])?;
 
         let apps = TempDir::new("apps");
-        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
+        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
 
         let prefix = oid_prefix(c1);
         let version_dir = apps.path().join("nginx").join(&prefix);
@@ -362,7 +357,7 @@ mod tests {
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
+        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -379,11 +374,11 @@ mod tests {
         let apps = TempDir::new("apps");
         let current = apps.path().join("nginx/current");
 
-        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
+        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(&repo, c2, "web1", "nginx", apps.path())?;
+        apply_app(&repo, c2, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
@@ -401,7 +396,7 @@ mod tests {
         let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
 
         let apps = TempDir::new("apps");
-        apply_app(&repo, c1, "web1", "nginx", apps.path())?;
+        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
         assert!(apps.path().join("nginx").exists());
 
         remove_app("nginx", apps.path())?;
@@ -527,7 +522,7 @@ mod tests {
             &repo,
             c1,
             actual_current_commit,
-            "web1",
+            &"web1".into(),
             apps.path(),
             units.path(),
             |_, _| {},
@@ -560,7 +555,7 @@ mod tests {
             &repo,
             c1,
             actual_current_commit,
-            "web1",
+            &"web1".into(),
             apps.path(),
             units.path(),
             |app, diff| {
@@ -595,7 +590,7 @@ mod tests {
             &repo,
             c1,
             actual_current_commit,
-            "web1",
+            &"web1".into(),
             apps.path(),
             units.path(),
             |_, _| {},

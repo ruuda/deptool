@@ -7,6 +7,7 @@ use std::path::Path;
 use git2::Repository;
 
 use crate::error::{Error, Result};
+use crate::prim::Hostname;
 
 /// Recursively build a Git tree from a directory on disk.
 pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
@@ -61,13 +62,13 @@ pub fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> 
 pub fn checkout_app(
     repo: &Repository,
     commit_oid: git2::Oid,
-    host: &str,
+    host: &Hostname,
     app: &str,
     target: &Path,
 ) -> Result<()> {
     let commit = repo.find_commit(commit_oid)?;
     let tree = commit.tree()?;
-    let entry = tree.get_path(Path::new(host).join(app).as_ref())?;
+    let entry = tree.get_path(Path::new(&host.0).join(app).as_ref())?;
     let subtree = repo.find_tree(entry.id())?;
     let mut cb = git2::build::CheckoutBuilder::new();
     cb.target_dir(target).force();
@@ -105,9 +106,9 @@ pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
 pub fn get_host_apps(
     repo: &Repository,
     config_tree: &git2::Tree,
-    host: &str,
+    host: &Hostname,
 ) -> Result<BTreeMap<String, git2::Oid>> {
-    match config_tree.get_name(host) {
+    match config_tree.get_name(&host.0) {
         Some(e) => Ok(tree_entries(&repo.find_tree(e.id())?)),
         None => Ok(BTreeMap::new()),
     }
@@ -166,7 +167,7 @@ mod tests {
         let commit_oid = commit_tree(&repo, tree_oid)?;
 
         let output = TempDir::new("output");
-        checkout_app(&repo, commit_oid, "web1", "nginx", output.path())?;
+        checkout_app(&repo, commit_oid, &"web1".into(), "nginx", output.path())?;
 
         let out = output.path();
         let expected = input.path().join("web1/nginx");

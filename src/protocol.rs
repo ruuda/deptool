@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::oid::Oid;
+use crate::prim::Oid;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 use git2::Repository;
 
-use crate::oid::Oid;
+use crate::prim::Hostname;
+use crate::prim::Oid;
 use crate::protocol::{Message, Request};
 
 pub struct HostSession {
     repo: Repository,
-    hostname: String,
+    hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
     on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
@@ -18,7 +19,7 @@ pub struct HostSession {
 impl HostSession {
     pub fn new(
         repo: Repository,
-        hostname: String,
+        hostname: Hostname,
         apps_dir: PathBuf,
         unit_dir: PathBuf,
         on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
@@ -44,7 +45,7 @@ impl HostSession {
         let on_units_changed = Box::new(|_: &_| Ok(()));
         HostSession::new(
             repo,
-            hostname.to_string(),
+            hostname.into(),
             apps_dir.to_path_buf(),
             unit_dir.to_path_buf(),
             on_units_changed,

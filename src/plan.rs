@@ -1,29 +1,18 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
 use std::collections::BTreeMap;
-use std::fmt;
 
 use git2::Repository;
 use serde::{Deserialize, Serialize};
 
+#[derive(Deserialize)]
+pub struct SystemdConfig {
+    pub units_enabled: Vec<String>,
+}
+
 use crate::error::Result;
-use crate::oid::Oid;
+use crate::prim::{Hostname, Oid};
 use crate::store::get_host_apps;
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Hostname(pub String);
-
-impl From<&str> for Hostname {
-    fn from(s: &str) -> Self {
-        Hostname(s.to_string())
-    }
-}
-
-impl fmt::Display for Hostname {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
@@ -83,6 +72,41 @@ pub fn diff_apps(
     changes
 }
 
+/// Validate that every unit in `systemd.json` has a file in `systemd/`.
+fn validate_systemd_config(
+    repo: &Repository,
+    config_tree: &git2::Tree,
+    host: &Hostname,
+) -> Result<()> {
+    let apps = get_host_apps(repo, config_tree, host)?;
+    for (app, app_tree_oid) in &apps {
+        let app_tree = repo.find_tree(*app_tree_oid)?;
+        let config_entry = match app_tree.get_name("systemd.json") {
+            Some(entry) => entry,
+            None => continue,
+        };
+        let blob = repo.find_blob(config_entry.id())?;
+        let config: SystemdConfig = serde_json::from_slice(blob.content())?;
+
+        let systemd_tree = match app_tree.get_name("systemd") {
+            Some(e) => repo.find_tree(e.id())?,
+            None => {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "app {app} has systemd.json but no systemd/ directory",
+                )));
+            }
+        };
+        for unit in &config.units_enabled {
+            if systemd_tree.get_name(unit).is_none() {
+                return Err(crate::error::Error::InvalidConfig(format!(
+                    "app {app} enables {unit} but systemd/{unit} does not exist",
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Build a deployment plan by comparing main against each host's current ref.
 ///
 /// TODO: Currently this is based only on the repository state, which means we
@@ -100,7 +124,8 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        let target_apps = get_host_apps(repo, &main_tree, &host.0)?;
+        validate_systemd_config(repo, &main_tree, &host)?;
+        let target_apps = get_host_apps(repo, &main_tree, &host)?;
 
         let (expected_current, current_apps) =
             match repo.find_reference(&format!("refs/remotes/{host}/current")) {
@@ -108,7 +133,7 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
                 Ok(r) => {
                     let c = r.peel_to_commit()?;
                     let tree = c.tree()?;
-                    (Some(c.id().into()), get_host_apps(repo, &tree, &host.0)?)
+                    (Some(c.id().into()), get_host_apps(repo, &tree, &host)?)
                 }
             };
 
@@ -254,5 +279,30 @@ mod tests {
         let plan = make_plan(&repo)?;
         assert!(plan.hosts.is_empty());
         Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_enabled_unit_without_file() {
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path()).unwrap();
+        let systemd_json = br#"{"units_enabled": ["ghost.service"]}"#;
+        let c1 = commit_files(
+            &repo,
+            &[
+                ("web1/nginx/systemd/nginx.service", b"[Service]"),
+                ("web1/nginx/systemd.json", systemd_json),
+            ],
+        )
+        .unwrap();
+
+        let tree = repo.find_commit(c1).unwrap().tree().unwrap();
+        let err = validate_systemd_config(&repo, &tree, &"web1".into()).unwrap_err();
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ghost.service"),
+            "error mentions the unit: {msg}"
+        );
+        assert!(msg.contains("nginx"), "error mentions the app: {msg}");
     }
 }

@@ -1,4 +1,4 @@
-//! Serializable newtype for Git object ids.
+//! Primitive newtypes: Git object ids and hostnames.
 
 use std::fmt;
 
@@ -37,6 +37,28 @@ impl From<&str> for Oid {
 }
 
 impl fmt::Display for Oid {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A hostname, as a newtype over `String`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct Hostname(pub String);
+
+impl From<&str> for Hostname {
+    fn from(s: &str) -> Self {
+        Hostname(s.to_string())
+    }
+}
+
+impl From<String> for Hostname {
+    fn from(s: String) -> Self {
+        Hostname(s)
+    }
+}
+
+impl fmt::Display for Hostname {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&self.0)
     }

@@ -4,7 +4,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::error::Result;
-use crate::plan::{Hostname, Plan};
+use crate::plan::Plan;
+use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 
 pub trait Connection {
@@ -131,8 +132,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
-    use crate::oid::Oid;
     use crate::plan::HostPlan;
+    use crate::prim::Oid;
     use crate::session::HostSession;
     use crate::testutil::{TempDir, commit_files};
 
@@ -176,7 +177,7 @@ mod tests {
         let on_units_changed = Box::new(|_: &_| Ok(()));
         let session = HostSession::new(
             repo,
-            "web1".to_string(),
+            "web1".into(),
             apps.path().to_path_buf(),
             units.path().to_path_buf(),
             on_units_changed,
@@ -247,7 +248,7 @@ mod tests {
         let on_units_changed = Box::new(|_: &_| Ok(()));
         let session = HostSession::new(
             repo,
-            "web1".to_string(),
+            "web1".into(),
             apps.path().to_path_buf(),
             units.path().to_path_buf(),
             on_units_changed,

@@ -3,8 +3,8 @@
 mod apply;
 mod deploy;
 mod error;
-mod oid;
 mod plan;
+mod prim;
 mod protocol;
 mod session;
 mod store;
@@ -122,7 +122,7 @@ fn run() -> Result<()> {
         } => {
             let json = fs::read_to_string(&plan_path)?;
             let plan: plan::Plan = serde_json::from_str(&json)?;
-            let make_command = |host: &plan::Hostname| match mode {
+            let make_command = |host: &prim::Hostname| match mode {
                 DeployMode::Local => {
                     let mut cmd =
                         Command::new(std::env::current_exe().expect("current exe is known"));
@@ -189,7 +189,7 @@ fn systemd_apply_changes(changes: &apply::UnitChanges) -> error::Result<()> {
 fn make_host_session(repo: Repository, hostname: String) -> session::HostSession {
     session::HostSession::new(
         repo,
-        hostname,
+        prim::Hostname(hostname),
         PathBuf::from(DEFAULT_APPS_DIR),
         PathBuf::from(DEFAULT_UNIT_DIR),
         Box::new(systemd_apply_changes),
