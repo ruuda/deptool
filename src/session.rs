@@ -98,20 +98,18 @@ impl HostSession {
                 };
 
                 if !changed_units.is_empty() {
-                    match (self.on_units_changed)(&changed_units) {
-                        Ok(()) => {
-                            // TODO: Emit message about restart.
-                            // Should we do it unconditionally to simplify the
-                            // protocol, so there is always a message?
-                            // We can return a list of restarted units, which may be empty.
-                        }
-                        Err(err) => {
-                            emit_message(Message::Error {
-                                message: format!("systemd restart failed: {err}"),
-                            });
-                        }
+                    if let Err(err) = (self.on_units_changed)(&changed_units) {
+                        emit_message(Message::Error {
+                            message: format!("systemd restart failed: {err}"),
+                        });
+                        return;
                     }
                 }
+
+                emit_message(Message::ApplyComplete {
+                    commit: target_commit,
+                    restarted_units: changed_units,
+                });
             }
         }
     }
@@ -193,7 +191,6 @@ mod tests {
         };
         let responses = collect(&env.session, req);
 
-        // Should have AppliedApp for nginx, then ApplyComplete.
         assert_eq!(responses.len(), 2);
         match &responses[0] {
             Message::AppliedApp { app, diff } => {

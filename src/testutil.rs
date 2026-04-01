@@ -62,3 +62,39 @@ pub fn commit_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::
     let tree_oid = build_tree_from_files(repo, files)?;
     commit_tree(repo, tree_oid)
 }
+
+/// Assert that a directory contains exactly the given files with the given contents.
+///
+/// Paths are relative to `dir`. The directory must not contain any other files.
+pub fn assert_dir_contents(dir: &Path, expected: &[(&str, &[u8])]) {
+    let mut actual: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    collect_files(dir, dir, &mut actual);
+
+    let expected: BTreeMap<String, &[u8]> = expected.iter().map(|&(p, c)| (p.to_string(), c)).collect();
+
+    let actual_keys: Vec<&String> = actual.keys().collect();
+    let expected_keys: Vec<&String> = expected.keys().collect();
+    assert_eq!(actual_keys, expected_keys, "file list mismatch in {}", dir.display());
+
+    for (path, expected_content) in &expected {
+        let actual_content = &actual[path];
+        assert_eq!(
+            actual_content, expected_content,
+            "content mismatch for {path}",
+        );
+    }
+}
+
+fn collect_files(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
+    for entry in fs::read_dir(dir).expect("directory is readable") {
+        let entry = entry.expect("entry is readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(base, &path, out);
+        } else {
+            let rel = path.strip_prefix(base).expect("path is under base");
+            let content = fs::read(&path).expect("file is readable");
+            out.insert(rel.to_string_lossy().to_string(), content);
+        }
+    }
+}

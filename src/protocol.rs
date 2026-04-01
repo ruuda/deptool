@@ -28,6 +28,7 @@ pub enum Message {
     },
     ApplyComplete {
         commit: Oid,
+        restarted_units: Vec<String>,
     },
     Stale {
         expected_commit: Option<Oid>,
