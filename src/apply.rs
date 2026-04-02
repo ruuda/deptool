@@ -104,7 +104,7 @@ pub fn apply_host(
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
                 apply_app(repo, commit_oid, host, app, apps_dir)?;
             }
-            AppDiff::Remove => {
+            AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
             }
         }

@@ -2,6 +2,7 @@
 
 mod apply;
 mod deploy;
+mod display;
 mod error;
 mod plan;
 mod prim;
@@ -12,18 +13,17 @@ mod store;
 #[cfg(test)]
 mod testutil;
 
-use std::fs;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-use bpaf::{Bpaf, Parser};
+use bpaf::Bpaf;
 use git2::Repository;
 
 use error::Result;
 
 #[derive(Debug, Clone, Bpaf)]
-enum HostCmd {
+enum AgentCmd {
     /// Apply a single commit and exit.
     #[bpaf(command)]
     Apply {
@@ -43,10 +43,16 @@ enum HostCmd {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum DeployMode {
     Local,
     Remote,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ConfirmMode {
+    Prompt,
+    ApplyWithoutPrompt,
 }
 
 #[derive(Debug, Clone, Bpaf)]
@@ -54,52 +60,56 @@ enum Cmd {
     /// Record a directory as a new commit in the store.
     #[bpaf(command)]
     Commit {
-        /// Path to the bare Git store.
-        #[bpaf(positional("STORE"))]
-        store: PathBuf,
         /// Directory to commit.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
-    /// Compute and save the deployment plan.
+    /// Plan and apply changes to all hosts.
     #[bpaf(command)]
-    Plan {
-        /// Output file for the plan (default: plan.json).
-        #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
-        output: PathBuf,
-        /// Path to the bare Git store.
-        #[bpaf(positional("STORE"))]
-        store: PathBuf,
-    },
-    /// Apply a saved plan to all hosts.
-    #[bpaf(command)]
-    Apply {
-        /// Path to the plan file (default: plan.json).
-        #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
-        plan: PathBuf,
-        /// Path to the store on the remote host.
-        #[bpaf(long("remote-store"))]
-        remote_store: String,
-        /// Run deptool locally instead of over SSH (for testing).
+    Deploy {
+        /// Path to the store on target hosts (default: /var/lib/deptool/store).
+        #[bpaf(
+            long("remote-store"),
+            fallback(PathBuf::from("/var/lib/deptool/store"))
+        )]
+        remote_store: PathBuf,
+        /// Compute and display the plan, then exit without applying.
+        #[bpaf(long("plan-only"), switch)]
+        plan_only: bool,
+        /// Apply without prompting for confirmation.
+        #[bpaf(
+            long("no-confirm"),
+            flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
+        )]
+        confirm_mode: ConfirmMode,
+        /// Run the agent locally instead of over SSH (for testing).
         #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote))]
         mode: DeployMode,
     },
-    /// Commands that run on target hosts.
+    /// Commands that run on target hosts (used internally over SSH).
     #[bpaf(command)]
-    Host {
-        #[bpaf(external(host_cmd))]
-        cmd: HostCmd,
+    Agent {
+        #[bpaf(external(agent_cmd))]
+        cmd: AgentCmd,
     },
 }
 
-// TODO: CLI ergonomics pass: set sensible defaults for store location and
-// remote-store path so most invocations don't need to specify them.
+#[derive(Debug, Clone, Bpaf)]
+#[bpaf(options)]
+struct Args {
+    /// Path to the local store (default: ./deptool_store).
+    #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+    store: PathBuf,
+    #[bpaf(external(cmd))]
+    cmd: Cmd,
+}
 
 fn run() -> Result<()> {
-    let cmd = cmd().to_options().run();
+    let args = args().run();
+    let store = args.store;
 
-    match cmd {
-        Cmd::Commit { store, dir } => {
+    match args.cmd {
+        Cmd::Commit { dir } => {
             let repo = match Repository::open(&store) {
                 Ok(r) => r,
                 Err(_) => Repository::init_bare(&store)?,
@@ -108,35 +118,67 @@ fn run() -> Result<()> {
             let commit_oid = store::commit_tree(&repo, tree_oid)?;
             println!("{commit_oid}");
         }
-        Cmd::Plan { store, output } => {
-            let repo = Repository::open(&store)?;
-            let plan = plan::make_plan(&repo)?;
-            let json = serde_json::to_string_pretty(&plan)?;
-            fs::write(&output, json)?;
-            eprintln!("Plan written to {}", output.display());
-        }
-        Cmd::Apply {
-            plan: plan_path,
+        Cmd::Deploy {
             remote_store,
+            plan_only,
+            confirm_mode,
             mode,
         } => {
-            let json = fs::read_to_string(&plan_path)?;
-            let plan: plan::Plan = serde_json::from_str(&json)?;
-            let make_command = |host: &prim::Hostname| match mode {
-                DeployMode::Local => {
-                    let mut cmd =
-                        Command::new(std::env::current_exe().expect("current exe is known"));
-                    cmd.args(["host", "session", &remote_store]);
-                    cmd
-                }
-                DeployMode::Remote => {
-                    // SSH concatenates remote arguments into a single string
-                    // and passes them to the user's login shell. This is safe
-                    // as long as the store path and hostname contain no spaces
-                    // or shell metacharacters, which holds for our setup.
-                    let mut cmd = Command::new("ssh");
-                    cmd.args([&host.0, "deptool", "host", "session", &remote_store]);
-                    cmd
+            let repo = Repository::open(&store)?;
+            let plan = plan::make_plan(&repo)?;
+
+            if plan.hosts.is_empty() {
+                eprintln!("All hosts are up to date.");
+                return Ok(());
+            }
+
+            display::print_plan(&repo, &plan)?;
+
+            if plan_only {
+                return Ok(());
+            }
+
+            let decision = match confirm_mode {
+                ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
+                ConfirmMode::Prompt => display::confirm(&repo, &plan, &store)?,
+            };
+            if let display::Decision::Abort = decision {
+                return Ok(());
+            }
+
+            let remote_store_str = remote_store
+                .to_str()
+                .ok_or_else(|| {
+                    error::Error::InvalidConfig("remote store path is not valid UTF-8".into())
+                })?
+                .to_string();
+            let make_command = |host: &prim::Hostname| -> Command {
+                match mode {
+                    DeployMode::Local => {
+                        let mut cmd = Command::new(
+                            std::env::current_exe().expect("current exe path is known"),
+                        );
+                        cmd.args(["agent", "session", &remote_store_str]);
+                        cmd
+                    }
+                    DeployMode::Remote => {
+                        // SSH concatenates remote arguments into a single shell
+                        // string. We assert the inputs are shell-safe; in the
+                        // future we should pass the store path over stdin instead.
+                        let is_shell_safe =
+                            |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
+                        assert!(
+                            is_shell_safe(&remote_store_str),
+                            "remote store path is free of shell metacharacters"
+                        );
+                        assert!(
+                            is_shell_safe(&host.0),
+                            "hostname is free of shell metacharacters"
+                        );
+                        let mut cmd = Command::new("ssh");
+                        cmd.args([&host.0, "deptool", "agent", "session", &remote_store_str]);
+                        cmd
+                    }
                 }
             };
             deploy::execute_plan(
@@ -145,7 +187,7 @@ fn run() -> Result<()> {
                 |host, message| eprintln!("{host}: {message:?}"),
             )?;
         }
-        Cmd::Host { cmd } => run_host(cmd)?,
+        Cmd::Agent { cmd } => run_agent(cmd)?,
     }
 
     Ok(())
@@ -155,7 +197,7 @@ const DEFAULT_APPS_DIR: &str = "/var/lib/deptool/apps";
 const DEFAULT_UNIT_DIR: &str = "/etc/systemd/system";
 
 fn read_hostname() -> String {
-    fs::read_to_string("/etc/hostname")
+    std::fs::read_to_string("/etc/hostname")
         .unwrap_or("(unknown hostname)".into())
         .trim()
         .to_string()
@@ -196,9 +238,9 @@ fn make_host_session(repo: Repository, hostname: String) -> session::HostSession
     )
 }
 
-fn run_host(cmd: HostCmd) -> Result<()> {
+fn run_agent(cmd: AgentCmd) -> Result<()> {
     match cmd {
-        HostCmd::Apply { store, commit } => {
+        AgentCmd::Apply { store, commit } => {
             let repo = Repository::open(&store)?;
             let hostname = read_hostname();
             let session = make_host_session(repo, hostname);
@@ -210,7 +252,7 @@ fn run_host(cmd: HostCmd) -> Result<()> {
                 eprintln!("{response:?}");
             });
         }
-        HostCmd::Session { store } => {
+        AgentCmd::Session { store } => {
             let repo = Repository::open(&store)?;
             let hostname = read_hostname();
             let session = make_host_session(repo, hostname.clone());

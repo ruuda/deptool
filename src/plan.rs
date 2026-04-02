@@ -17,7 +17,7 @@ use crate::store::get_host_apps;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
     Add { new_tree: Oid },
-    Remove,
+    Remove { old_tree: Oid },
     Update { old_tree: Oid, new_tree: Oid },
 }
 
@@ -63,9 +63,14 @@ pub fn diff_apps(
         }
     }
 
-    for name in current.keys() {
+    for (name, oid) in current {
         if !target.contains_key(name) {
-            changes.insert(name.clone(), AppDiff::Remove);
+            changes.insert(
+                name.clone(),
+                AppDiff::Remove {
+                    old_tree: (*oid).into(),
+                },
+            );
         }
     }
 
@@ -158,8 +163,6 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
-
     use git2::Repository;
 
     use super::*;
@@ -230,10 +233,9 @@ mod tests {
         commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
 
         let plan = make_plan(&repo)?;
-        assert_eq!(
-            plan.hosts[&"web1".into()].apps,
-            BTreeMap::from([("rofld".into(), AppDiff::Remove)]),
-        );
+        let apps = &plan.hosts[&"web1".into()].apps;
+        assert_eq!(apps.len(), 1);
+        assert!(matches!(apps["rofld"], AppDiff::Remove { .. }));
         Ok(())
     }
 
