@@ -1,7 +1,7 @@
 //! Execute a deployment plan by driving remote host sessions.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::error::{Error, Result};
 use crate::plan::Plan;
@@ -9,7 +9,7 @@ use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 
 pub trait Connection {
-    fn read_hello(&mut self) -> Result<Hello>;
+    fn hello(&self) -> &Hello;
     fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()>;
 }
 
@@ -22,15 +22,21 @@ pub struct RemoteSession {
     // finish, then close our reader, then reap the child process.
     writer: Option<ChildStdin>,
     reader: BufReader<ChildStdout>,
-    // Buffered hello line consumed during connection setup (see try_session).
-    hello_line: Option<String>,
+    hello: Hello,
 
     // Not dead, needed to keep the child process alive.
     #[allow(dead_code)]
     child: Child,
 }
 
+/// Exit code returned by a shell when the command is not found.
+const EXIT_COMMAND_NOT_FOUND: i32 = 127;
+
 impl RemoteSession {
+    /// Spawn the session command and read the hello message.
+    ///
+    /// Returns `Err(AgentNotInstalled)` if the process exits with 127
+    /// before sending a hello, indicating the binary is not on the target.
     pub fn new(mut cmd: Command) -> Result<Self> {
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -38,13 +44,28 @@ impl RemoteSession {
             .stderr(Stdio::inherit())
             .spawn()?;
 
-        let reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
         let writer = child.stdin.take().expect("stdin is piped");
+
+        let mut line = String::new();
+        let hello = match reader.read_line(&mut line) {
+            Ok(0) => {
+                // EOF before hello: check whether the binary was missing.
+                match child.try_wait()?.and_then(|s| s.code()) {
+                    Some(EXIT_COMMAND_NOT_FOUND) => return Err(Error::AgentNotInstalled),
+                    _ => return Err(Error::SetupProtocolError(
+                        "agent exited before sending hello".into(),
+                    )),
+                }
+            }
+            Ok(_) => serde_json::from_str(&line)?,
+            Err(e) => return Err(e.into()),
+        };
 
         Ok(RemoteSession {
             child,
             reader,
-            hello_line: None,
+            hello,
             writer: Some(writer),
         })
     }
@@ -74,16 +95,8 @@ impl RemoteSession {
 }
 
 impl Connection for RemoteSession {
-    fn read_hello(&mut self) -> Result<Hello> {
-        let line = match self.hello_line.take() {
-            Some(line) => line,
-            None => {
-                let mut line = String::new();
-                self.reader.read_line(&mut line)?;
-                line
-            }
-        };
-        Ok(serde_json::from_str(&line)?)
+    fn hello(&self) -> &Hello {
+        &self.hello
     }
 
     fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()> {
@@ -101,35 +114,6 @@ impl Connection for RemoteSession {
     }
 }
 
-/// Exit code returned by a shell when the command is not found.
-const EXIT_COMMAND_NOT_FOUND: i32 = 127;
-
-/// Try to start a session with `cmd` and read the hello message.
-///
-/// Returns `None` if the command exited with 127 (binary not installed),
-/// `Some(conn)` on success, or an error for other failures.
-fn try_session(cmd: Command) -> Result<Option<RemoteSession>> {
-    let mut session = RemoteSession::new(cmd)?;
-    let mut line = String::new();
-    match session.reader.read_line(&mut line) {
-        Ok(0) => {
-            // EOF before hello: check whether the binary was missing.
-            let status: Option<ExitStatus> = session.child.try_wait()?;
-            match status.and_then(|s| s.code()) {
-                Some(EXIT_COMMAND_NOT_FOUND) => Ok(None),
-                _ => Err(Error::SetupProtocolError(
-                    "agent exited before sending hello".into(),
-                )),
-            }
-        }
-        Ok(_) => {
-            session.hello_line = Some(line);
-            Ok(Some(session))
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
 /// Connect to a host, installing the agent binary first if it is missing.
 ///
 /// `make_cmd` builds the `deptool agent session` command for the host.
@@ -141,15 +125,18 @@ pub fn connect_with_setup(
     binary: &[u8],
     remote_bin_path: &str,
 ) -> Result<Box<dyn Connection>> {
-    if let Some(session) = try_session(make_cmd())? {
-        return Ok(Box::new(session));
+    match RemoteSession::new(make_cmd()) {
+        Ok(session) => return Ok(Box::new(session)),
+        Err(Error::AgentNotInstalled) => {}
+        Err(e) => return Err(e),
     }
     crate::setup::install_binary(install, binary, remote_bin_path)?;
-    match try_session(make_cmd())? {
-        Some(session) => Ok(Box::new(session)),
-        None => Err(Error::SetupProtocolError(
+    match RemoteSession::new(make_cmd()) {
+        Ok(session) => Ok(Box::new(session)),
+        Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
             "agent not found after installation".into(),
         )),
+        Err(e) => Err(e),
     }
 }
 
@@ -161,7 +148,7 @@ pub fn execute_plan(
     for (host, host_plan) in &plan.hosts {
         let mut conn = connect(host)?;
 
-        let hello = conn.read_hello()?;
+        let hello = conn.hello();
         if hello.version != protocol::VERSION {
             on_message(
                 host,
@@ -208,8 +195,8 @@ mod tests {
     }
 
     impl Connection for LocalConnection {
-        fn read_hello(&mut self) -> Result<Hello> {
-            Ok(self.hello.clone())
+        fn hello(&self) -> &Hello {
+            &self.hello
         }
 
         fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()> {

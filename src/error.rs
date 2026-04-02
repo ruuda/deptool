@@ -9,6 +9,7 @@ pub enum Error {
     Json(serde_json::Error),
     NonUtf8FileName,
     InvalidConfig(String),
+    AgentNotInstalled,
     SetupChecksumMismatch { expected: String, got: String },
     SetupProtocolError(String),
 }
@@ -38,6 +39,7 @@ impl fmt::Display for Error {
             Error::Git(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
+            Error::AgentNotInstalled => write!(f, "agent binary not installed on target host"),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             Error::SetupChecksumMismatch { expected, got } => {
                 write!(f, "setup checksum mismatch: expected {expected}, got {got}")
