@@ -20,14 +20,17 @@ pub fn truncated_sha256(bytes: &[u8], prefix_len: usize) -> String {
 /// Install the the binary on the target host.
 ///
 /// We execute a single command over SSH. The command reads the binary from
-/// stdin via `dd`, makes it executable, symlinks it to `/usr/bin/deptool`, and
+/// stdin via `dd`, makes it executable, symlinks it as the current version, and
 /// prints its sha256sum so the caller can verify the transfer was successful.
 pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> Result<()> {
     let install_command = [
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
         &format!("sudo dd status=none of={remote_bin_path}"),
         &format!("sudo chmod +x {remote_bin_path}"),
-        &format!("sudo ln -sf {remote_bin_path} /usr/bin/deptool"),
+        // It would be nice to create the symlink /usr/bin/deptool instead,
+        // but /usr is a read-only filesystem on Flatcar, so we opt to stick
+        // to /var/lib/.
+        &format!("sudo ln -sf {remote_bin_path} /var/lib/deptool/deptool"),
         &format!("sudo sha256sum {remote_bin_path}"),
     ]
     .join(" && ");

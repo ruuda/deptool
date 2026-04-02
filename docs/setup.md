@@ -53,7 +53,7 @@ host which runs a shell command made up of these parts:
  - `sudo mkdir -p /var/lib/deptool/{bin,apps,store}`
  - `sudo dd of=<target-bin-path>`
  - `sudo chmod +x <target-bin-path>`
- - `sudo ln -sf <target-bin-bath> /usr/bin/deptool`
+ - `sudo ln -sf <target-bin-bath> /var/lib/deptool/deptool`
  - `sudo sha256sum <target-bin-path>`
 
 Then we write the binary over stdin. This command is carefully chosen such that:
