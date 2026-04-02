@@ -16,6 +16,10 @@ pub enum Error {
     },
     SetupProtocolError(String),
     ProtocolError(String),
+    GitPush {
+        remote_url: String,
+        message: String,
+    },
 }
 
 impl From<std::io::Error> for Error {
@@ -56,6 +60,10 @@ impl fmt::Display for Error {
             }
             Error::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
             Error::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
+            Error::GitPush {
+                remote_url,
+                message,
+            } => write!(f, "git push to {remote_url} failed: {message}"),
         }
     }
 }

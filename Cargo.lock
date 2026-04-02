@@ -53,6 +53,7 @@ dependencies = [
  "bpaf",
  "git2",
  "hmac-sha256",
+ "libc",
  "serde",
  "serde_json",
 ]

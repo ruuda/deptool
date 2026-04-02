@@ -1,16 +1,20 @@
 //! Execute a deployment plan by driving remote host sessions.
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use crate::error::{Error, Result};
 use crate::plan::Plan;
-use crate::prim::Hostname;
+use crate::prim::{Hostname, Oid};
 use crate::protocol::{self, Hello, Message, Request};
 
 pub trait Connection {
     fn hello(&self) -> &Hello;
-    fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()>;
+    fn send_request(&mut self, request: &Request) -> Result<()>;
+    fn read_message(&mut self) -> Result<Option<Message>>;
+    /// Close stdin to signal no more requests are coming.
+    fn close(&mut self);
 }
 
 // TODO: Maybe we should rename "session" to "agent" after all. Then this can be
@@ -76,6 +80,21 @@ impl RemoteSession {
         })
     }
 
+}
+
+impl Connection for RemoteSession {
+    fn hello(&self) -> &Hello {
+        &self.hello
+    }
+
+    fn send_request(&mut self, request: &Request) -> Result<()> {
+        let writer = self.writer.as_mut().expect("stdin is still open");
+        serde_json::to_writer(&mut *writer, request)?;
+        writeln!(writer)?;
+        writer.flush()?;
+        Ok(())
+    }
+
     fn read_message(&mut self) -> Result<Option<Message>> {
         let mut line = String::new();
         let n = self.reader.read_line(&mut line)?;
@@ -86,78 +105,172 @@ impl RemoteSession {
         Ok(Some(message))
     }
 
-    fn send_request(&mut self, request: &protocol::Request) -> Result<()> {
-        let writer = self.writer.as_mut().expect("stdin is still open");
-        serde_json::to_writer(&mut *writer, request)?;
-        writeln!(writer)?;
-        writer.flush()?;
-        Ok(())
-    }
-
-    /// Close stdin so the remote session knows no more requests are coming.
-    fn close_stdin(&mut self) {
+    fn close(&mut self) {
         self.writer.take();
     }
 }
 
-impl Connection for RemoteSession {
-    fn hello(&self) -> &Hello {
-        &self.hello
-    }
-
-    fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()> {
-        self.send_request(request)?;
-
-        // Close stdin so that the other end knows no more messages are coming,
-        // and it can exit and close its stdout, so that we can read messages
-        // until EOF below.
-        self.close_stdin();
-
-        while let Some(message) = self.read_message()? {
-            on_message(message);
-        }
-        Ok(())
-    }
+pub enum LockFailure {
+    Stale {
+        expected_commit: Option<Oid>,
+        actual_commit: Option<Oid>,
+    },
+    Busy,
+    VersionMismatch {
+        remote_version: String,
+    },
+    ConnectionFailed(String),
 }
 
-pub fn execute_plan(
+pub struct LockResult {
+    pub locked: Vec<(Hostname, Box<dyn Connection>)>,
+    pub failures: Vec<(Hostname, LockFailure)>,
+}
+
+/// Open sessions and acquire deploy locks on all hosts in the plan.
+///
+/// Tries every host even if some fail, so the caller gets all stale info
+/// in one pass. Hosts are locked in plan iteration order (asciibetical,
+/// since the plan uses a BTreeMap).
+pub fn lock_hosts(
     plan: &Plan,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
-    mut on_message: impl FnMut(&Hostname, &Message),
-) -> Result<()> {
-    for (host, host_plan) in &plan.hosts {
-        let mut conn = connect(host)?;
+) -> LockResult {
+    let mut result = LockResult {
+        locked: Vec::new(),
+        failures: Vec::new(),
+    };
 
-        let hello = conn.hello();
-        if hello.version != protocol::VERSION {
-            on_message(
-                host,
-                &Message::Error {
-                    message: format!(
-                        "version mismatch (local {}, remote {})",
-                        protocol::VERSION,
-                        hello.version,
-                    ),
+    for (host, host_plan) in &plan.hosts {
+        let mut conn = match connect(host) {
+            Ok(c) => c,
+            Err(err) => {
+                result
+                    .failures
+                    .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
+                continue;
+            }
+        };
+
+        if conn.hello().version != protocol::VERSION {
+            result.failures.push((
+                host.clone(),
+                LockFailure::VersionMismatch {
+                    remote_version: conn.hello().version.clone(),
                 },
-            );
+            ));
             continue;
         }
 
+        let lock_request = Request::Lock {
+            expected_current_commit: host_plan.expected_current.clone(),
+        };
+        if let Err(err) = conn.send_request(&lock_request) {
+            result
+                .failures
+                .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
+            continue;
+        }
+
+        match conn.read_message() {
+            Ok(Some(Message::Locked)) => {
+                result.locked.push((host.clone(), conn));
+            }
+            Ok(Some(Message::LockStale {
+                expected_commit,
+                actual_commit,
+            })) => {
+                result.failures.push((
+                    host.clone(),
+                    LockFailure::Stale {
+                        expected_commit,
+                        actual_commit,
+                    },
+                ));
+            }
+            Ok(Some(Message::LockBusy)) => {
+                result.failures.push((host.clone(), LockFailure::Busy));
+            }
+            Ok(Some(other)) => {
+                result.failures.push((
+                    host.clone(),
+                    LockFailure::ConnectionFailed(format!("unexpected lock response: {other:?}")),
+                ));
+            }
+            Ok(None) => {
+                result.failures.push((
+                    host.clone(),
+                    LockFailure::ConnectionFailed("agent closed connection during lock".into()),
+                ));
+            }
+            Err(err) => {
+                result
+                    .failures
+                    .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
+            }
+        }
+    }
+
+    result
+}
+
+/// Send Apply to all locked hosts and stream responses.
+pub fn apply_hosts(
+    plan: &Plan,
+    connections: &mut Vec<(Hostname, Box<dyn Connection>)>,
+    mut on_message: impl FnMut(&Hostname, Message),
+) -> Result<()> {
+    for (host, conn) in connections.iter_mut() {
+        let host_plan = &plan.hosts[host];
         let request = Request::Apply {
             target_commit: plan.commit.clone(),
             expected_current_commit: host_plan.expected_current.clone(),
         };
-        conn.send(&request, &mut |message| {
-            on_message(host, &message);
-        })?;
+        conn.send_request(&request)?;
+        conn.close();
+        while let Some(message) = conn.read_message()? {
+            on_message(host, message);
+        }
     }
+    Ok(())
+}
 
+/// Push a commit to a remote store so its objects are available there.
+///
+/// Uses `git push` with the given URL. The commit is pushed to
+/// `refs/heads/main` on the remote — a ref the agent doesn't use, it's
+/// just a way to transfer the objects.
+// TODO: In the future, detect in the planning phase when the remote is
+// ahead (push would fail because remote main is not an ancestor).
+pub fn push_to_host(
+    store_path: &Path,
+    remote_url: &str,
+    commit: &Oid,
+    receive_pack: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("--git-dir").arg(store_path);
+    cmd.arg("push");
+    if let Some(rp) = receive_pack {
+        cmd.arg(format!("--receive-pack={rp}"));
+    }
+    cmd.arg(remote_url);
+    cmd.arg(format!("{}:refs/heads/main", commit));
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::GitPush {
+            remote_url: remote_url.to_string(),
+            message: stderr.trim().to_string(),
+        });
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, VecDeque};
 
     use super::*;
     use crate::plan::HostPlan;
@@ -169,6 +282,7 @@ mod tests {
     struct LocalConnection {
         session: HostSession,
         hello: Hello,
+        message_buffer: VecDeque<Message>,
         _store: TempDir,
         _apps: TempDir,
         _units: TempDir,
@@ -179,11 +293,18 @@ mod tests {
             &self.hello
         }
 
-        fn send(&mut self, request: &Request, on_message: &mut dyn FnMut(Message)) -> Result<()> {
+        fn send_request(&mut self, request: &Request) -> Result<()> {
+            let buffer = &mut self.message_buffer;
             self.session
-                .handle_request(request.clone(), &mut |msg| on_message(msg));
+                .handle_request(request.clone(), &mut |msg| buffer.push_back(msg));
             Ok(())
         }
+
+        fn read_message(&mut self) -> Result<Option<Message>> {
+            Ok(self.message_buffer.pop_front())
+        }
+
+        fn close(&mut self) {}
     }
 
     struct TestHost {
@@ -217,6 +338,7 @@ mod tests {
         let conn = Box::new(LocalConnection {
             session,
             hello,
+            message_buffer: VecDeque::new(),
             _store: store,
             _apps: apps,
             _units: units,
@@ -224,9 +346,8 @@ mod tests {
         Ok(TestHost { conn, commit_oid })
     }
 
-    /// Execute a plan with a single host, returning all messages.
-    fn run_single_host(commit: Oid, conn: Box<dyn Connection>) -> Result<Vec<Message>> {
-        let plan = Plan {
+    fn single_host_plan(commit: Oid) -> Plan {
+        Plan {
             commit,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
@@ -235,21 +356,24 @@ mod tests {
                     expected_current: None,
                 },
             )]),
-        };
-        let mut messages = Vec::new();
-        let mut conn = Some(conn);
-        execute_plan(
-            &plan,
-            |_| Ok(conn.take().expect("connect is called once per host")),
-            |_, msg| messages.push(msg.clone()),
-        )?;
-        Ok(messages)
+        }
     }
 
     #[test]
-    fn execute_plan_emits_apply_complete_for_fresh_host() -> Result<()> {
+    fn lock_and_apply_emits_apply_complete_for_fresh_host() -> Result<()> {
         let host = test_host()?;
-        let messages = run_single_host(host.commit_oid.into(), host.conn)?;
+        let plan = single_host_plan(host.commit_oid.into());
+        let mut conn = Some(host.conn);
+        let lock_result =
+            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+
+        assert!(lock_result.failures.is_empty());
+        assert_eq!(lock_result.locked.len(), 1);
+
+        let mut messages = Vec::new();
+        apply_hosts(&plan, &mut lock_result.locked.into_iter().collect(), |_, msg| {
+            messages.push(msg)
+        })?;
 
         assert!(matches!(
             messages.last(),
@@ -259,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn execute_plan_reports_stale_when_current_ref_mismatches() -> Result<()> {
+    fn lock_reports_stale_when_current_ref_mismatches() -> Result<()> {
         let store = TempDir::new("store");
         let repo = git2::Repository::init_bare(store.path())?;
 
@@ -285,33 +409,43 @@ mod tests {
             version: protocol::VERSION.to_string(),
             hostname: "web1".to_string(),
         };
-        let conn = Box::new(LocalConnection {
+        let conn: Box<dyn Connection> = Box::new(LocalConnection {
             session,
             hello,
+            message_buffer: VecDeque::new(),
             _store: store,
             _apps: apps,
             _units: units,
         });
 
-        // The plan expects no prior commit, but the host already has one.
-        let fake_commit = Oid::from("0000000000000000000000000000000000000000");
-        let messages = run_single_host(fake_commit, conn)?;
+        let plan = single_host_plan(Oid::from("0000000000000000000000000000000000000000"));
+        let mut conn = Some(conn);
+        let lock_result =
+            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
-        assert_eq!(messages.len(), 1);
-        assert!(matches!(messages[0], Message::Stale { .. }));
+        assert!(lock_result.locked.is_empty());
+        assert_eq!(lock_result.failures.len(), 1);
+        assert!(matches!(
+            &lock_result.failures[0].1,
+            LockFailure::Stale { actual_commit: Some(_), .. }
+        ));
         Ok(())
     }
 
     #[test]
-    fn execute_plan_skips_host_on_version_mismatch() -> Result<()> {
+    fn lock_reports_version_mismatch() -> Result<()> {
         let host = test_host_with_version("0.0.0-fake")?;
-        let messages = run_single_host(host.commit_oid.into(), host.conn)?;
+        let plan = single_host_plan(host.commit_oid.into());
+        let mut conn = Some(host.conn);
+        let lock_result =
+            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
-        assert_eq!(messages.len(), 1);
-        match &messages[0] {
-            Message::Error { message } if message.contains("version mismatch") => { /* Ok */ }
-            other => panic!("Expected version mismatch error, got {other:?}"),
-        }
+        assert!(lock_result.locked.is_empty());
+        assert_eq!(lock_result.failures.len(), 1);
+        assert!(matches!(
+            &lock_result.failures[0].1,
+            LockFailure::VersionMismatch { .. }
+        ));
         Ok(())
     }
 

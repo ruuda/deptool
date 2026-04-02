@@ -8,6 +8,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Acquire the deploy lock and verify the host's current commit.
+    Lock {
+        expected_current_commit: Option<Oid>,
+    },
     Apply {
         expected_current_commit: Option<Oid>,
         target_commit: Oid,
@@ -20,8 +24,14 @@ pub struct Hello {
     pub hostname: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
+    Locked,
+    LockStale {
+        expected_commit: Option<Oid>,
+        actual_commit: Option<Oid>,
+    },
+    LockBusy,
     AppliedApp {
         app: String,
         diff: crate::plan::AppDiff,

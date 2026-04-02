@@ -226,7 +226,89 @@ fn run() -> Result<()> {
                 }
             };
 
-            deploy::execute_plan(&plan, make_session, |host, message| {
+            let lock_result = deploy::lock_hosts(&plan, make_session);
+
+            for (host, failure) in &lock_result.failures {
+                match failure {
+                    deploy::LockFailure::Stale {
+                        expected_commit,
+                        actual_commit,
+                    } => {
+                        eprintln!(
+                            "{host}: stale (expected {expected_commit:?}, actual {actual_commit:?})"
+                        );
+                        if let Some(actual) = actual_commit {
+                            let refname = format!("refs/remotes/{host}/current");
+                            if let Err(err) = store::set_ref(
+                                &repo,
+                                &refname,
+                                git2::Oid::from(actual),
+                                store::RefUpdate::SetCurrent,
+                            ) {
+                                eprintln!("{host}: failed to update tracking ref: {err}");
+                            }
+                        }
+                    }
+                    deploy::LockFailure::Busy => {
+                        eprintln!("{host}: another deployment is in progress");
+                    }
+                    deploy::LockFailure::VersionMismatch { remote_version } => {
+                        eprintln!(
+                            "{host}: version mismatch (local {}, remote {remote_version})",
+                            protocol::VERSION,
+                        );
+                    }
+                    deploy::LockFailure::ConnectionFailed(msg) => {
+                        eprintln!("{host}: connection failed: {msg}");
+                    }
+                }
+            }
+
+            if !lock_result.failures.is_empty() {
+                return Err(Error::InvalidConfig(format!(
+                    "failed to lock {} host(s), aborting",
+                    lock_result.failures.len(),
+                )));
+            }
+
+            // Push the commit to every host so the objects are available
+            // for checkout. The receive-pack override is needed for remote
+            // hosts because the store is owned by root.
+            for (host, _) in &lock_result.locked {
+                let (remote_url, receive_pack) = match mode {
+                    DeployMode::Local => {
+                        (format!("file://{remote_store_str}"), None)
+                    }
+                    DeployMode::Remote => (
+                        format!("ssh://{}/{remote_store_str}", host.0),
+                        Some("sudo git-receive-pack"),
+                    ),
+                };
+                eprintln!("{host}: pushing commit {} ...", plan.commit);
+                deploy::push_to_host(
+                    &store,
+                    &remote_url,
+                    &plan.commit,
+                    receive_pack,
+                )?;
+            }
+
+            let mut connections: Vec<_> = lock_result.locked.into_iter().collect();
+            deploy::apply_hosts(&plan, &mut connections, |host, message| {
+                match &message {
+                    protocol::Message::ApplyComplete { commit, .. } => {
+                        let refname = format!("refs/remotes/{host}/current");
+                        if let Err(err) = store::set_ref(
+                            &repo,
+                            &refname,
+                            git2::Oid::from(commit),
+                            store::RefUpdate::SetCurrent,
+                        ) {
+                            eprintln!("{host}: failed to update tracking ref: {err}");
+                        }
+                    }
+                    _ => {}
+                }
                 eprintln!("{host}: {message:?}")
             })?;
         }
@@ -286,7 +368,7 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
         AgentCmd::Apply { store, commit } => {
             let repo = Repository::open(&store)?;
             let hostname = read_hostname();
-            let session = make_host_session(repo, hostname);
+            let mut session = make_host_session(repo, hostname);
             let request = protocol::Request::Apply {
                 target_commit: commit.as_str().into(),
                 expected_current_commit: None,
@@ -301,7 +383,7 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
                 Err(_) => Repository::init_bare(&store)?,
             };
             let hostname = read_hostname();
-            let session = make_host_session(repo, hostname.clone());
+            let mut session = make_host_session(repo, hostname.clone());
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
 
