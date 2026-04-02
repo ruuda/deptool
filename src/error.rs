@@ -15,6 +15,7 @@ pub enum Error {
         actual_hash: String,
     },
     SetupProtocolError(String),
+    ProtocolError(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -54,6 +55,7 @@ impl fmt::Display for Error {
                 )
             }
             Error::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
+            Error::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
         }
     }
 }

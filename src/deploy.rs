@@ -54,7 +54,7 @@ impl RemoteSession {
                 match child.try_wait()?.and_then(|s| s.code()) {
                     Some(EXIT_COMMAND_NOT_FOUND) => return Err(Error::AgentNotInstalled),
                     _ => {
-                        return Err(Error::SetupProtocolError(
+                        return Err(Error::ProtocolError(
                             "agent exited before sending hello".into(),
                         ));
                     }
