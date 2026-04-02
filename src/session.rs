@@ -128,11 +128,7 @@ impl HostSession {
         }
     }
 
-    fn handle_receive_pack(
-        &self,
-        pack_data: &str,
-        emit_message: &mut impl FnMut(Message),
-    ) {
+    fn handle_receive_pack(&self, pack_data: &str, emit_message: &mut impl FnMut(Message)) {
         let bytes = BASE64.decode(pack_data).expect("pack_data is valid base64");
         match crate::store::write_pack(&self.repo, &bytes) {
             Ok(()) => emit_message(Message::PackReceived),
@@ -153,7 +149,8 @@ impl HostSession {
             Request::RequestObjects { have_commit } => {
                 // The driver only sends RequestObjects after LockStale
                 // reported an actual_commit, so we must have one.
-                let commit = self.current_commit()
+                let commit = self
+                    .current_commit()
                     .expect("RequestObjects implies a current commit exists");
                 let git_oid = git2::Oid::from(&commit);
                 let have = have_commit.as_ref().map(git2::Oid::from);
@@ -166,9 +163,7 @@ impl HostSession {
                     }),
                 }
             }
-            Request::Apply {
-                target_commit,
-            } => {
+            Request::Apply { target_commit } => {
                 let current_commit = self.current_commit();
 
                 let result = crate::apply::apply_host(

@@ -81,7 +81,6 @@ impl RemoteSession {
             writer: Some(writer),
         })
     }
-
 }
 
 impl Connection for RemoteSession {
@@ -149,9 +148,10 @@ pub fn lock_hosts(
         let mut conn = match connect(host) {
             Ok(c) => c,
             Err(err) => {
-                result
-                    .failures
-                    .push((host.clone(), ConnectFailure::ConnectionFailed(err.to_string())));
+                result.failures.push((
+                    host.clone(),
+                    ConnectFailure::ConnectionFailed(err.to_string()),
+                ));
                 continue;
             }
         };
@@ -166,9 +166,10 @@ pub fn lock_hosts(
             expected_current_commit: host_plan.expected_current.clone(),
         };
         if let Err(err) = conn.send_request(&lock_request) {
-            result
-                .failures
-                .push((host.clone(), ConnectFailure::ConnectionFailed(err.to_string())));
+            result.failures.push((
+                host.clone(),
+                ConnectFailure::ConnectionFailed(err.to_string()),
+            ));
             continue;
         }
 
@@ -190,7 +191,9 @@ pub fn lock_hosts(
                 ));
             }
             Ok(Some(Message::LockBusy)) => {
-                result.failures.push((host.clone(), ConnectFailure::LockBusy));
+                result
+                    .failures
+                    .push((host.clone(), ConnectFailure::LockBusy));
             }
             other => {
                 result.failures.push((
@@ -239,15 +242,10 @@ pub fn push_packs(
             .expected_current
             .as_ref()
             .map(git2::Oid::from);
-        let pack_bytes = crate::store::create_pack(
-            repo,
-            git2::Oid::from(&plan.commit),
-            have_commit,
-        )?;
+        let pack_bytes =
+            crate::store::create_pack(repo, git2::Oid::from(&plan.commit), have_commit)?;
         let encoded = BASE64.encode(&pack_bytes);
-        conn.send_request(&Request::ReceivePack {
-            pack_data: encoded,
-        })?;
+        conn.send_request(&Request::ReceivePack { pack_data: encoded })?;
         match conn.read_message()? {
             Some(Message::PackReceived) => {}
             Some(Message::Error { message }) => {
@@ -407,8 +405,7 @@ mod tests {
         let host = test_host()?;
         let plan = single_host_plan(host.commit_oid.into());
         let mut conn = Some(host.conn);
-        let mut lock_result =
-            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        let mut lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
         assert!(lock_result.failures.is_empty());
         assert_eq!(lock_result.locked.len(), 1);
@@ -461,8 +458,7 @@ mod tests {
 
         let plan = single_host_plan(Oid::from("0000000000000000000000000000000000000000"));
         let mut conn = Some(conn);
-        let lock_result =
-            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        let lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
         assert!(lock_result.locked.is_empty());
         assert_eq!(lock_result.stale.len(), 1);
@@ -504,8 +500,7 @@ mod tests {
 
         let plan = single_host_plan(commit_oid.into());
         let mut conn = Some(conn);
-        let lock_result =
-            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        let lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
         assert!(lock_result.failures.is_empty());
 
         let mut connections = lock_result.locked;

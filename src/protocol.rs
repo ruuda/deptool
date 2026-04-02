@@ -13,9 +13,13 @@ pub enum Request {
         expected_current_commit: Option<Oid>,
     },
     /// Receive a base64-encoded packfile into the store.
-    ReceivePack { pack_data: String },
+    ReceivePack {
+        pack_data: String,
+    },
     /// Request a packfile containing the host's current commit.
-    RequestObjects { have_commit: Option<Oid> },
+    RequestObjects {
+        have_commit: Option<Oid>,
+    },
     Apply {
         target_commit: Oid,
     },

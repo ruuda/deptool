@@ -144,8 +144,7 @@ fn run_deploy(
         .ok_or_else(|| Error::InvalidConfig("remote store path is not valid UTF-8".into()))?
         .to_string();
 
-    let binary =
-        std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
+    let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
     // 5 bytes (10 hex chars) should be long enough to avoid collisions,
     // and short enough to keep paths and commands readable and debuggable.
     let suffix = setup::truncated_sha256(&binary, 5);
@@ -155,8 +154,7 @@ fn run_deploy(
     // SSH concatenates remote arguments into a single shell string.
     // We assert the inputs are shell-safe; in the future we should
     // pass the store path over stdin instead.
-    let is_shell_safe =
-        |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
+    let is_shell_safe = |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
     assert!(
         is_shell_safe(&remote_store_str),
         "remote store path is free of shell metacharacters"
@@ -169,9 +167,8 @@ fn run_deploy(
     let make_session_cmd = |host: &Hostname| -> Command {
         match mode {
             DeployMode::Local => {
-                let mut cmd = Command::new(
-                    std::env::current_exe().expect("current exe path is known"),
-                );
+                let mut cmd =
+                    Command::new(std::env::current_exe().expect("current exe path is known"));
                 cmd.args(["agent", "session", &remote_store_str]);
                 cmd
             }
