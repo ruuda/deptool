@@ -50,13 +50,14 @@ impl RemoteSession {
         let mut line = String::new();
         let hello = match reader.read_line(&mut line) {
             Ok(0) => {
+                println!("Got EOF while reading hello.");
                 // EOF before hello: check whether the binary was missing.
                 match child.try_wait()?.and_then(|s| s.code()) {
                     Some(EXIT_COMMAND_NOT_FOUND) => return Err(Error::AgentNotInstalled),
-                    _ => {
-                        return Err(Error::ProtocolError(
-                            "agent exited before sending hello".into(),
-                        ));
+                    other => {
+                        return Err(Error::ProtocolError(format!(
+                            "agent exited before sending hello; exit status {other:?}"
+                        )));
                     }
                 }
             }

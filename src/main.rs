@@ -211,6 +211,10 @@ fn run() -> Result<()> {
                     Err(Error::AgentNotInstalled) => {}
                     Err(e) => return Err(e),
                 }
+                println!(
+                    "Agent is not yet available on {}, installing it now ...",
+                    host.0
+                );
                 setup::install_binary(host, &remote_bin_path, &binary)?;
                 match deploy::RemoteSession::new(make_session_cmd(host)) {
                     Ok(session) => Ok(Box::new(session)),
