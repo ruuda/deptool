@@ -132,7 +132,7 @@ fn run() -> Result<()> {
                 return Ok(());
             }
 
-            display::print_plan(&repo, &plan)?;
+            display::print_plan(&mut std::io::stdout(), &repo, &plan)?;
 
             if plan_only {
                 return Ok(());
@@ -203,7 +203,7 @@ fn read_hostname() -> String {
         .to_string()
 }
 
-fn systemd_apply_changes(changes: &apply::UnitChanges) -> error::Result<()> {
+fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
     std::process::Command::new("systemctl")
         .arg("daemon-reload")
         .status()?;

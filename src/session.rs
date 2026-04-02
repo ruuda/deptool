@@ -13,7 +13,7 @@ pub struct HostSession {
     hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
-    on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
+    on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
 }
 
 impl HostSession {
@@ -22,7 +22,7 @@ impl HostSession {
         hostname: Hostname,
         apps_dir: PathBuf,
         unit_dir: PathBuf,
-        on_units_changed: Box<dyn Fn(&crate::apply::UnitChanges) -> crate::error::Result<()>>,
+        on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
     ) -> Self {
         HostSession {
             repo,

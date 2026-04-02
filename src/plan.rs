@@ -1,6 +1,6 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use git2::Repository;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,53 @@ pub struct HostPlan {
 pub struct Plan {
     pub hosts: BTreeMap<Hostname, HostPlan>,
     pub commit: Oid,
+}
+
+/// Systemd unit lifecycle actions, derived from Git trees only.
+///
+/// We don't query actual system state; actions are based on comparing the
+/// previous and target commits. If the system drifts (e.g. a human disables
+/// a unit manually), the operator will see it in `systemctl status` output
+/// that we report after applying.
+#[derive(Debug)]
+pub struct UnitChanges {
+    /// Newly enabled units: `systemctl enable --now`.
+    pub enable: Vec<String>,
+    /// Still enabled, but app content changed: `systemctl restart`.
+    pub restart: Vec<String>,
+    /// No longer enabled: `systemctl disable --now`.
+    pub disable: Vec<String>,
+}
+
+impl UnitChanges {
+    pub fn is_empty(&self) -> bool {
+        self.enable.is_empty() && self.restart.is_empty() && self.disable.is_empty()
+    }
+}
+
+/// Compute unit lifecycle actions by comparing two enabled unit sets.
+///
+/// Both sets are pre-filtered to changed apps only, so a unit appearing
+/// in both means its app changed while it stayed enabled → restart.
+pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitChanges {
+    let mut changes = UnitChanges {
+        enable: Vec::new(),
+        restart: Vec::new(),
+        disable: Vec::new(),
+    };
+    for name in target {
+        if prev.contains(name) {
+            changes.restart.push(name.clone());
+        } else {
+            changes.enable.push(name.clone());
+        }
+    }
+    for name in prev {
+        if !target.contains(name) {
+            changes.disable.push(name.clone());
+        }
+    }
+    changes
 }
 
 /// Diff two sets of app tree oids for a single host.
