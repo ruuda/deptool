@@ -39,7 +39,14 @@ pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
 
 pub fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> {
     let tree = repo.find_tree(tree_oid)?;
-    let sig = repo.signature()?;
+
+    // Use the ambient Git author metadata if configured, fall back to
+    // hard-coded credentials otherwise. This is mostly relevant in tests when
+    // they run in e.g. an isolated Nix build environment.
+    let author_sig = match repo.signature() {
+        Ok(sig) => sig,
+        Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
+    };
 
     let parent = repo
         .find_reference("refs/heads/main")
@@ -50,8 +57,8 @@ pub fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> 
 
     Ok(repo.commit(
         Some("refs/heads/main"),
-        &sig,
-        &sig,
+        &author_sig,
+        &author_sig,
         "Update config",
         &tree,
         &parents,
