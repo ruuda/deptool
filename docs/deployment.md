@@ -5,21 +5,20 @@
 When we run `deptool deploy`, Deptool first proceeds to make a _plan_.
 
  * Read the `main` ref, this is the target we want to deploy.
- * For every host in the tree we want to deploy, check if we have a remote ref
-   for that host. If we do, compare the tree for its `current` under its own
-   hostname against our target tree. If there are no changes, we don't even need
-   to SSH into this host.
- * If we have no remote ref, or if we have but it's different from our target
-   tree, then execute a git fetch against the host to obtain its latest
-   `current` and `target` ref. If this changed the situation and it turns out
-   the host is already up to date, great, again nothing to do.
- * If the tree is still different then we will need to execute something on this
-   host. Diff the current and target trees (but only one level deep), this tells
-   us what is changing per app. An app could be added to this host, removed from
-   it, or it could be updated to a new version.
+ * For every host in the tree, check if we have a local tracking ref
+   `refs/remotes/<host>/current`. If we do, compare the tree under that host's
+   name against our target tree. If there are no changes, this host is already
+   up to date and we skip it.
+ * If we have no tracking ref, or if the trees differ, diff the current and
+   target trees (but only one level deep). This tells us what is changing per
+   app. An app could be added to this host, removed from it, or updated.
  * This per-host diff of apps is the plan, which we display to the user and ask
    to confirm. If needed, the user can view the diff for individual apps and see
    exactly how every file will change.
+
+The plan is based entirely on local state. Tracking refs are updated eagerly
+during the locking and applying phases, so the plan always has reasonably fresh
+data.
 
 ## Locking
 

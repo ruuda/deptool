@@ -17,7 +17,6 @@ pub enum Request {
     /// Request a packfile containing the host's current commit.
     RequestObjects { have_commit: Option<Oid> },
     Apply {
-        expected_current_commit: Option<Oid>,
         target_commit: Oid,
     },
 }
@@ -46,10 +45,6 @@ pub enum Message {
         enabled_units: Vec<String>,
         restarted_units: Vec<String>,
         disabled_units: Vec<String>,
-    },
-    Stale {
-        expected_commit: Option<Oid>,
-        actual_commit: Option<Oid>,
     },
     /// A packfile containing the host's current commit and its objects.
     SendPack {

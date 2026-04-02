@@ -8,9 +8,26 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Repository;
 
-use crate::prim::Hostname;
-use crate::prim::Oid;
+use crate::prim::{Hostname, Oid};
 use crate::protocol::{Message, Request};
+
+/// Try to acquire an exclusive, non-blocking file lock.
+///
+/// Returns `Ok(true)` if the lock was acquired, `Ok(false)` if it is
+/// already held by another process.
+fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
+    // LOCK_EX = exclusive lock, LOCK_NB = fail immediately instead of blocking.
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc == 0 {
+        return Ok(true);
+    }
+    let err = std::io::Error::last_os_error();
+    if err.kind() == std::io::ErrorKind::WouldBlock {
+        Ok(false)
+    } else {
+        Err(err)
+    }
+}
 
 pub struct HostSession {
     repo: Repository,
@@ -69,7 +86,7 @@ impl HostSession {
 
     fn handle_lock(
         &mut self,
-        expected_current_commit: Option<Oid>,
+        expected_current_commit: Option<crate::prim::Oid>,
         emit_message: &mut impl FnMut(Message),
     ) {
         let lock_path = self.repo.path().join("deptool.lock");
@@ -83,28 +100,30 @@ impl HostSession {
             }
         };
 
-        let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        if rc != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() == std::io::ErrorKind::WouldBlock {
+        match try_flock_exclusive(&file) {
+            Ok(false) => {
                 emit_message(Message::LockBusy);
-            } else {
+                return;
+            }
+            Err(err) => {
                 emit_message(Message::Error {
                     message: format!("flock failed: {err}"),
                 });
+                return;
             }
-            return;
+            Ok(true) => {}
         }
-
-        self.lock_file = Some(file);
 
         let actual_current_commit = self.current_commit();
         if actual_current_commit != expected_current_commit {
+            // Stale: release the lock, the client won't be deploying.
             emit_message(Message::LockStale {
                 expected_commit: expected_current_commit,
                 actual_commit: actual_current_commit,
             });
         } else {
+            // Hold the lock for the session lifetime.
+            self.lock_file = Some(file);
             emit_message(Message::Locked);
         }
     }
@@ -114,15 +133,7 @@ impl HostSession {
         pack_data: &str,
         emit_message: &mut impl FnMut(Message),
     ) {
-        let bytes = match BASE64.decode(pack_data) {
-            Ok(b) => b,
-            Err(err) => {
-                emit_message(Message::Error {
-                    message: format!("invalid base64: {err}"),
-                });
-                return;
-            }
-        };
+        let bytes = BASE64.decode(pack_data).expect("pack_data is valid base64");
         match crate::store::write_pack(&self.repo, &bytes) {
             Ok(()) => emit_message(Message::PackReceived),
             Err(err) => emit_message(Message::Error {
@@ -139,41 +150,31 @@ impl HostSession {
             Request::ReceivePack { ref pack_data } => {
                 self.handle_receive_pack(pack_data, emit_message)
             }
-            Request::RequestObjects { have_commit: _ } => {
-                match self.current_commit() {
-                    Some(commit) => {
-                        let git_oid = git2::Oid::from(&commit);
-                        match crate::store::create_pack(&self.repo, git_oid) {
-                            Ok(bytes) => emit_message(Message::SendPack {
-                                pack_data: BASE64.encode(&bytes),
-                            }),
-                            Err(err) => emit_message(Message::Error {
-                                message: format!("failed to create pack: {err}"),
-                            }),
-                        }
-                    }
-                    None => emit_message(Message::Error {
-                        message: "no current commit to send".into(),
+            Request::RequestObjects { have_commit } => {
+                // The driver only sends RequestObjects after LockStale
+                // reported an actual_commit, so we must have one.
+                let commit = self.current_commit()
+                    .expect("RequestObjects implies a current commit exists");
+                let git_oid = git2::Oid::from(&commit);
+                let have = have_commit.as_ref().map(git2::Oid::from);
+                match crate::store::create_pack(&self.repo, git_oid, have) {
+                    Ok(bytes) => emit_message(Message::SendPack {
+                        pack_data: BASE64.encode(&bytes),
+                    }),
+                    Err(err) => emit_message(Message::Error {
+                        message: format!("failed to create pack: {err}"),
                     }),
                 }
             }
             Request::Apply {
-                expected_current_commit,
                 target_commit,
             } => {
-                let actual_current_commit = self.current_commit();
-                if actual_current_commit != expected_current_commit {
-                    emit_message(Message::Stale {
-                        expected_commit: expected_current_commit,
-                        actual_commit: actual_current_commit,
-                    });
-                    return;
-                }
+                let current_commit = self.current_commit();
 
                 let result = crate::apply::apply_host(
                     &self.repo,
                     git2::Oid::from(&target_commit),
-                    actual_current_commit.map(git2::Oid::from),
+                    current_commit.map(git2::Oid::from),
                     &self.hostname,
                     &self.apps_dir,
                     &self.unit_dir,
@@ -217,8 +218,6 @@ impl HostSession {
 
 #[cfg(test)]
 mod tests {
-    use std::os::unix::io::AsRawFd;
-
     use super::*;
     use crate::plan::AppDiff;
     use crate::testutil::{TempDir, commit_files};
@@ -269,25 +268,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_reports_stale_when_expected_current_mismatches() {
-        let mut env = test_env();
-        let commit: Oid = "0000000000000000000000000000000000000000".into();
-        let fake_current: Oid = "1111111111111111111111111111111111111111".into();
-        let req = Request::Apply {
-            target_commit: commit,
-            expected_current_commit: Some(fake_current),
-        };
-        let responses = collect(&mut env.session, req);
-        assert_eq!(responses.len(), 1);
-        assert!(matches!(&responses[0], Message::Stale { .. }));
-    }
-
-    #[test]
     fn apply_checks_out_app_and_emits_per_app_messages() {
         let (mut env, oid) = test_env_with_commit(&[("web1/nginx/nginx.conf", b"server {}")]);
         let req = Request::Apply {
             target_commit: oid.into(),
-            expected_current_commit: None,
         };
         let responses = collect(&mut env.session, req);
 
@@ -363,9 +347,10 @@ mod tests {
         // Acquire the lock from another file descriptor.
         let lock_path = env.session.repo.path().join("deptool.lock");
         let lock_holder = File::create(&lock_path).expect("lock file is created");
-        let rc =
-            unsafe { libc::flock(lock_holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-        assert_eq!(rc, 0, "lock is acquired");
+        assert!(
+            try_flock_exclusive(&lock_holder).expect("flock succeeds"),
+            "lock is acquired",
+        );
 
         let req = Request::Lock {
             expected_current_commit: None,

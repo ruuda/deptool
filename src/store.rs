@@ -86,22 +86,38 @@ pub fn checkout_app(
 pub enum RefUpdate {
     SetTarget,
     SetCurrent,
+    ApplyComplete,
+    FetchStale,
 }
 
 pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid, reason: RefUpdate) -> Result<()> {
     let reflog_msg = match reason {
         RefUpdate::SetTarget => "apply: begin deployment, set target",
         RefUpdate::SetCurrent => "apply: conclude deployment, set current",
+        RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref",
+        RefUpdate::FetchStale => "deploy: fetched stale commit from host",
     };
     let force = true;
     repo.reference(refname, oid, force, reflog_msg)?;
     Ok(())
 }
 
-/// Build a packfile containing a commit and all objects it references.
-pub fn create_pack(repo: &Repository, commit_oid: git2::Oid) -> Result<Vec<u8>> {
+/// Build a packfile of objects reachable from a commit.
+///
+/// If `have_commit` is provided, objects reachable from it are excluded,
+/// so only the delta between the two commits is packed.
+pub fn create_pack(
+    repo: &Repository,
+    want_commit: git2::Oid,
+    have_commit: Option<git2::Oid>,
+) -> Result<Vec<u8>> {
+    let mut walk = repo.revwalk()?;
+    walk.push(want_commit)?;
+    if let Some(have) = have_commit {
+        walk.hide(have)?;
+    }
     let mut builder = repo.packbuilder()?;
-    builder.insert_commit(commit_oid)?;
+    builder.insert_walk(&mut walk)?;
     let mut buf = git2::Buf::new();
     builder.write_buf(&mut buf)?;
     Ok(buf.to_vec())

@@ -110,6 +110,164 @@ struct Args {
     cmd: Cmd,
 }
 
+fn run_deploy(
+    store: PathBuf,
+    remote_store: PathBuf,
+    plan_only: bool,
+    confirm_mode: ConfirmMode,
+    mode: DeployMode,
+) -> Result<()> {
+    let repo = Repository::open(&store)?;
+    let plan = plan::make_plan(&repo)?;
+
+    if plan.hosts.is_empty() {
+        eprintln!("All hosts are up to date.");
+        return Ok(());
+    }
+
+    display::print_plan(&mut std::io::stdout(), &repo, &plan)?;
+
+    if plan_only {
+        return Ok(());
+    }
+
+    let decision = match confirm_mode {
+        ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
+        ConfirmMode::Prompt => display::confirm(&repo, &plan, &store)?,
+    };
+    if let display::Decision::Abort = decision {
+        return Ok(());
+    }
+
+    let remote_store_str = remote_store
+        .to_str()
+        .ok_or_else(|| Error::InvalidConfig("remote store path is not valid UTF-8".into()))?
+        .to_string();
+
+    let binary =
+        std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
+    // 5 bytes (10 hex chars) should be long enough to avoid collisions,
+    // and short enough to keep paths and commands readable and debuggable.
+    let suffix = setup::truncated_sha256(&binary, 5);
+    let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
+    let remote_bin_path = format!("/var/lib/deptool/bin/{bin_name}");
+
+    // SSH concatenates remote arguments into a single shell string.
+    // We assert the inputs are shell-safe; in the future we should
+    // pass the store path over stdin instead.
+    let is_shell_safe =
+        |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
+    assert!(
+        is_shell_safe(&remote_store_str),
+        "remote store path is free of shell metacharacters"
+    );
+    assert!(
+        is_shell_safe(&remote_bin_path),
+        "remote binary path is free of shell metacharacters"
+    );
+
+    let make_session_cmd = |host: &Hostname| -> Command {
+        match mode {
+            DeployMode::Local => {
+                let mut cmd = Command::new(
+                    std::env::current_exe().expect("current exe path is known"),
+                );
+                cmd.args(["agent", "session", &remote_store_str]);
+                cmd
+            }
+            DeployMode::Remote => {
+                assert!(
+                    is_shell_safe(&host.0),
+                    "hostname is free of shell metacharacters"
+                );
+                let mut cmd = Command::new("ssh");
+                cmd.args([
+                    &host.0,
+                    "sudo",
+                    &remote_bin_path,
+                    "agent",
+                    "session",
+                    &remote_store_str,
+                ]);
+                cmd
+            }
+        }
+    };
+    let make_session = |host: &Hostname| -> Result<Box<dyn Connection>> {
+        match deploy::RemoteSession::new(make_session_cmd(host)) {
+            Ok(session) => return Ok(Box::new(session)),
+            Err(Error::AgentNotInstalled) => {}
+            Err(e) => return Err(e),
+        }
+        println!(
+            "Agent is not yet available on {}, installing it now ...",
+            host.0
+        );
+        setup::install_binary(host, &remote_bin_path, &binary)?;
+        match deploy::RemoteSession::new(make_session_cmd(host)) {
+            Ok(session) => Ok(Box::new(session)),
+            Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
+                "agent not found after installation".into(),
+            )),
+            Err(e) => return Err(e),
+        }
+    };
+
+    let mut lock_result = deploy::lock_hosts(&plan, make_session);
+
+    for (host, info) in &lock_result.stale {
+        eprintln!(
+            "{host}: stale (expected {:?}, actual {:?})",
+            info.expected_commit, info.actual_commit,
+        );
+    }
+    for (host, failure) in &lock_result.failures {
+        match failure {
+            deploy::ConnectFailure::LockBusy => {
+                eprintln!("{host}: another deployment is in progress");
+            }
+            deploy::ConnectFailure::ConnectionFailed(msg) => {
+                eprintln!("{host}: connection failed: {msg}");
+            }
+        }
+    }
+
+    if !lock_result.stale.is_empty() || !lock_result.failures.is_empty() {
+        // Fetch objects from stale hosts over their still-open
+        // sessions so we have the data for the next plan.
+        if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
+            eprintln!("failed to fetch stale objects: {err}");
+        }
+        let n = lock_result.stale.len() + lock_result.failures.len();
+        return Err(Error::InvalidConfig(format!(
+            "failed to lock {n} host(s), aborting",
+        )));
+    }
+
+    let mut connections = lock_result.locked;
+
+    deploy::push_packs(&repo, &plan, &mut connections)?;
+    deploy::apply_hosts(&plan, &mut connections, |host, message| {
+        match &message {
+            protocol::Message::ApplyComplete { commit, .. } => {
+                let refname = format!("refs/remotes/{host}/current");
+                if let Err(err) = store::set_ref(
+                    &repo,
+                    &refname,
+                    git2::Oid::from(commit),
+                    store::RefUpdate::ApplyComplete,
+                ) {
+                    eprintln!("{host}: failed to update tracking ref: {err}");
+                }
+            }
+            _ => {}
+        }
+        eprintln!("{host}: {message:?}")
+    })?;
+
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let args = args().run();
 
@@ -129,163 +287,7 @@ fn run() -> Result<()> {
             plan_only,
             confirm_mode,
             mode,
-        } => {
-            let repo = Repository::open(&store)?;
-            let plan = plan::make_plan(&repo)?;
-
-            if plan.hosts.is_empty() {
-                eprintln!("All hosts are up to date.");
-                return Ok(());
-            }
-
-            display::print_plan(&mut std::io::stdout(), &repo, &plan)?;
-
-            if plan_only {
-                return Ok(());
-            }
-
-            let decision = match confirm_mode {
-                ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
-                ConfirmMode::Prompt => display::confirm(&repo, &plan, &store)?,
-            };
-            if let display::Decision::Abort = decision {
-                return Ok(());
-            }
-
-            let remote_store_str = remote_store
-                .to_str()
-                .ok_or_else(|| Error::InvalidConfig("remote store path is not valid UTF-8".into()))?
-                .to_string();
-
-            let binary =
-                std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
-            // 5 bytes (10 hex chars) should be long enough to avoid collisions,
-            // and short enough to keep paths and commands readable and debuggable.
-            let suffix = setup::truncated_sha256(&binary, 5);
-            let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
-            let remote_bin_path = format!("/var/lib/deptool/bin/{bin_name}");
-
-            // SSH concatenates remote arguments into a single shell string.
-            // We assert the inputs are shell-safe; in the future we should
-            // pass the store path over stdin instead.
-            let is_shell_safe =
-                |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
-            assert!(
-                is_shell_safe(&remote_store_str),
-                "remote store path is free of shell metacharacters"
-            );
-            assert!(
-                is_shell_safe(&remote_bin_path),
-                "remote binary path is free of shell metacharacters"
-            );
-
-            let make_session_cmd = |host: &Hostname| -> Command {
-                match mode {
-                    DeployMode::Local => {
-                        let mut cmd = Command::new(
-                            std::env::current_exe().expect("current exe path is known"),
-                        );
-                        cmd.args(["agent", "session", &remote_store_str]);
-                        cmd
-                    }
-                    DeployMode::Remote => {
-                        assert!(
-                            is_shell_safe(&host.0),
-                            "hostname is free of shell metacharacters"
-                        );
-                        let mut cmd = Command::new("ssh");
-                        cmd.args([
-                            &host.0,
-                            "sudo",
-                            &remote_bin_path,
-                            "agent",
-                            "session",
-                            &remote_store_str,
-                        ]);
-                        cmd
-                    }
-                }
-            };
-            let make_session = |host: &Hostname| -> Result<Box<dyn Connection>> {
-                match deploy::RemoteSession::new(make_session_cmd(host)) {
-                    Ok(session) => return Ok(Box::new(session)),
-                    Err(Error::AgentNotInstalled) => {}
-                    Err(e) => return Err(e),
-                }
-                println!(
-                    "Agent is not yet available on {}, installing it now ...",
-                    host.0
-                );
-                setup::install_binary(host, &remote_bin_path, &binary)?;
-                match deploy::RemoteSession::new(make_session_cmd(host)) {
-                    Ok(session) => Ok(Box::new(session)),
-                    Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
-                        "agent not found after installation".into(),
-                    )),
-                    Err(e) => return Err(e),
-                }
-            };
-
-            let mut lock_result = deploy::lock_hosts(&plan, make_session);
-
-            for (host, info) in &lock_result.stale {
-                eprintln!(
-                    "{host}: stale (expected {:?}, actual {:?})",
-                    info.expected_commit, info.actual_commit,
-                );
-            }
-            for (host, failure) in &lock_result.failures {
-                match failure {
-                    deploy::LockFailure::Busy => {
-                        eprintln!("{host}: another deployment is in progress");
-                    }
-                    deploy::LockFailure::VersionMismatch { remote_version } => {
-                        eprintln!(
-                            "{host}: version mismatch (local {}, remote {remote_version})",
-                            protocol::VERSION,
-                        );
-                    }
-                    deploy::LockFailure::ConnectionFailed(msg) => {
-                        eprintln!("{host}: connection failed: {msg}");
-                    }
-                }
-            }
-
-            if !lock_result.stale.is_empty() || !lock_result.failures.is_empty() {
-                // Fetch objects from stale hosts over their still-open
-                // sessions so we have the data for the next plan.
-                if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
-                    eprintln!("failed to fetch stale objects: {err}");
-                }
-                let n = lock_result.stale.len() + lock_result.failures.len();
-                return Err(Error::InvalidConfig(format!(
-                    "failed to lock {n} host(s), aborting",
-                )));
-            }
-
-            let mut connections = lock_result.locked;
-
-            // Send the packfile over the session so the agent has all
-            // objects needed for checkout. No extra SSH connection needed.
-            deploy::push_packs(&repo, &plan, &mut connections)?;
-            deploy::apply_hosts(&plan, &mut connections, |host, message| {
-                match &message {
-                    protocol::Message::ApplyComplete { commit, .. } => {
-                        let refname = format!("refs/remotes/{host}/current");
-                        if let Err(err) = store::set_ref(
-                            &repo,
-                            &refname,
-                            git2::Oid::from(commit),
-                            store::RefUpdate::SetCurrent,
-                        ) {
-                            eprintln!("{host}: failed to update tracking ref: {err}");
-                        }
-                    }
-                    _ => {}
-                }
-                eprintln!("{host}: {message:?}")
-            })?;
-        }
+        } => run_deploy(store, remote_store, plan_only, confirm_mode, mode)?,
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }
 
@@ -345,7 +347,6 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             let mut session = make_host_session(repo, hostname);
             let request = protocol::Request::Apply {
                 target_commit: commit.as_str().into(),
-                expected_current_commit: None,
             };
             session.handle_request(request, &mut |response| {
                 eprintln!("{response:?}");

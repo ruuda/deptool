@@ -1,8 +1,6 @@
 //! Execute a deployment plan by driving remote host sessions.
 
 use std::io::{BufRead, BufReader, Write};
-#[cfg(test)]
-use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::Engine;
@@ -115,11 +113,8 @@ impl Connection for RemoteSession {
 }
 
 #[derive(Debug)]
-pub enum LockFailure {
-    Busy,
-    VersionMismatch {
-        remote_version: String,
-    },
+pub enum ConnectFailure {
+    LockBusy,
     ConnectionFailed(String),
 }
 
@@ -132,7 +127,7 @@ pub struct StaleHost {
 pub struct LockResult {
     pub locked: Vec<(Hostname, Box<dyn Connection>)>,
     pub stale: Vec<(Hostname, StaleHost)>,
-    pub failures: Vec<(Hostname, LockFailure)>,
+    pub failures: Vec<(Hostname, ConnectFailure)>,
 }
 
 /// Open sessions and acquire deploy locks on all hosts in the plan.
@@ -156,20 +151,16 @@ pub fn lock_hosts(
             Err(err) => {
                 result
                     .failures
-                    .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
+                    .push((host.clone(), ConnectFailure::ConnectionFailed(err.to_string())));
                 continue;
             }
         };
 
-        if conn.hello().version != protocol::VERSION {
-            result.failures.push((
-                host.clone(),
-                LockFailure::VersionMismatch {
-                    remote_version: conn.hello().version.clone(),
-                },
-            ));
-            continue;
-        }
+        assert_eq!(
+            conn.hello().version,
+            protocol::VERSION,
+            "agent version matches operator version"
+        );
 
         let lock_request = Request::Lock {
             expected_current_commit: host_plan.expected_current.clone(),
@@ -177,7 +168,7 @@ pub fn lock_hosts(
         if let Err(err) = conn.send_request(&lock_request) {
             result
                 .failures
-                .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
+                .push((host.clone(), ConnectFailure::ConnectionFailed(err.to_string())));
             continue;
         }
 
@@ -199,24 +190,15 @@ pub fn lock_hosts(
                 ));
             }
             Ok(Some(Message::LockBusy)) => {
-                result.failures.push((host.clone(), LockFailure::Busy));
+                result.failures.push((host.clone(), ConnectFailure::LockBusy));
             }
-            Ok(Some(other)) => {
+            other => {
                 result.failures.push((
                     host.clone(),
-                    LockFailure::ConnectionFailed(format!("unexpected lock response: {other:?}")),
+                    ConnectFailure::ConnectionFailed(format!(
+                        "unexpected lock response: {other:?}"
+                    )),
                 ));
-            }
-            Ok(None) => {
-                result.failures.push((
-                    host.clone(),
-                    LockFailure::ConnectionFailed("agent closed connection during lock".into()),
-                ));
-            }
-            Err(err) => {
-                result
-                    .failures
-                    .push((host.clone(), LockFailure::ConnectionFailed(err.to_string())));
             }
         }
     }
@@ -231,10 +213,8 @@ pub fn apply_hosts(
     mut on_message: impl FnMut(&Hostname, Message),
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
-        let host_plan = &plan.hosts[host];
         let request = Request::Apply {
             target_commit: plan.commit.clone(),
-            expected_current_commit: host_plan.expected_current.clone(),
         };
         conn.send_request(&request)?;
         conn.close();
@@ -246,17 +226,27 @@ pub fn apply_hosts(
 }
 
 /// Send packfiles to all locked hosts over their session connections.
+///
+/// Packs are built per-host, containing only objects the host doesn't
+/// already have (based on the plan's expected_current for that host).
 pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
 ) -> Result<()> {
-    let pack_data = crate::store::create_pack(repo, git2::Oid::from(&plan.commit))?;
-    let encoded = BASE64.encode(&pack_data);
-
     for (host, conn) in connections.iter_mut() {
+        let have_commit = plan.hosts[host]
+            .expected_current
+            .as_ref()
+            .map(git2::Oid::from);
+        let pack_bytes = crate::store::create_pack(
+            repo,
+            git2::Oid::from(&plan.commit),
+            have_commit,
+        )?;
+        let encoded = BASE64.encode(&pack_bytes);
         conn.send_request(&Request::ReceivePack {
-            pack_data: encoded.clone(),
+            pack_data: encoded,
         })?;
         match conn.read_message()? {
             Some(Message::PackReceived) => {}
@@ -298,11 +288,9 @@ pub fn fetch_stale_objects(
 
             match info.connection.read_message()? {
                 Some(Message::SendPack { pack_data }) => {
-                    let bytes = BASE64.decode(&pack_data).map_err(|err| {
-                        Error::ProtocolError(format!(
-                            "{host}: invalid base64 in SendPack: {err}"
-                        ))
-                    })?;
+                    let bytes = BASE64
+                        .decode(&pack_data)
+                        .expect("SendPack contains valid base64");
                     crate::store::write_pack(repo, &bytes)?;
                 }
                 Some(Message::Error { message }) => {
@@ -322,38 +310,8 @@ pub fn fetch_stale_objects(
             repo,
             &format!("refs/remotes/{host}/current"),
             git2::Oid::from(&actual_commit),
-            crate::store::RefUpdate::SetCurrent,
+            crate::store::RefUpdate::FetchStale,
         )?;
-    }
-    Ok(())
-}
-
-/// Push a commit to a remote store using `git push`.
-///
-/// Only used in tests to set up target repo state.
-#[cfg(test)]
-pub fn push_to_host(
-    store_path: &Path,
-    remote_url: &str,
-    commit: &Oid,
-    receive_pack: Option<&str>,
-) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.arg("--git-dir").arg(store_path);
-    cmd.arg("push");
-    if let Some(rp) = receive_pack {
-        cmd.arg(format!("--receive-pack={rp}"));
-    }
-    cmd.arg(remote_url);
-    cmd.arg(format!("{}:refs/heads/main", commit));
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::GitPush {
-            remote_url: remote_url.to_string(),
-            message: stderr.trim().to_string(),
-        });
     }
     Ok(())
 }
@@ -403,16 +361,11 @@ mod tests {
     }
 
     fn test_host() -> Result<TestHost> {
-        test_host_with_version(protocol::VERSION)
-    }
-
-    fn test_host_with_version(protocol_version: &str) -> Result<TestHost> {
         let store = TempDir::new("store");
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let repo = git2::Repository::init_bare(store.path())?;
         let commit_oid = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
-        // In tests, skip the daemon-reload + restart step.
         let on_units_changed = Box::new(|_: &_| Ok(()));
         let session = HostSession::new(
             repo,
@@ -422,7 +375,7 @@ mod tests {
             on_units_changed,
         );
         let hello = Hello {
-            version: protocol_version.to_string(),
+            version: protocol::VERSION.to_string(),
             hostname: "web1".to_string(),
         };
         let conn = Box::new(LocalConnection {
@@ -518,23 +471,6 @@ mod tests {
     }
 
     #[test]
-    fn lock_reports_version_mismatch() -> Result<()> {
-        let host = test_host_with_version("0.0.0-fake")?;
-        let plan = single_host_plan(host.commit_oid.into());
-        let mut conn = Some(host.conn);
-        let lock_result =
-            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
-
-        assert!(lock_result.locked.is_empty());
-        assert_eq!(lock_result.failures.len(), 1);
-        assert!(matches!(
-            &lock_result.failures[0].1,
-            LockFailure::VersionMismatch { .. }
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
         // Driver has the commit, target starts empty.
         let driver_store = TempDir::new("driver");
@@ -585,15 +521,22 @@ mod tests {
         Ok(())
     }
 
-    /// Lock and apply a commit on a target repo via HostSession.
-    fn lock_and_apply(
+    /// Push objects and apply a commit on a target via HostSession.
+    ///
+    /// Uses the same create_pack + write_pack machinery as production.
+    fn push_and_apply(
+        driver_repo: &git2::Repository,
         target_path: &std::path::Path,
         apps_path: &std::path::Path,
         units_path: &std::path::Path,
         target_commit: git2::Oid,
+        have_commit: Option<git2::Oid>,
         expected_current: Option<Oid>,
     ) -> Result<()> {
+        let pack = crate::store::create_pack(driver_repo, target_commit, have_commit)?;
         let repo = git2::Repository::open(target_path)?;
+        crate::store::write_pack(&repo, &pack)?;
+
         let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
         let mut session = HostSession::new(
             repo,
@@ -605,7 +548,7 @@ mod tests {
         let mut messages = Vec::new();
         session.handle_request(
             Request::Lock {
-                expected_current_commit: expected_current.clone(),
+                expected_current_commit: expected_current,
             },
             &mut |msg| messages.push(msg),
         );
@@ -615,7 +558,6 @@ mod tests {
         session.handle_request(
             Request::Apply {
                 target_commit: target_commit.into(),
-                expected_current_commit: expected_current,
             },
             &mut |msg| messages.push(msg),
         );
@@ -634,30 +576,28 @@ mod tests {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
-        // Driver A commits v1, pushes to target, applies.
+        // Driver A commits v1, pushes pack to target, applies.
         let driver_a = TempDir::new("driver_a");
         let repo_a = git2::Repository::init_bare(driver_a.path())?;
         let commit_v1 = commit_files(&repo_a, &[("web1/app/conf", b"v1")])?;
-        let target_url = format!("file://{}", target_store.path().display());
 
-        push_to_host(driver_a.path(), &target_url, &commit_v1.into(), None)?;
-        lock_and_apply(
+        push_and_apply(
+            &repo_a,
             target_store.path(),
             apps.path(),
             units.path(),
             commit_v1,
+            None,
             None,
         )?;
         crate::store::set_ref(
             &repo_a,
             "refs/remotes/web1/current",
             commit_v1,
-            crate::store::RefUpdate::SetCurrent,
+            crate::store::RefUpdate::ApplyComplete,
         )?;
 
         // Driver B: copy of A at this point (same main, same tracking ref).
-        // TempDir creates the directory, so remove it first so cp -r
-        // copies the contents rather than nesting inside it.
         let driver_b = TempDir::new("driver_b");
         std::fs::remove_dir_all(driver_b.path())?;
         std::process::Command::new("cp")
@@ -669,12 +609,13 @@ mod tests {
 
         // Driver A deploys v2.
         let commit_v2 = commit_files(&repo_a, &[("web1/app/conf", b"v2")])?;
-        push_to_host(driver_a.path(), &target_url, &commit_v2.into(), None)?;
-        lock_and_apply(
+        push_and_apply(
+            &repo_a,
             target_store.path(),
             apps.path(),
             units.path(),
             commit_v2,
+            Some(commit_v1),
             Some(commit_v1.into()),
         )?;
 
@@ -712,8 +653,6 @@ mod tests {
                 session,
                 hello,
                 message_buffer: VecDeque::new(),
-                // These TempDirs aren't owning anything new, but
-                // LocalConnection needs them. Use fresh empty ones.
                 _store: TempDir::new("unused"),
                 _apps: TempDir::new("unused"),
                 _units: TempDir::new("unused"),
