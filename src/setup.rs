@@ -25,7 +25,7 @@ pub fn truncated_sha256(bytes: &[u8], prefix_len: usize) -> String {
 pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> Result<()> {
     let install_command = [
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
-        &format!("sudo dd of={remote_bin_path}"),
+        &format!("sudo dd status=none of={remote_bin_path}"),
         &format!("sudo chmod +x {remote_bin_path}"),
         &format!("sudo ln -sf {remote_bin_path} /usr/bin/deptool"),
         &format!("sudo sha256sum {remote_bin_path}"),
