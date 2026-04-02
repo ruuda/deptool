@@ -29,14 +29,12 @@ pub struct RemoteSession {
     child: Child,
 }
 
-/// Exit code returned by a shell when the command is not found.
-const EXIT_COMMAND_NOT_FOUND: i32 = 127;
-
 impl RemoteSession {
     /// Spawn the session command and read the hello message.
     ///
-    /// Returns `Err(AgentNotInstalled)` if the process exits with 127
-    /// before sending a hello, indicating the binary is not on the target.
+    /// Returns `Err(AgentNotInstalled)` if the process exits with an error
+    /// before sending a hello, indicating that likely the binary is not on the
+    /// target.
     pub fn new(mut cmd: Command) -> Result<Self> {
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -52,7 +50,13 @@ impl RemoteSession {
             Ok(0) => {
                 // EOF before hello: check whether the binary was missing.
                 match child.wait()?.code() {
-                    Some(EXIT_COMMAND_NOT_FOUND) => return Err(Error::AgentNotInstalled),
+                    // When we run `deptool` directly and the shell reports that
+                    // the binary is not found, the exit code is 127, but when
+                    // we run it through sudo, then sudo fails and exits with
+                    // code 1. TODO: Would it be better to start the agent as
+                    // the current user and the let it reexec itself under sudo
+                    // if its uid is unexpected?
+                    Some(1 | 127) => return Err(Error::AgentNotInstalled),
                     other => {
                         return Err(Error::ProtocolError(format!(
                             "agent exited before sending hello; exit status {other:?}"

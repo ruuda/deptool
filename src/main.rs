@@ -196,6 +196,7 @@ fn run() -> Result<()> {
                         let mut cmd = Command::new("ssh");
                         cmd.args([
                             &host.0,
+                            "sudo",
                             &remote_bin_path,
                             "agent",
                             "session",
