@@ -64,12 +64,12 @@ enum Cmd {
     /// Compute and save the deployment plan.
     #[bpaf(command)]
     Plan {
-        /// Path to the bare Git store.
-        #[bpaf(positional("STORE"))]
-        store: PathBuf,
         /// Output file for the plan (default: plan.json).
         #[bpaf(long("plan-file"), fallback(PathBuf::from("plan.json")))]
         output: PathBuf,
+        /// Path to the bare Git store.
+        #[bpaf(positional("STORE"))]
+        store: PathBuf,
     },
     /// Apply a saved plan to all hosts.
     #[bpaf(command)]
