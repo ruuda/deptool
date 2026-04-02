@@ -9,6 +9,19 @@ use git2::Repository;
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
 
+/// Open an existing bare repo, or create one with reflogs enabled.
+pub fn open_or_init(path: &Path) -> Result<Repository> {
+    match Repository::open(path) {
+        Ok(r) => Ok(r),
+        Err(_) => {
+            let repo = Repository::init_bare(path)?;
+            // Bare repos don't create reflogs by default.
+            repo.config()?.set_bool("core.logAllRefUpdates", true)?;
+            Ok(repo)
+        }
+    }
+}
+
 /// Recursively build a Git tree from a directory on disk.
 pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
     let mut tb = repo.treebuilder(None)?;

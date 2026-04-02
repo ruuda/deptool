@@ -270,10 +270,7 @@ fn run() -> Result<()> {
 
     match args.cmd {
         Cmd::Commit { store, dir } => {
-            let repo = match Repository::open(&store) {
-                Ok(r) => r,
-                Err(_) => Repository::init_bare(&store)?,
-            };
+            let repo = store::open_or_init(&store)?;
             let tree_oid = store::build_tree(&repo, &dir)?;
             let commit_oid = store::commit_tree(&repo, tree_oid)?;
             println!("{commit_oid}");
@@ -350,10 +347,7 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             });
         }
         AgentCmd::Session { store } => {
-            let repo = match Repository::open(&store) {
-                Ok(r) => r,
-                Err(_) => Repository::init_bare(&store)?,
-            };
+            let repo = store::open_or_init(&store)?;
             let hostname = read_hostname();
             let mut session = make_host_session(repo, hostname.clone());
             let stdin = std::io::stdin().lock();
