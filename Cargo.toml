@@ -9,6 +9,7 @@ edition = "2024"
 [dependencies]
 hmac-sha256 = { version = "1", features = ["opt_size"] }
 bpaf = { version = "0.9", features = ["derive"] }
+base64 = "0.22"
 git2 = { version = "0.20", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }

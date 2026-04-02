@@ -4,6 +4,9 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
 use crate::error::{Error, Result};
 use crate::plan::Plan;
 use crate::prim::{Hostname, Oid};
@@ -236,13 +239,51 @@ pub fn apply_hosts(
     Ok(())
 }
 
-/// Push a commit to a remote store so its objects are available there.
+/// Build a packfile containing a commit and all objects it references.
 ///
-/// Uses `git push` with the given URL. The commit is pushed to
-/// `refs/heads/main` on the remote — a ref the agent doesn't use, it's
-/// just a way to transfer the objects.
-// TODO: In the future, detect in the planning phase when the remote is
-// ahead (push would fail because remote main is not an ancestor).
+/// Uses libgit2's PackBuilder, no git CLI needed.
+pub fn create_pack(repo: &git2::Repository, commit: &Oid) -> Result<Vec<u8>> {
+    let mut builder = repo.packbuilder()?;
+    builder.insert_commit(git2::Oid::from(commit))?;
+    let mut buf = git2::Buf::new();
+    builder.write_buf(&mut buf)?;
+    Ok(buf.to_vec())
+}
+
+/// Send packfiles to all locked hosts over their session connections.
+pub fn push_packs(
+    repo: &git2::Repository,
+    plan: &Plan,
+    connections: &mut Vec<(Hostname, Box<dyn Connection>)>,
+) -> Result<()> {
+    let pack_data = create_pack(repo, &plan.commit)?;
+    let encoded = BASE64.encode(&pack_data);
+
+    for (host, conn) in connections.iter_mut() {
+        conn.send_request(&Request::ReceivePack {
+            pack_data: encoded.clone(),
+        })?;
+        match conn.read_message()? {
+            Some(Message::PackReceived) => {}
+            Some(Message::Error { message }) => {
+                return Err(Error::ProtocolError(format!(
+                    "{host}: receive pack failed: {message}"
+                )));
+            }
+            other => {
+                return Err(Error::ProtocolError(format!(
+                    "{host}: unexpected response to ReceivePack: {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Push a commit to a remote store using `git push`.
+///
+/// Only used in tests to set up target repo state.
+#[cfg(test)]
 pub fn push_to_host(
     store_path: &Path,
     remote_url: &str,
@@ -478,6 +519,57 @@ mod tests {
         assert!(matches!(
             &lock_result.failures[0].1,
             LockFailure::VersionMismatch { .. }
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
+        // Driver has the commit, target starts empty.
+        let driver_store = TempDir::new("driver");
+        let driver_repo = git2::Repository::init_bare(driver_store.path())?;
+        let commit_oid = commit_files(&driver_repo, &[("web1/app/conf", b"hello")])?;
+
+        let target_store = TempDir::new("target");
+        let target_repo = git2::Repository::init_bare(target_store.path())?;
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
+        let session = HostSession::new(
+            target_repo,
+            "web1".into(),
+            apps.path().to_path_buf(),
+            units.path().to_path_buf(),
+            on_units_changed,
+        );
+        let hello = Hello {
+            version: protocol::VERSION.to_string(),
+            hostname: "web1".to_string(),
+        };
+        let conn: Box<dyn Connection> = Box::new(LocalConnection {
+            session,
+            hello,
+            message_buffer: VecDeque::new(),
+            _store: target_store,
+            _apps: apps,
+            _units: units,
+        });
+
+        let plan = single_host_plan(commit_oid.into());
+        let mut conn = Some(conn);
+        let lock_result =
+            lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        assert!(lock_result.failures.is_empty());
+
+        let mut connections = lock_result.locked;
+        push_packs(&driver_repo, &plan, &mut connections)?;
+
+        let mut messages = Vec::new();
+        apply_hosts(&plan, &mut connections, |_, msg| messages.push(msg))?;
+
+        assert!(matches!(
+            messages.last(),
+            Some(Message::ApplyComplete { .. })
         ));
         Ok(())
     }

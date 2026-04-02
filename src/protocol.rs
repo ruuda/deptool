@@ -12,6 +12,8 @@ pub enum Request {
     Lock {
         expected_current_commit: Option<Oid>,
     },
+    /// Receive a base64-encoded packfile into the store.
+    ReceivePack { pack_data: String },
     Apply {
         expected_current_commit: Option<Oid>,
         target_commit: Oid,
@@ -27,6 +29,7 @@ pub struct Hello {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
     Locked,
+    PackReceived,
     LockStale {
         expected_commit: Option<Oid>,
         actual_commit: Option<Oid>,

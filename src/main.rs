@@ -276,29 +276,11 @@ fn run() -> Result<()> {
                 )));
             }
 
-            // Push the commit to every host so the objects are available
-            // for checkout. The receive-pack override is needed for remote
-            // hosts because the store is owned by root.
-            for (host, _) in &lock_result.locked {
-                let (remote_url, receive_pack) = match mode {
-                    DeployMode::Local => {
-                        (format!("file://{remote_store_str}"), None)
-                    }
-                    DeployMode::Remote => (
-                        format!("ssh://{}/{remote_store_str}", host.0),
-                        Some("sudo git-receive-pack"),
-                    ),
-                };
-                eprintln!("{host}: pushing commit {} ...", plan.commit);
-                deploy::push_to_host(
-                    &store,
-                    &remote_url,
-                    &plan.commit,
-                    receive_pack,
-                )?;
-            }
-
             let mut connections: Vec<_> = lock_result.locked.into_iter().collect();
+
+            // Send the packfile over the session so the agent has all
+            // objects needed for checkout. No extra SSH connection needed.
+            deploy::push_packs(&repo, &plan, &mut connections)?;
             deploy::apply_hosts(&plan, &mut connections, |host, message| {
                 match &message {
                     protocol::Message::ApplyComplete { commit, .. } => {

@@ -1,9 +1,12 @@
 //! Host-side session logic: handles requests and applies changes.
 
 use std::fs::File;
+use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Repository;
 
 use crate::prim::Hostname;
@@ -107,11 +110,61 @@ impl HostSession {
         }
     }
 
+    fn handle_receive_pack(
+        &self,
+        pack_data: &str,
+        emit_message: &mut impl FnMut(Message),
+    ) {
+        let bytes = match BASE64.decode(pack_data) {
+            Ok(b) => b,
+            Err(err) => {
+                emit_message(Message::Error {
+                    message: format!("invalid base64: {err}"),
+                });
+                return;
+            }
+        };
+        let odb = match self.repo.odb() {
+            Ok(odb) => odb,
+            Err(err) => {
+                emit_message(Message::Error {
+                    message: format!("failed to open odb: {err}"),
+                });
+                return;
+            }
+        };
+        let mut writer = match odb.packwriter() {
+            Ok(w) => w,
+            Err(err) => {
+                emit_message(Message::Error {
+                    message: format!("failed to create packwriter: {err}"),
+                });
+                return;
+            }
+        };
+        if let Err(err) = writer.write_all(&bytes) {
+            emit_message(Message::Error {
+                message: format!("failed to write pack: {err}"),
+            });
+            return;
+        }
+        if let Err(err) = writer.commit() {
+            emit_message(Message::Error {
+                message: format!("failed to commit pack: {err}"),
+            });
+            return;
+        }
+        emit_message(Message::PackReceived);
+    }
+
     pub fn handle_request(&mut self, request: Request, emit_message: &mut impl FnMut(Message)) {
         match request {
             Request::Lock {
                 expected_current_commit,
             } => self.handle_lock(expected_current_commit, emit_message),
+            Request::ReceivePack { ref pack_data } => {
+                self.handle_receive_pack(pack_data, emit_message)
+            }
             Request::Apply {
                 expected_current_commit,
                 target_commit,
