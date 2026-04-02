@@ -1,7 +1,6 @@
 //! Host-side session logic: handles requests and applies changes.
 
 use std::fs::File;
-use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 
@@ -124,37 +123,12 @@ impl HostSession {
                 return;
             }
         };
-        let odb = match self.repo.odb() {
-            Ok(odb) => odb,
-            Err(err) => {
-                emit_message(Message::Error {
-                    message: format!("failed to open odb: {err}"),
-                });
-                return;
-            }
-        };
-        let mut writer = match odb.packwriter() {
-            Ok(w) => w,
-            Err(err) => {
-                emit_message(Message::Error {
-                    message: format!("failed to create packwriter: {err}"),
-                });
-                return;
-            }
-        };
-        if let Err(err) = writer.write_all(&bytes) {
-            emit_message(Message::Error {
+        match crate::store::write_pack(&self.repo, &bytes) {
+            Ok(()) => emit_message(Message::PackReceived),
+            Err(err) => emit_message(Message::Error {
                 message: format!("failed to write pack: {err}"),
-            });
-            return;
+            }),
         }
-        if let Err(err) = writer.commit() {
-            emit_message(Message::Error {
-                message: format!("failed to commit pack: {err}"),
-            });
-            return;
-        }
-        emit_message(Message::PackReceived);
     }
 
     pub fn handle_request(&mut self, request: Request, emit_message: &mut impl FnMut(Message)) {
@@ -164,6 +138,24 @@ impl HostSession {
             } => self.handle_lock(expected_current_commit, emit_message),
             Request::ReceivePack { ref pack_data } => {
                 self.handle_receive_pack(pack_data, emit_message)
+            }
+            Request::RequestObjects { have_commit: _ } => {
+                match self.current_commit() {
+                    Some(commit) => {
+                        let git_oid = git2::Oid::from(&commit);
+                        match crate::store::create_pack(&self.repo, git_oid) {
+                            Ok(bytes) => emit_message(Message::SendPack {
+                                pack_data: BASE64.encode(&bytes),
+                            }),
+                            Err(err) => emit_message(Message::Error {
+                                message: format!("failed to create pack: {err}"),
+                            }),
+                        }
+                    }
+                    None => emit_message(Message::Error {
+                        message: "no current commit to send".into(),
+                    }),
+                }
             }
             Request::Apply {
                 expected_current_commit,

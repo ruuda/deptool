@@ -226,34 +226,16 @@ fn run() -> Result<()> {
                 }
             };
 
-            let lock_result = deploy::lock_hosts(&plan, make_session);
+            let mut lock_result = deploy::lock_hosts(&plan, make_session);
 
+            for (host, info) in &lock_result.stale {
+                eprintln!(
+                    "{host}: stale (expected {:?}, actual {:?})",
+                    info.expected_commit, info.actual_commit,
+                );
+            }
             for (host, failure) in &lock_result.failures {
                 match failure {
-                    deploy::LockFailure::Stale {
-                        expected_commit,
-                        actual_commit,
-                    } => {
-                        eprintln!(
-                            "{host}: stale (expected {expected_commit:?}, actual {actual_commit:?})"
-                        );
-                        // Fetch the host's current ref so we have the
-                        // objects locally for the next plan.
-                        let (remote_url, upload_pack) = match mode {
-                            DeployMode::Local => {
-                                (format!("file://{remote_store_str}"), None)
-                            }
-                            DeployMode::Remote => (
-                                format!("ssh://{}/{remote_store_str}", host.0),
-                                Some("sudo git-upload-pack"),
-                            ),
-                        };
-                        if let Err(err) =
-                            deploy::fetch_from_host(&store, &remote_url, host, upload_pack)
-                        {
-                            eprintln!("{host}: failed to fetch: {err}");
-                        }
-                    }
                     deploy::LockFailure::Busy => {
                         eprintln!("{host}: another deployment is in progress");
                     }
@@ -269,10 +251,15 @@ fn run() -> Result<()> {
                 }
             }
 
-            if !lock_result.failures.is_empty() {
+            if !lock_result.stale.is_empty() || !lock_result.failures.is_empty() {
+                // Fetch objects from stale hosts over their still-open
+                // sessions so we have the data for the next plan.
+                if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
+                    eprintln!("failed to fetch stale objects: {err}");
+                }
+                let n = lock_result.stale.len() + lock_result.failures.len();
                 return Err(Error::InvalidConfig(format!(
-                    "failed to lock {} host(s), aborting",
-                    lock_result.failures.len(),
+                    "failed to lock {n} host(s), aborting",
                 )));
             }
 

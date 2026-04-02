@@ -21,10 +21,6 @@ pub enum Error {
         remote_url: String,
         message: String,
     },
-    GitFetch {
-        remote_url: String,
-        message: String,
-    },
 }
 
 impl From<std::io::Error> for Error {
@@ -70,10 +66,6 @@ impl fmt::Display for Error {
                 remote_url,
                 message,
             } => write!(f, "git push to {remote_url} failed: {message}"),
-            Error::GitFetch {
-                remote_url,
-                message,
-            } => write!(f, "git fetch from {remote_url} failed: {message}"),
         }
     }
 }

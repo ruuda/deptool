@@ -98,6 +98,24 @@ pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid, reason: RefUpda
     Ok(())
 }
 
+/// Build a packfile containing a commit and all objects it references.
+pub fn create_pack(repo: &Repository, commit_oid: git2::Oid) -> Result<Vec<u8>> {
+    let mut builder = repo.packbuilder()?;
+    builder.insert_commit(commit_oid)?;
+    let mut buf = git2::Buf::new();
+    builder.write_buf(&mut buf)?;
+    Ok(buf.to_vec())
+}
+
+/// Write raw packfile bytes into a repository's object database.
+pub fn write_pack(repo: &Repository, data: &[u8]) -> Result<()> {
+    let odb = repo.odb()?;
+    let mut writer = odb.packwriter()?;
+    std::io::Write::write_all(&mut writer, data)?;
+    writer.commit()?;
+    Ok(())
+}
+
 /// Get the tree entries (name -> oid) one level deep.
 pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
     let mut entries = BTreeMap::new();

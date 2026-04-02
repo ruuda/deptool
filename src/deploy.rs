@@ -1,6 +1,7 @@
 //! Execute a deployment plan by driving remote host sessions.
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(test)]
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
@@ -115,10 +116,6 @@ impl Connection for RemoteSession {
 
 #[derive(Debug)]
 pub enum LockFailure {
-    Stale {
-        expected_commit: Option<Oid>,
-        actual_commit: Option<Oid>,
-    },
     Busy,
     VersionMismatch {
         remote_version: String,
@@ -126,8 +123,15 @@ pub enum LockFailure {
     ConnectionFailed(String),
 }
 
+pub struct StaleHost {
+    pub expected_commit: Option<Oid>,
+    pub actual_commit: Option<Oid>,
+    pub connection: Box<dyn Connection>,
+}
+
 pub struct LockResult {
     pub locked: Vec<(Hostname, Box<dyn Connection>)>,
+    pub stale: Vec<(Hostname, StaleHost)>,
     pub failures: Vec<(Hostname, LockFailure)>,
 }
 
@@ -142,6 +146,7 @@ pub fn lock_hosts(
 ) -> LockResult {
     let mut result = LockResult {
         locked: Vec::new(),
+        stale: Vec::new(),
         failures: Vec::new(),
     };
 
@@ -184,11 +189,12 @@ pub fn lock_hosts(
                 expected_commit,
                 actual_commit,
             })) => {
-                result.failures.push((
+                result.stale.push((
                     host.clone(),
-                    LockFailure::Stale {
+                    StaleHost {
                         expected_commit,
                         actual_commit,
+                        connection: conn,
                     },
                 ));
             }
@@ -239,24 +245,13 @@ pub fn apply_hosts(
     Ok(())
 }
 
-/// Build a packfile containing a commit and all objects it references.
-///
-/// Uses libgit2's PackBuilder, no git CLI needed.
-pub fn create_pack(repo: &git2::Repository, commit: &Oid) -> Result<Vec<u8>> {
-    let mut builder = repo.packbuilder()?;
-    builder.insert_commit(git2::Oid::from(commit))?;
-    let mut buf = git2::Buf::new();
-    builder.write_buf(&mut buf)?;
-    Ok(buf.to_vec())
-}
-
 /// Send packfiles to all locked hosts over their session connections.
 pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,
     connections: &mut Vec<(Hostname, Box<dyn Connection>)>,
 ) -> Result<()> {
-    let pack_data = create_pack(repo, &plan.commit)?;
+    let pack_data = crate::store::create_pack(repo, git2::Oid::from(&plan.commit))?;
     let encoded = BASE64.encode(&pack_data);
 
     for (host, conn) in connections.iter_mut() {
@@ -273,6 +268,64 @@ pub fn push_packs(
             other => {
                 return Err(Error::ProtocolError(format!(
                     "{host}: unexpected response to ReceivePack: {other:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Fetch objects from stale hosts over their still-open sessions.
+///
+/// For each stale host whose actual commit we don't already have, sends
+/// `RequestObjects` and receives a packfile. Updates the local tracking
+/// ref for each host.
+pub fn fetch_stale_objects(
+    repo: &git2::Repository,
+    stale: &mut Vec<(Hostname, StaleHost)>,
+) -> Result<()> {
+    for (host, info) in stale.iter_mut() {
+        let actual_commit = match &info.actual_commit {
+            Some(c) => c.clone(),
+            None => continue,
+        };
+
+        // Skip if we already have this commit locally.
+        if repo.find_commit(git2::Oid::from(&actual_commit)).is_ok() {
+            crate::store::set_ref(
+                repo,
+                &format!("refs/remotes/{host}/current"),
+                git2::Oid::from(&actual_commit),
+                crate::store::RefUpdate::SetCurrent,
+            )?;
+            continue;
+        }
+
+        info.connection.send_request(&Request::RequestObjects {
+            have_commit: info.expected_commit.clone(),
+        })?;
+
+        match info.connection.read_message()? {
+            Some(Message::SendPack { pack_data }) => {
+                let bytes = BASE64.decode(&pack_data).map_err(|err| {
+                    Error::ProtocolError(format!("{host}: invalid base64 in SendPack: {err}"))
+                })?;
+                crate::store::write_pack(repo, &bytes)?;
+                crate::store::set_ref(
+                    repo,
+                    &format!("refs/remotes/{host}/current"),
+                    git2::Oid::from(&actual_commit),
+                    crate::store::RefUpdate::SetCurrent,
+                )?;
+            }
+            Some(Message::Error { message }) => {
+                return Err(Error::ProtocolError(format!(
+                    "{host}: RequestObjects failed: {message}"
+                )));
+            }
+            other => {
+                return Err(Error::ProtocolError(format!(
+                    "{host}: unexpected response to RequestObjects: {other:?}"
                 )));
             }
         }
@@ -303,38 +356,6 @@ pub fn push_to_host(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::GitPush {
-            remote_url: remote_url.to_string(),
-            message: stderr.trim().to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// Fetch a host's current ref so we have the objects locally.
-///
-/// Used after a stale lock response reports a commit we don't have.
-/// Updates `refs/remotes/<host>/current` in the local store.
-pub fn fetch_from_host(
-    store_path: &Path,
-    remote_url: &str,
-    host: &Hostname,
-    upload_pack: Option<&str>,
-) -> Result<()> {
-    let mut cmd = Command::new("git");
-    cmd.arg("--git-dir").arg(store_path);
-    cmd.arg("fetch");
-    if let Some(up) = upload_pack {
-        cmd.arg(format!("--upload-pack={up}"));
-    }
-    cmd.arg(remote_url);
-    cmd.arg(format!(
-        "refs/heads/current:refs/remotes/{host}/current"
-    ));
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::GitFetch {
             remote_url: remote_url.to_string(),
             message: stderr.trim().to_string(),
         });
@@ -498,11 +519,8 @@ mod tests {
             lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
         assert!(lock_result.locked.is_empty());
-        assert_eq!(lock_result.failures.len(), 1);
-        assert!(matches!(
-            &lock_result.failures[0].1,
-            LockFailure::Stale { actual_commit: Some(_), .. }
-        ));
+        assert_eq!(lock_result.stale.len(), 1);
+        assert!(lock_result.stale[0].1.actual_commit.is_some());
         Ok(())
     }
 
@@ -689,7 +707,7 @@ mod tests {
         };
 
         // Lock should report stale: target has commit_v2, not commit_v1.
-        let lock_result = lock_hosts(&plan, |_| {
+        let mut lock_result = lock_hosts(&plan, |_| {
             let repo = git2::Repository::open(target_store.path())?;
             let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
             let session = HostSession::new(
@@ -716,13 +734,8 @@ mod tests {
         });
 
         assert!(lock_result.locked.is_empty());
-        assert_eq!(lock_result.failures.len(), 1);
-        match &lock_result.failures[0].1 {
-            LockFailure::Stale { actual_commit, .. } => {
-                assert_eq!(*actual_commit, Some(commit_v2.into()));
-            }
-            other => panic!("Expected Stale, got {other:?}"),
-        }
+        assert_eq!(lock_result.stale.len(), 1);
+        assert_eq!(lock_result.stale[0].1.actual_commit, Some(commit_v2.into()));
 
         // Driver B doesn't have commit_v2 locally.
         assert!(
@@ -730,17 +743,14 @@ mod tests {
             "commit_v2 should not exist in driver B yet"
         );
 
-        // Fetch resolves it: B now has the objects and tracking ref.
-        fetch_from_host(driver_b.path(), &target_url, &"web1".into(), None)?;
+        // Fetch objects over the stale session connection.
+        fetch_stale_objects(&repo_b, &mut lock_result.stale)?;
 
-        // Re-open repo to see the updated ref.
-        let repo_b = git2::Repository::open(driver_b.path())?;
+        // B now has the objects and tracking ref.
         let tracking_ref = repo_b
             .find_reference("refs/remotes/web1/current")?
             .peel_to_commit()?;
         assert_eq!(tracking_ref.id(), commit_v2);
-
-        // B can now find the commit that the target is at.
         assert!(repo_b.find_commit(commit_v2).is_ok());
 
         Ok(())

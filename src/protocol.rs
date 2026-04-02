@@ -14,6 +14,8 @@ pub enum Request {
     },
     /// Receive a base64-encoded packfile into the store.
     ReceivePack { pack_data: String },
+    /// Request a packfile containing the host's current commit.
+    RequestObjects { have_commit: Option<Oid> },
     Apply {
         expected_current_commit: Option<Oid>,
         target_commit: Oid,
@@ -48,6 +50,10 @@ pub enum Message {
     Stale {
         expected_commit: Option<Oid>,
         actual_commit: Option<Oid>,
+    },
+    /// A packfile containing the host's current commit and its objects.
+    SendPack {
+        pack_data: String,
     },
     Error {
         message: String,
