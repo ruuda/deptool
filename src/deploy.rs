@@ -110,6 +110,7 @@ impl Connection for RemoteSession {
     }
 }
 
+#[derive(Debug)]
 pub enum LockFailure {
     Stale {
         expected_commit: Option<Oid>,
@@ -261,6 +262,38 @@ pub fn push_to_host(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(Error::GitPush {
+            remote_url: remote_url.to_string(),
+            message: stderr.trim().to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Fetch a host's current ref so we have the objects locally.
+///
+/// Used after a stale lock response reports a commit we don't have.
+/// Updates `refs/remotes/<host>/current` in the local store.
+pub fn fetch_from_host(
+    store_path: &Path,
+    remote_url: &str,
+    host: &Hostname,
+    upload_pack: Option<&str>,
+) -> Result<()> {
+    let mut cmd = Command::new("git");
+    cmd.arg("--git-dir").arg(store_path);
+    cmd.arg("fetch");
+    if let Some(up) = upload_pack {
+        cmd.arg(format!("--upload-pack={up}"));
+    }
+    cmd.arg(remote_url);
+    cmd.arg(format!(
+        "refs/heads/current:refs/remotes/{host}/current"
+    ));
+
+    let output = cmd.output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(Error::GitFetch {
             remote_url: remote_url.to_string(),
             message: stderr.trim().to_string(),
         });
@@ -446,6 +479,178 @@ mod tests {
             &lock_result.failures[0].1,
             LockFailure::VersionMismatch { .. }
         ));
+        Ok(())
+    }
+
+    /// Lock and apply a commit on a target repo via HostSession.
+    fn lock_and_apply(
+        target_path: &std::path::Path,
+        apps_path: &std::path::Path,
+        units_path: &std::path::Path,
+        target_commit: git2::Oid,
+        expected_current: Option<Oid>,
+    ) -> Result<()> {
+        let repo = git2::Repository::open(target_path)?;
+        let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
+        let mut session = HostSession::new(
+            repo,
+            "web1".into(),
+            apps_path.to_path_buf(),
+            units_path.to_path_buf(),
+            on_units_changed,
+        );
+        let mut messages = Vec::new();
+        session.handle_request(
+            Request::Lock {
+                expected_current_commit: expected_current.clone(),
+            },
+            &mut |msg| messages.push(msg),
+        );
+        assert_eq!(messages, vec![Message::Locked], "lock should succeed");
+
+        messages.clear();
+        session.handle_request(
+            Request::Apply {
+                target_commit: target_commit.into(),
+                expected_current_commit: expected_current,
+            },
+            &mut |msg| messages.push(msg),
+        );
+        assert!(
+            matches!(messages.last(), Some(Message::ApplyComplete { .. })),
+            "apply should succeed, got: {messages:?}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fetch_resolves_stale_after_concurrent_deploy() -> Result<()> {
+        let target_store = TempDir::new("target");
+        let target_repo = git2::Repository::init_bare(target_store.path())?;
+        drop(target_repo);
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+
+        // Driver A commits v1, pushes to target, applies.
+        let driver_a = TempDir::new("driver_a");
+        let repo_a = git2::Repository::init_bare(driver_a.path())?;
+        let commit_v1 = commit_files(&repo_a, &[("web1/app/conf", b"v1")])?;
+        let target_url = format!("file://{}", target_store.path().display());
+
+        push_to_host(driver_a.path(), &target_url, &commit_v1.into(), None)?;
+        lock_and_apply(
+            target_store.path(),
+            apps.path(),
+            units.path(),
+            commit_v1,
+            None,
+        )?;
+        crate::store::set_ref(
+            &repo_a,
+            "refs/remotes/web1/current",
+            commit_v1,
+            crate::store::RefUpdate::SetCurrent,
+        )?;
+
+        // Driver B: copy of A at this point (same main, same tracking ref).
+        let driver_b = TempDir::new("driver_b");
+        std::process::Command::new("cp")
+            .args(["-r"])
+            .arg(driver_a.path())
+            .arg(driver_b.path())
+            .status()?;
+        // cp -r creates driver_a inside driver_b, we need to fix the path.
+        // Actually, cp -r src dst copies src INTO dst if dst exists.
+        // We want the contents, so let's remove driver_b first and copy.
+        drop(std::fs::remove_dir_all(driver_b.path()));
+        std::process::Command::new("cp")
+            .args(["-r"])
+            .arg(driver_a.path())
+            .arg(driver_b.path())
+            .status()?;
+        let repo_b = git2::Repository::open(driver_b.path())?;
+
+        // Driver A deploys v2.
+        let commit_v2 = commit_files(&repo_a, &[("web1/app/conf", b"v2")])?;
+        push_to_host(driver_a.path(), &target_url, &commit_v2.into(), None)?;
+        lock_and_apply(
+            target_store.path(),
+            apps.path(),
+            units.path(),
+            commit_v2,
+            Some(commit_v1.into()),
+        )?;
+
+        // Driver B commits v3 (diverges from A's v2) and tries to lock.
+        let commit_v3 = commit_files(&repo_b, &[("web1/app/conf", b"v3")])?;
+
+        // B's plan still thinks current is commit_v1.
+        let plan = Plan {
+            commit: commit_v3.into(),
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::new(),
+                    expected_current: Some(commit_v1.into()),
+                },
+            )]),
+        };
+
+        // Lock should report stale: target has commit_v2, not commit_v1.
+        let lock_result = lock_hosts(&plan, |_| {
+            let repo = git2::Repository::open(target_store.path())?;
+            let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
+            let session = HostSession::new(
+                repo,
+                "web1".into(),
+                apps.path().to_path_buf(),
+                units.path().to_path_buf(),
+                on_units_changed,
+            );
+            let hello = Hello {
+                version: protocol::VERSION.to_string(),
+                hostname: "web1".to_string(),
+            };
+            Ok(Box::new(LocalConnection {
+                session,
+                hello,
+                message_buffer: VecDeque::new(),
+                // These TempDirs aren't owning anything new, but
+                // LocalConnection needs them. Use fresh empty ones.
+                _store: TempDir::new("unused"),
+                _apps: TempDir::new("unused"),
+                _units: TempDir::new("unused"),
+            }) as Box<dyn Connection>)
+        });
+
+        assert!(lock_result.locked.is_empty());
+        assert_eq!(lock_result.failures.len(), 1);
+        match &lock_result.failures[0].1 {
+            LockFailure::Stale { actual_commit, .. } => {
+                assert_eq!(*actual_commit, Some(commit_v2.into()));
+            }
+            other => panic!("Expected Stale, got {other:?}"),
+        }
+
+        // Driver B doesn't have commit_v2 locally.
+        assert!(
+            repo_b.find_commit(commit_v2).is_err(),
+            "commit_v2 should not exist in driver B yet"
+        );
+
+        // Fetch resolves it: B now has the objects and tracking ref.
+        fetch_from_host(driver_b.path(), &target_url, &"web1".into(), None)?;
+
+        // Re-open repo to see the updated ref.
+        let repo_b = git2::Repository::open(driver_b.path())?;
+        let tracking_ref = repo_b
+            .find_reference("refs/remotes/web1/current")?
+            .peel_to_commit()?;
+        assert_eq!(tracking_ref.id(), commit_v2);
+
+        // B can now find the commit that the target is at.
+        assert!(repo_b.find_commit(commit_v2).is_ok());
+
         Ok(())
     }
 

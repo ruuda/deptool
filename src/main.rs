@@ -237,16 +237,21 @@ fn run() -> Result<()> {
                         eprintln!(
                             "{host}: stale (expected {expected_commit:?}, actual {actual_commit:?})"
                         );
-                        if let Some(actual) = actual_commit {
-                            let refname = format!("refs/remotes/{host}/current");
-                            if let Err(err) = store::set_ref(
-                                &repo,
-                                &refname,
-                                git2::Oid::from(actual),
-                                store::RefUpdate::SetCurrent,
-                            ) {
-                                eprintln!("{host}: failed to update tracking ref: {err}");
+                        // Fetch the host's current ref so we have the
+                        // objects locally for the next plan.
+                        let (remote_url, upload_pack) = match mode {
+                            DeployMode::Local => {
+                                (format!("file://{remote_store_str}"), None)
                             }
+                            DeployMode::Remote => (
+                                format!("ssh://{}/{remote_store_str}", host.0),
+                                Some("sudo git-upload-pack"),
+                            ),
+                        };
+                        if let Err(err) =
+                            deploy::fetch_from_host(&store, &remote_url, host, upload_pack)
+                        {
+                            eprintln!("{host}: failed to fetch: {err}");
                         }
                     }
                     deploy::LockFailure::Busy => {
