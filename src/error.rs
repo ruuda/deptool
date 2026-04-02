@@ -9,6 +9,8 @@ pub enum Error {
     Json(serde_json::Error),
     NonUtf8FileName,
     InvalidConfig(String),
+    SetupChecksumMismatch { expected: String, got: String },
+    SetupProtocolError(String),
 }
 
 impl From<std::io::Error> for Error {
@@ -37,6 +39,10 @@ impl fmt::Display for Error {
             Error::Json(e) => write!(f, "{e}"),
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
+            Error::SetupChecksumMismatch { expected, got } => {
+                write!(f, "setup checksum mismatch: expected {expected}, got {got}")
+            }
+            Error::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
         }
     }
 }

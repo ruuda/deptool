@@ -8,6 +8,7 @@ mod plan;
 mod prim;
 mod protocol;
 mod session;
+mod setup;
 mod store;
 
 #[cfg(test)]
@@ -155,7 +156,29 @@ fn run() -> Result<()> {
                     error::Error::InvalidConfig("remote store path is not valid UTF-8".into())
                 })?
                 .to_string();
-            let make_command = |host: &prim::Hostname| -> Command {
+
+            let binary = std::fs::read(
+                std::env::current_exe().expect("current exe path is known"),
+            )?;
+            let suffix = setup::binary_suffix(&binary);
+            let bin_name = setup::binary_name(protocol::VERSION, &suffix);
+            let remote_bin_path = setup::remote_binary_path(&bin_name);
+
+            // SSH concatenates remote arguments into a single shell string.
+            // We assert the inputs are shell-safe; in the future we should
+            // pass the store path over stdin instead.
+            let is_shell_safe =
+                |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
+            assert!(
+                is_shell_safe(&remote_store_str),
+                "remote store path is free of shell metacharacters"
+            );
+            assert!(
+                is_shell_safe(&remote_bin_path),
+                "remote binary path is free of shell metacharacters"
+            );
+
+            let make_session_cmd = |host: &prim::Hostname| -> Command {
                 match mode {
                     DeployMode::Local => {
                         let mut cmd = Command::new(
@@ -165,28 +188,47 @@ fn run() -> Result<()> {
                         cmd
                     }
                     DeployMode::Remote => {
-                        // SSH concatenates remote arguments into a single shell
-                        // string. We assert the inputs are shell-safe; in the
-                        // future we should pass the store path over stdin instead.
-                        let is_shell_safe =
-                            |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
-                        assert!(
-                            is_shell_safe(&remote_store_str),
-                            "remote store path is free of shell metacharacters"
-                        );
                         assert!(
                             is_shell_safe(&host.0),
                             "hostname is free of shell metacharacters"
                         );
                         let mut cmd = Command::new("ssh");
-                        cmd.args([&host.0, "deptool", "agent", "session", &remote_store_str]);
+                        cmd.args([
+                            &host.0,
+                            &remote_bin_path,
+                            "agent",
+                            "session",
+                            &remote_store_str,
+                        ]);
                         cmd
                     }
                 }
             };
+
+            let make_install_cmd = |host: &prim::Hostname| -> Command {
+                let mut cmd = Command::new("ssh");
+                cmd.args([&host.0, &setup::install_command(&remote_bin_path)]);
+                cmd
+            };
+
             deploy::execute_plan(
                 &plan,
-                |host| Ok(Box::new(deploy::RemoteSession::new(make_command(host))?)),
+                |host| {
+                    deploy::connect_with_setup(
+                        || make_session_cmd(host),
+                        |bytes| {
+                            let mut child = make_install_cmd(host)
+                                .stdin(std::process::Stdio::piped())
+                                .stdout(std::process::Stdio::piped())
+                                .spawn()?;
+                            use std::io::Write;
+                            child.stdin.take().expect("stdin is piped").write_all(bytes)?;
+                            Ok(child.wait_with_output()?.stdout)
+                        },
+                        &binary,
+                        &remote_bin_path,
+                    )
+                },
                 |host, message| eprintln!("{host}: {message:?}"),
             )?;
         }
@@ -256,7 +298,10 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             });
         }
         AgentCmd::Session { store } => {
-            let repo = Repository::open(&store)?;
+            let repo = match Repository::open(&store) {
+                Ok(r) => r,
+                Err(_) => Repository::init_bare(&store)?,
+            };
             let hostname = read_hostname();
             let session = make_host_session(repo, hostname.clone());
             let stdin = std::io::stdin().lock();
