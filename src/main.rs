@@ -98,6 +98,9 @@ enum Cmd {
 #[bpaf(options)]
 struct Args {
     /// Path to the local store (default: ./deptool_store).
+    // TODO: This arg cannot be global because not it occurs on `agent` too,
+    // but `agent session` has a positional arg already. Better to move this
+    // arg into `commit` and `deploy`.
     #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
     store: PathBuf,
     #[bpaf(external(cmd))]

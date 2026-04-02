@@ -49,3 +49,19 @@ Per-host rather than per-app because hosts may be at different current
 revisions, so a single combined diff across all hosts would be meaningless.
 Sequential rather than interactive (e.g. picking a host) to keep the
 implementation simple.
+
+## Ideas for future work
+
+ - `deptool status` fetches current `current` refs from target hosts (based on
+   the target hosts in the latest commit in the store), and shows what apps are
+   currently deployed on them, and what systemd units are enabled. Per app it
+   also shows if it's up to date with our latest commit or not. So this is
+   similar to a diff but not quite, it shows fewer details about changes, and it
+   shows things that are present but unchanged.
+ - `deptool agent log`, when run locally on a target machine, shows the
+   deployment log, which is just the reflog for the `current` ref. In the reflog
+   we should also record the hostname and username of the operator machine that
+   initiated the deployment. You want to know who deployed something.
+ - `deptool commit` should take a commit message that describes what we are
+   deploying. For example, when you generate target configuration with Nix, it
+   could mention the store path.
