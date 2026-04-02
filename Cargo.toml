@@ -7,7 +7,7 @@ license = "Apache-2.0"
 edition = "2024"
 
 [dependencies]
-sha2 = "0.10"
+hmac-sha256 = { version = "1", features = ["opt_size"] }
 bpaf = { version = "0.9", features = ["derive"] }
 git2 = { version = "0.20", default-features = false }
 serde = { version = "1", features = ["derive"] }

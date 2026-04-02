@@ -1,7 +1,5 @@
 //! Binary installation on target hosts.
 
-use sha2::{Digest, Sha256};
-
 use crate::error::{Error, Result};
 
 /// The number of hex characters of the sha256 digest used as the binary suffix.
@@ -9,9 +7,8 @@ const SUFFIX_LEN: usize = 10;
 
 /// Compute the version suffix from the binary's sha256 digest.
 pub fn binary_suffix(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let hex = format!("{digest:x}");
-    hex[..SUFFIX_LEN].to_string()
+    let digest = hmac_sha256::Hash::hash(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect::<String>()[..SUFFIX_LEN].to_string()
 }
 
 /// Compute the versioned binary name: `deptool-{version}-{suffix}`.
@@ -170,7 +167,10 @@ mod tests {
             |bytes| {
                 received.extend_from_slice(bytes);
                 // Return a matching hash so the function doesn't error on checksum.
-                let digest = format!("{:x}", sha2::Sha256::digest(bytes));
+                let digest: String = hmac_sha256::Hash::hash(bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
                 Ok(format!("{digest}  /path\n").into_bytes())
             },
             binary,
