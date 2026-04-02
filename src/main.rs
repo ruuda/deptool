@@ -21,7 +21,9 @@ use std::process::Command;
 use bpaf::Bpaf;
 use git2::Repository;
 
-use error::Result;
+use deploy::Connection;
+use error::{Error, Result};
+use prim::Hostname;
 
 #[derive(Debug, Clone, Bpaf)]
 enum AgentCmd {
@@ -152,17 +154,16 @@ fn run() -> Result<()> {
 
             let remote_store_str = remote_store
                 .to_str()
-                .ok_or_else(|| {
-                    error::Error::InvalidConfig("remote store path is not valid UTF-8".into())
-                })?
+                .ok_or_else(|| Error::InvalidConfig("remote store path is not valid UTF-8".into()))?
                 .to_string();
 
-            let binary = std::fs::read(
-                std::env::current_exe().expect("current exe path is known"),
-            )?;
-            let suffix = setup::binary_suffix(&binary);
-            let bin_name = setup::binary_name(protocol::VERSION, &suffix);
-            let remote_bin_path = setup::remote_binary_path(&bin_name);
+            let binary =
+                std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
+            // 5 bytes (10 hex chars) should be long enough to avoid collisions,
+            // and short enough to keep paths and commands readable and debuggable.
+            let suffix = setup::truncated_sha256(&binary, 5);
+            let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
+            let remote_bin_path = format!("/var/lib/deptool/bin/{bin_name}");
 
             // SSH concatenates remote arguments into a single shell string.
             // We assert the inputs are shell-safe; in the future we should
@@ -178,7 +179,7 @@ fn run() -> Result<()> {
                 "remote binary path is free of shell metacharacters"
             );
 
-            let make_session_cmd = |host: &prim::Hostname| -> Command {
+            let make_session_cmd = |host: &Hostname| -> Command {
                 match mode {
                     DeployMode::Local => {
                         let mut cmd = Command::new(
@@ -204,33 +205,25 @@ fn run() -> Result<()> {
                     }
                 }
             };
-
-            let make_install_cmd = |host: &prim::Hostname| -> Command {
-                let mut cmd = Command::new("ssh");
-                cmd.args([&host.0, &setup::install_command(&remote_bin_path)]);
-                cmd
+            let make_session = |host: &Hostname| -> Result<Box<dyn Connection>> {
+                match deploy::RemoteSession::new(make_session_cmd(host)) {
+                    Ok(session) => return Ok(Box::new(session)),
+                    Err(Error::AgentNotInstalled) => {}
+                    Err(e) => return Err(e),
+                }
+                setup::install_binary(host, &remote_bin_path, &binary)?;
+                match deploy::RemoteSession::new(make_session_cmd(host)) {
+                    Ok(session) => Ok(Box::new(session)),
+                    Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
+                        "agent not found after installation".into(),
+                    )),
+                    Err(e) => return Err(e),
+                }
             };
 
-            deploy::execute_plan(
-                &plan,
-                |host| {
-                    deploy::connect_with_setup(
-                        || make_session_cmd(host),
-                        |bytes| {
-                            let mut child = make_install_cmd(host)
-                                .stdin(std::process::Stdio::piped())
-                                .stdout(std::process::Stdio::piped())
-                                .spawn()?;
-                            use std::io::Write;
-                            child.stdin.take().expect("stdin is piped").write_all(bytes)?;
-                            Ok(child.wait_with_output()?.stdout)
-                        },
-                        &binary,
-                        &remote_bin_path,
-                    )
-                },
-                |host, message| eprintln!("{host}: {message:?}"),
-            )?;
+            deploy::execute_plan(&plan, make_session, |host, message| {
+                eprintln!("{host}: {message:?}")
+            })?;
         }
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }

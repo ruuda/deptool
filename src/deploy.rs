@@ -53,9 +53,11 @@ impl RemoteSession {
                 // EOF before hello: check whether the binary was missing.
                 match child.try_wait()?.and_then(|s| s.code()) {
                     Some(EXIT_COMMAND_NOT_FOUND) => return Err(Error::AgentNotInstalled),
-                    _ => return Err(Error::SetupProtocolError(
-                        "agent exited before sending hello".into(),
-                    )),
+                    _ => {
+                        return Err(Error::SetupProtocolError(
+                            "agent exited before sending hello".into(),
+                        ));
+                    }
                 }
             }
             Ok(_) => serde_json::from_str(&line)?,
@@ -111,32 +113,6 @@ impl Connection for RemoteSession {
             on_message(message);
         }
         Ok(())
-    }
-}
-
-/// Connect to a host, installing the agent binary first if it is missing.
-///
-/// `make_cmd` builds the `deptool agent session` command for the host.
-/// `install` is called with the binary bytes if the agent is not yet installed;
-/// it should run the install command over SSH and return stdout.
-pub fn connect_with_setup(
-    make_cmd: impl Fn() -> Command,
-    install: impl FnOnce(&[u8]) -> Result<Vec<u8>>,
-    binary: &[u8],
-    remote_bin_path: &str,
-) -> Result<Box<dyn Connection>> {
-    match RemoteSession::new(make_cmd()) {
-        Ok(session) => return Ok(Box::new(session)),
-        Err(Error::AgentNotInstalled) => {}
-        Err(e) => return Err(e),
-    }
-    crate::setup::install_binary(install, binary, remote_bin_path)?;
-    match RemoteSession::new(make_cmd()) {
-        Ok(session) => Ok(Box::new(session)),
-        Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
-            "agent not found after installation".into(),
-        )),
-        Err(e) => Err(e),
     }
 }
 
