@@ -227,7 +227,7 @@ pub fn lock_hosts(
 /// Send Apply to all locked hosts and stream responses.
 pub fn apply_hosts(
     plan: &Plan,
-    connections: &mut Vec<(Hostname, Box<dyn Connection>)>,
+    connections: &mut [(Hostname, Box<dyn Connection>)],
     mut on_message: impl FnMut(&Hostname, Message),
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
@@ -249,7 +249,7 @@ pub fn apply_hosts(
 pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,
-    connections: &mut Vec<(Hostname, Box<dyn Connection>)>,
+    connections: &mut [(Hostname, Box<dyn Connection>)],
 ) -> Result<()> {
     let pack_data = crate::store::create_pack(repo, git2::Oid::from(&plan.commit))?;
     let encoded = BASE64.encode(&pack_data);
@@ -282,7 +282,7 @@ pub fn push_packs(
 /// ref for each host.
 pub fn fetch_stale_objects(
     repo: &git2::Repository,
-    stale: &mut Vec<(Hostname, StaleHost)>,
+    stale: &mut [(Hostname, StaleHost)],
 ) -> Result<()> {
     for (host, info) in stale.iter_mut() {
         let actual_commit = match &info.actual_commit {
@@ -290,45 +290,40 @@ pub fn fetch_stale_objects(
             None => continue,
         };
 
-        // Skip if we already have this commit locally.
-        if repo.find_commit(git2::Oid::from(&actual_commit)).is_ok() {
-            crate::store::set_ref(
-                repo,
-                &format!("refs/remotes/{host}/current"),
-                git2::Oid::from(&actual_commit),
-                crate::store::RefUpdate::SetCurrent,
-            )?;
-            continue;
+        // Fetch the pack if we don't already have this commit.
+        if repo.find_commit(git2::Oid::from(&actual_commit)).is_err() {
+            info.connection.send_request(&Request::RequestObjects {
+                have_commit: info.expected_commit.clone(),
+            })?;
+
+            match info.connection.read_message()? {
+                Some(Message::SendPack { pack_data }) => {
+                    let bytes = BASE64.decode(&pack_data).map_err(|err| {
+                        Error::ProtocolError(format!(
+                            "{host}: invalid base64 in SendPack: {err}"
+                        ))
+                    })?;
+                    crate::store::write_pack(repo, &bytes)?;
+                }
+                Some(Message::Error { message }) => {
+                    return Err(Error::ProtocolError(format!(
+                        "{host}: RequestObjects failed: {message}"
+                    )));
+                }
+                other => {
+                    return Err(Error::ProtocolError(format!(
+                        "{host}: unexpected response to RequestObjects: {other:?}"
+                    )));
+                }
+            }
         }
 
-        info.connection.send_request(&Request::RequestObjects {
-            have_commit: info.expected_commit.clone(),
-        })?;
-
-        match info.connection.read_message()? {
-            Some(Message::SendPack { pack_data }) => {
-                let bytes = BASE64.decode(&pack_data).map_err(|err| {
-                    Error::ProtocolError(format!("{host}: invalid base64 in SendPack: {err}"))
-                })?;
-                crate::store::write_pack(repo, &bytes)?;
-                crate::store::set_ref(
-                    repo,
-                    &format!("refs/remotes/{host}/current"),
-                    git2::Oid::from(&actual_commit),
-                    crate::store::RefUpdate::SetCurrent,
-                )?;
-            }
-            Some(Message::Error { message }) => {
-                return Err(Error::ProtocolError(format!(
-                    "{host}: RequestObjects failed: {message}"
-                )));
-            }
-            other => {
-                return Err(Error::ProtocolError(format!(
-                    "{host}: unexpected response to RequestObjects: {other:?}"
-                )));
-            }
-        }
+        crate::store::set_ref(
+            repo,
+            &format!("refs/remotes/{host}/current"),
+            git2::Oid::from(&actual_commit),
+            crate::store::RefUpdate::SetCurrent,
+        )?;
     }
     Ok(())
 }
@@ -459,16 +454,14 @@ mod tests {
         let host = test_host()?;
         let plan = single_host_plan(host.commit_oid.into());
         let mut conn = Some(host.conn);
-        let lock_result =
+        let mut lock_result =
             lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
 
         assert!(lock_result.failures.is_empty());
         assert_eq!(lock_result.locked.len(), 1);
 
         let mut messages = Vec::new();
-        apply_hosts(&plan, &mut lock_result.locked.into_iter().collect(), |_, msg| {
-            messages.push(msg)
-        })?;
+        apply_hosts(&plan, &mut lock_result.locked, |_, msg| messages.push(msg))?;
 
         assert!(matches!(
             messages.last(),
@@ -663,16 +656,10 @@ mod tests {
         )?;
 
         // Driver B: copy of A at this point (same main, same tracking ref).
+        // TempDir creates the directory, so remove it first so cp -r
+        // copies the contents rather than nesting inside it.
         let driver_b = TempDir::new("driver_b");
-        std::process::Command::new("cp")
-            .args(["-r"])
-            .arg(driver_a.path())
-            .arg(driver_b.path())
-            .status()?;
-        // cp -r creates driver_a inside driver_b, we need to fix the path.
-        // Actually, cp -r src dst copies src INTO dst if dst exists.
-        // We want the contents, so let's remove driver_b first and copy.
-        drop(std::fs::remove_dir_all(driver_b.path()));
+        std::fs::remove_dir_all(driver_b.path())?;
         std::process::Command::new("cp")
             .args(["-r"])
             .arg(driver_a.path())

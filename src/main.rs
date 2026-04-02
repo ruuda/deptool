@@ -263,7 +263,7 @@ fn run() -> Result<()> {
                 )));
             }
 
-            let mut connections: Vec<_> = lock_result.locked.into_iter().collect();
+            let mut connections = lock_result.locked;
 
             // Send the packfile over the session so the agent has all
             // objects needed for checkout. No extra SSH connection needed.
