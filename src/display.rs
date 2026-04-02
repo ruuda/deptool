@@ -8,7 +8,7 @@ use std::process::Command;
 use git2::Repository;
 
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, SystemdConfig, UnitChanges, diff_enabled};
+use crate::plan::{AppDiff, Plan, UnitChanges, app_enabled_units, diff_enabled};
 use crate::prim::{Hostname, Oid};
 
 /// The Git empty tree object, used as the base for diffs against new hosts.
@@ -22,9 +22,10 @@ pub fn print_plan(out: &mut impl Write, repo: &Repository, plan: &Plan) -> Resul
             match diff {
                 AppDiff::Add { new_tree } => {
                     writeln!(out, "  + {app}")?;
-                    let tree = repo.find_tree(git2::Oid::from(new_tree))?;
-                    for file in list_files(repo, &tree)? {
-                        writeln!(out, "      + {file}")?;
+                    for (prefix, file) in
+                        diff_files(repo, empty_tree_oid(), git2::Oid::from(new_tree))?
+                    {
+                        writeln!(out, "      {prefix} {file}")?;
                     }
                     let units = diff_enabled(
                         &BTreeSet::new(),
@@ -133,53 +134,41 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges) -> Result<()> {
     Ok(())
 }
 
-/// Read the enabled units from an app tree's `systemd.json`, if present.
-// TODO: This is duplicated. There is a variant of it in
-// `plan::validate_systemd_config`, and in `apply::collect_enabled_units`.
-// The proper place for this in plan.rs.
-fn app_enabled_units(repo: &Repository, app_tree_oid: git2::Oid) -> Result<BTreeSet<String>> {
-    let tree = repo.find_tree(app_tree_oid)?;
-    let Some(entry) = tree.get_name("systemd.json") else {
-        return Ok(BTreeSet::new());
-    };
-    let blob = repo.find_blob(entry.id())?;
-    let config: SystemdConfig = serde_json::from_slice(blob.content())?;
-    Ok(config.units_enabled.into_iter().collect())
-}
-
-/// List all files in a tree recursively, returning relative paths.
-// TODO: Why do we need this at all? Shouldn't diff_files against an empty tree
-// work fine already?
-fn list_files(repo: &Repository, tree: &git2::Tree) -> Result<Vec<String>> {
-    let mut files = Vec::new();
-    list_files_inner(repo, tree, "", &mut files)?;
-    Ok(files)
-}
-
-fn list_files_inner(
+/// Diff two app trees, returning (prefix_char, filename) pairs.
+fn diff_files(
     repo: &Repository,
-    tree: &git2::Tree,
-    prefix: &str,
-    out: &mut Vec<String>,
-) -> Result<()> {
-    for entry in tree.iter() {
-        let name = entry.name().expect("tree entry name is utf-8");
-        let path = if prefix.is_empty() {
-            name.to_string()
-        } else {
-            format!("{prefix}/{name}")
-        };
-        if entry.kind() == Some(git2::ObjectType::Tree) {
-            let subtree = repo.find_tree(entry.id())?;
-            list_files_inner(repo, &subtree, &path, out)?;
-        } else {
-            out.push(path);
-        }
-    }
-    Ok(())
+    old_oid: git2::Oid,
+    new_oid: git2::Oid,
+) -> Result<Vec<(char, String)>> {
+    let old_tree = repo.find_tree(old_oid)?;
+    let new_tree = repo.find_tree(new_oid)?;
+    let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
+
+    let mut changes = Vec::new();
+    diff.foreach(
+        &mut |delta, _| {
+            let prefix = match delta.status() {
+                git2::Delta::Added => '+',
+                git2::Delta::Deleted => '-',
+                _ => '~',
+            };
+            let path = delta
+                .new_file()
+                .path()
+                .or_else(|| delta.old_file().path())
+                .and_then(|p| p.to_str())
+                .unwrap_or("?")
+                .to_string();
+            changes.push((prefix, path));
+            true
+        },
+        None, // binary callback
+        None, // hunk callback
+        None, // line callback
+    )?;
+    Ok(changes)
 }
 
-// TODO: Tests go at the end of the module, not in the middle!
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -209,8 +198,6 @@ mod tests {
     fn render(repo: &git2::Repository, plan: &Plan) -> Result<String> {
         let mut out = Vec::new();
         print_plan(&mut out, repo, plan)?;
-        // TODO: Maybe we should make `print_plan` use an fmt::Write instead of
-        // an io::Write? Then the utf-8 is valid by construction.
         Ok(String::from_utf8(out).expect("output is utf-8"))
     }
 
@@ -218,11 +205,8 @@ mod tests {
     fn added_app_shows_plus_prefix_with_filenames() -> Result<()> {
         let store = TempDir::new("store");
         let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"server {}")])?;
+        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"server {}\n")])?;
         let new_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
-        // TODO: Would it be less verbose to compute the plan rather than
-        // hard-coding it inline? The noisiness here obscures the purpose of the
-        // test.
         let plan = Plan {
             commit: c1.into(),
             hosts: BTreeMap::from([(
@@ -233,17 +217,13 @@ mod tests {
                 },
             )]),
         };
-        let out = render(&repo, &plan)?;
-        // TODO: Instead of asserting parts, just hard-code the full expected
-        // output. It's simpler, and also it shows the reader what the output
-        // actually looks like straight in the source code. If we update the
-        // format we just update the test too. In other words, a golden test
-        // is the right kind of test for formatting. (Also applies to tests
-        // below.)
-        assert!(out.contains("  + nginx"), "app has + prefix: {out}");
-        assert!(
-            out.contains("      + nginx.conf"),
-            "file has + prefix: {out}"
+        assert_eq!(
+            render(&repo, &plan)?,
+            "\
+web1
+  + nginx
+      + nginx.conf
+",
         );
         Ok(())
     }
@@ -255,7 +235,7 @@ mod tests {
         let c1 = commit_files(
             &repo,
             &[
-                ("web1/nginx/nginx.conf", b"server {}"),
+                ("web1/nginx/nginx.conf", b"server {}\n"),
                 (
                     "web1/nginx/systemd.json",
                     br#"{"units_enabled":["nginx.service"]}"#,
@@ -273,10 +253,15 @@ mod tests {
                 },
             )]),
         };
-        let out = render(&repo, &plan)?;
-        assert!(
-            out.contains("      enable nginx.service"),
-            "unit has enable action: {out}"
+        assert_eq!(
+            render(&repo, &plan)?,
+            "\
+web1
+  + nginx
+      + nginx.conf
+      + systemd.json
+      enable nginx.service
+",
         );
         Ok(())
     }
@@ -288,7 +273,7 @@ mod tests {
         let c1 = commit_files(
             &repo,
             &[
-                ("web1/nginx/nginx.conf", b"server {}"),
+                ("web1/nginx/nginx.conf", b"server {}\n"),
                 (
                     "web1/nginx/systemd.json",
                     br#"{"units_enabled":["nginx.service"]}"#,
@@ -306,11 +291,13 @@ mod tests {
                 },
             )]),
         };
-        let out = render(&repo, &plan)?;
-        assert!(out.contains("  - nginx"), "app has - prefix: {out}");
-        assert!(
-            out.contains("      disable nginx.service"),
-            "unit has disable action: {out}"
+        assert_eq!(
+            render(&repo, &plan)?,
+            "\
+web1
+  - nginx
+      disable nginx.service
+",
         );
         Ok(())
     }
@@ -336,11 +323,13 @@ mod tests {
                 },
             )]),
         };
-        let out = render(&repo, &plan)?;
-        assert!(out.contains("  ~ nginx"), "app has ~ prefix: {out}");
-        assert!(
-            out.contains("      ~ nginx.conf"),
-            "changed file has ~ prefix: {out}"
+        assert_eq!(
+            render(&repo, &plan)?,
+            "\
+web1
+  ~ nginx
+      ~ nginx.conf
+",
         );
         Ok(())
     }
@@ -379,51 +368,15 @@ mod tests {
                 },
             )]),
         };
-        let out = render(&repo, &plan)?;
-        assert!(
-            out.contains("      restart nginx.service"),
-            "unit has restart action: {out}"
+        assert_eq!(
+            render(&repo, &plan)?,
+            "\
+web1
+  ~ nginx
+      ~ nginx.conf
+      restart nginx.service
+",
         );
         Ok(())
     }
-}
-
-/// Diff two app trees, returning (prefix_char, filename) pairs.
-fn diff_files(
-    repo: &Repository,
-    old_oid: git2::Oid,
-    new_oid: git2::Oid,
-) -> Result<Vec<(char, String)>> {
-    let old_tree = repo.find_tree(old_oid)?;
-    let new_tree = repo.find_tree(new_oid)?;
-    let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
-
-    let mut changes = Vec::new();
-    diff.foreach(
-        &mut |delta, _| {
-            let prefix = match delta.status() {
-                git2::Delta::Added => '+',
-                git2::Delta::Deleted => '-',
-                _ => '~',
-            };
-            // TODO: If we have access to the line diff counts here, then we may
-            // as well include them in the output in `git diff --stat` style.
-            let path = delta
-                .new_file()
-                .path()
-                .or_else(|| delta.old_file().path())
-                .and_then(|p| p.to_str())
-                .unwrap_or("?")
-                .to_string();
-            changes.push((prefix, path));
-            true
-        },
-        // TODO: Remember to name non-obvious args at the call site. What are
-        // these nones? You keep forgetting this even though you have a memory
-        // about it.
-        None,
-        None,
-        None,
-    )?;
-    Ok(changes)
 }

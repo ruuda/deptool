@@ -60,6 +60,9 @@ enum Cmd {
     /// Record a directory as a new commit in the store.
     #[bpaf(command)]
     Commit {
+        /// Path to the local store (default: ./deptool_store).
+        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+        store: PathBuf,
         /// Directory to commit.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
@@ -67,6 +70,9 @@ enum Cmd {
     /// Plan and apply changes to all hosts.
     #[bpaf(command)]
     Deploy {
+        /// Path to the local store (default: ./deptool_store).
+        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+        store: PathBuf,
         /// Path to the store on target hosts (default: /var/lib/deptool/store).
         #[bpaf(
             long("remote-store"),
@@ -97,22 +103,15 @@ enum Cmd {
 #[derive(Debug, Clone, Bpaf)]
 #[bpaf(options)]
 struct Args {
-    /// Path to the local store (default: ./deptool_store).
-    // TODO: This arg cannot be global because not it occurs on `agent` too,
-    // but `agent session` has a positional arg already. Better to move this
-    // arg into `commit` and `deploy`.
-    #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
-    store: PathBuf,
     #[bpaf(external(cmd))]
     cmd: Cmd,
 }
 
 fn run() -> Result<()> {
     let args = args().run();
-    let store = args.store;
 
     match args.cmd {
-        Cmd::Commit { dir } => {
+        Cmd::Commit { store, dir } => {
             let repo = match Repository::open(&store) {
                 Ok(r) => r,
                 Err(_) => Repository::init_bare(&store)?,
@@ -122,6 +121,7 @@ fn run() -> Result<()> {
             println!("{commit_oid}");
         }
         Cmd::Deploy {
+            store,
             remote_store,
             plan_only,
             confirm_mode,
