@@ -66,6 +66,16 @@ deploy the newer config. If it's not an ancestor, something is wrong (possibly
 the operator is running from an outdated store), and deployment against this
 machine should abort.
 
+## Future work
+
+ - Error handling still feels clunky and verbose in code, and the messages are
+   very bare-bones. Can we make the code less polluted by error handling, and
+   at the same time get prettier errors?
+ - Tests are still very verbose with lots of setup/teardown, which detracts from
+   what they do. E.g. in deploy.rs `lock_push_pack_and_apply_...`. Can we build
+   some abstractions to make tests easier to express?
+ - Parallel execution against multiple hosts.
+
 ## License
 
 Deptool is licensed under the [Apache 2.0][apache2] license.
