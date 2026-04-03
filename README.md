@@ -75,6 +75,7 @@ machine should abort.
    what they do. E.g. in deploy.rs `lock_push_pack_and_apply_...`. Can we build
    some abstractions to make tests easier to express?
  - Parallel execution against multiple hosts.
+ - GC `/usr/lib/deptool/bin` when we install a new version.
 
 ## License
 
