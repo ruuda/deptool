@@ -127,12 +127,7 @@ pub enum Decision {
 ///
 /// `d` pages through the full file diff for each host sequentially, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
-pub fn confirm(
-    repo: &Repository,
-    plan: &Plan,
-    store: &Path,
-    color: UseColor,
-) -> Result<Decision> {
+pub fn confirm(repo: &Repository, plan: &Plan, store: &Path, color: UseColor) -> Result<Decision> {
     let n = plan.hosts.len();
     let noun = if n == 1 { "host" } else { "hosts" };
     loop {

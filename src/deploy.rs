@@ -61,10 +61,7 @@ impl DeployProgress {
         hosts: Vec<Hostname>,
         on_change: Box<dyn FnMut(&BTreeMap<Hostname, HostState>)>,
     ) -> Self {
-        let states = hosts
-            .into_iter()
-            .map(|h| (h, HostState::Pending))
-            .collect();
+        let states = hosts.into_iter().map(|h| (h, HostState::Pending)).collect();
         Self { states, on_change }
     }
 
