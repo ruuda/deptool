@@ -7,6 +7,7 @@ use std::process::Command;
 
 use git2::Repository;
 
+use crate::deploy::HostState;
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, UnitChanges, app_enabled_units, diff_enabled};
 use crate::prim::{Hostname, Oid};
@@ -231,6 +232,68 @@ fn diff_files(
     Ok(changes)
 }
 
+/// Renders deploy progress as a live-updating block on a terminal.
+pub struct StatusPrinter {
+    color: UseColor,
+    rendered: bool,
+}
+
+impl StatusPrinter {
+    pub fn new(color: UseColor) -> Self {
+        Self {
+            color,
+            rendered: false,
+        }
+    }
+
+    pub fn print(&mut self, hosts: &[Hostname], states: &[HostState]) {
+        self.render(&mut io::stdout(), hosts, states)
+            .expect("stdout is writable");
+    }
+
+    fn render(
+        &mut self,
+        out: &mut impl Write,
+        hosts: &[Hostname],
+        states: &[HostState],
+    ) -> Result<()> {
+        let n = hosts.len();
+        if self.rendered {
+            // Move cursor up to overwrite previous output.
+            write!(out, "\x1b[{n}A")?;
+        }
+        for (host, state) in hosts.iter().zip(states.iter()) {
+            // Clear line, then print.
+            write!(out, "\x1b[2K")?;
+            writeln!(out, "  {host}: {}", self.color_state(state))?;
+        }
+        out.flush()?;
+        self.rendered = true;
+        Ok(())
+    }
+
+    fn color_state(&self, state: &HostState) -> String {
+        match state {
+            HostState::Done => self.color.green(&state.to_string()),
+            HostState::Failed(_) => self.color.red(&state.to_string()),
+            _ => self.color.yellow(&state.to_string()),
+        }
+    }
+
+    /// Render to a buffer, for testing.
+    #[cfg(test)]
+    fn render_to_string(
+        &mut self,
+        hosts: &[Hostname],
+        states: &[HostState],
+    ) -> String {
+        let mut buf = Vec::new();
+        self.render(&mut buf, hosts, states)
+            .expect("writing to Vec never fails");
+        String::from_utf8(buf).expect("output is utf-8")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -440,5 +503,50 @@ web1
 ",
         );
         Ok(())
+    }
+
+    #[test]
+    fn status_printer_initial_render() {
+        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
+        let states = vec![HostState::Connecting, HostState::Connecting];
+        let mut printer = StatusPrinter::new(UseColor::No);
+        assert_eq!(
+            printer.render_to_string(&hosts, &states),
+            "\
+\x1b[2K  web1: connecting
+\x1b[2K  web2: connecting
+",
+        );
+    }
+
+    #[test]
+    fn status_printer_second_render_moves_cursor_up() {
+        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
+        let mut printer = StatusPrinter::new(UseColor::No);
+        printer.render_to_string(&hosts, &[HostState::Connecting, HostState::Connecting]);
+        assert_eq!(
+            printer.render_to_string(&hosts, &[HostState::Locked, HostState::Connecting]),
+            "\
+\x1b[2A\x1b[2K  web1: locked
+\x1b[2K  web2: connecting
+",
+        );
+    }
+
+    #[test]
+    fn status_printer_colors_states() {
+        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
+        let states = vec![
+            HostState::Done,
+            HostState::Failed("stale".to_string()),
+        ];
+        let mut printer = StatusPrinter::new(UseColor::Yes);
+        assert_eq!(
+            printer.render_to_string(&hosts, &states),
+            "\
+\x1b[2K  web1: \x1b[32mdone\x1b[0m
+\x1b[2K  web2: \x1b[31mfailed: stale\x1b[0m
+",
+        );
     }
 }

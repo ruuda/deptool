@@ -211,32 +211,19 @@ fn run_deploy(
         }
     };
 
-    let mut lock_result = deploy::lock_hosts(&plan, make_session);
+    let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
+    let mut printer = display::StatusPrinter::new(color);
+    let mut progress =
+        deploy::DeployProgress::new(hosts, |hosts, states| printer.print(hosts, states));
+    let mut lock_result = deploy::lock_hosts(&plan, make_session, &mut progress);
 
-    for (host, info) in &lock_result.stale {
-        eprintln!(
-            "{host}: stale (expected {:?}, actual {:?})",
-            info.expected_commit, info.actual_commit,
-        );
-    }
-    for (host, failure) in &lock_result.failures {
-        match failure {
-            deploy::ConnectFailure::LockBusy => {
-                eprintln!("{host}: another deployment is in progress");
-            }
-            deploy::ConnectFailure::ConnectionFailed(msg) => {
-                eprintln!("{host}: connection failed: {msg}");
-            }
-        }
-    }
-
-    if !lock_result.stale.is_empty() || !lock_result.failures.is_empty() {
+    if !lock_result.stale.is_empty() || progress.has_failures() {
         // Fetch objects from stale hosts over their still-open
         // sessions so we have the data for the next plan.
         if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
             eprintln!("failed to fetch stale objects: {err}");
         }
-        let n = lock_result.stale.len() + lock_result.failures.len();
+        let n = lock_result.stale.len() + progress.num_failed();
         return Err(Error::InvalidConfig(format!(
             "failed to lock {n} host(s), aborting",
         )));
@@ -244,23 +231,19 @@ fn run_deploy(
 
     let mut connections = lock_result.locked;
 
-    deploy::push_packs(&repo, &plan, &mut connections)?;
-    deploy::apply_hosts(&plan, &mut connections, |host, message| {
-        match &message {
-            protocol::Message::ApplyComplete { commit, .. } => {
-                let refname = format!("refs/remotes/{host}/current");
-                if let Err(err) = store::set_ref(
-                    &repo,
-                    &refname,
-                    git2::Oid::from(commit),
-                    store::RefUpdate::ApplyComplete,
-                ) {
-                    eprintln!("{host}: failed to update tracking ref: {err}");
-                }
+    deploy::push_packs(&repo, &plan, &mut connections, &mut progress)?;
+    deploy::apply_hosts(&plan, &mut connections, &mut progress, |host, message| {
+        if let protocol::Message::ApplyComplete { commit, .. } = &message {
+            let refname = format!("refs/remotes/{host}/current");
+            if let Err(err) = store::set_ref(
+                &repo,
+                &refname,
+                git2::Oid::from(commit),
+                store::RefUpdate::ApplyComplete,
+            ) {
+                eprintln!("{host}: failed to update tracking ref: {err}");
             }
-            _ => {}
         }
-        eprintln!("{host}: {message:?}")
     })?;
 
     Ok(())

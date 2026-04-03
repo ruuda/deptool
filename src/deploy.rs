@@ -11,6 +11,69 @@ use crate::plan::Plan;
 use crate::prim::{Hostname, Oid};
 use crate::protocol::{self, Hello, Message, Request};
 
+pub enum HostState {
+    Connecting,
+    Locked,
+    Pushing,
+    Applying,
+    Done,
+    Failed(String),
+}
+
+impl std::fmt::Display for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostState::Connecting => f.write_str("connecting"),
+            HostState::Locked => f.write_str("locked"),
+            HostState::Pushing => f.write_str("pushing"),
+            HostState::Applying => f.write_str("applying"),
+            HostState::Done => f.write_str("done"),
+            HostState::Failed(reason) => write!(f, "failed: {reason}"),
+        }
+    }
+}
+
+/// Tracks per-host deploy state, calling `on_change` after each update.
+pub struct DeployProgress<F> {
+    hosts: Vec<Hostname>,
+    states: Vec<HostState>,
+    on_change: F,
+}
+
+impl<F: FnMut(&[Hostname], &[HostState])> DeployProgress<F> {
+    pub fn new(hosts: Vec<Hostname>, on_change: F) -> Self {
+        let states = hosts.iter().map(|_| HostState::Connecting).collect();
+        Self {
+            hosts,
+            states,
+            on_change,
+        }
+    }
+
+    pub fn update(&mut self, host: &Hostname, state: HostState) {
+        let idx = self
+            .hosts
+            .iter()
+            .position(|h| h == host)
+            .expect("host is in the plan");
+        self.states[idx] = state;
+        (self.on_change)(&self.hosts, &self.states);
+    }
+
+    pub fn has_failures(&self) -> bool {
+        self.states
+            .iter()
+            .any(|s| matches!(s, HostState::Failed(_)))
+    }
+
+    pub fn num_failed(&self) -> usize {
+        self.states
+            .iter()
+            .filter(|s| matches!(s, HostState::Failed(_)))
+            .count()
+    }
+}
+
 pub trait Connection {
     fn hello(&self) -> &Hello;
     fn send_request(&mut self, request: &Request) -> Result<()>;
@@ -111,12 +174,6 @@ impl Connection for RemoteSession {
     }
 }
 
-#[derive(Debug)]
-pub enum ConnectFailure {
-    LockBusy,
-    ConnectionFailed(String),
-}
-
 pub struct StaleHost {
     pub expected_commit: Option<Oid>,
     pub actual_commit: Option<Oid>,
@@ -126,7 +183,6 @@ pub struct StaleHost {
 pub struct LockResult {
     pub locked: Vec<(Hostname, Box<dyn Connection>)>,
     pub stale: Vec<(Hostname, StaleHost)>,
-    pub failures: Vec<(Hostname, ConnectFailure)>,
 }
 
 /// Open sessions and acquire deploy locks on all hosts in the plan.
@@ -138,21 +194,20 @@ pub struct LockResult {
 pub fn lock_hosts(
     plan: &Plan,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
+    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
 ) -> LockResult {
     let mut result = LockResult {
         locked: Vec::new(),
         stale: Vec::new(),
-        failures: Vec::new(),
     };
 
     for (host, host_plan) in &plan.hosts {
+        progress.update(host, HostState::Connecting);
+
         let mut conn = match connect(host) {
             Ok(c) => c,
             Err(err) => {
-                result.failures.push((
-                    host.clone(),
-                    ConnectFailure::ConnectionFailed(err.to_string()),
-                ));
+                progress.update(host, HostState::Failed(err.to_string()));
                 continue;
             }
         };
@@ -167,21 +222,20 @@ pub fn lock_hosts(
             expected_current_commit: host_plan.expected_current.clone(),
         };
         if let Err(err) = conn.send_request(&lock_request) {
-            result.failures.push((
-                host.clone(),
-                ConnectFailure::ConnectionFailed(err.to_string()),
-            ));
+            progress.update(host, HostState::Failed(err.to_string()));
             continue;
         }
 
         match conn.read_message() {
             Ok(Some(Message::Locked)) => {
+                progress.update(host, HostState::Locked);
                 result.locked.push((host.clone(), conn));
             }
             Ok(Some(Message::LockStale {
                 expected_commit,
                 actual_commit,
             })) => {
+                progress.update(host, HostState::Failed("stale".to_string()));
                 result.stale.push((
                     host.clone(),
                     StaleHost {
@@ -192,17 +246,16 @@ pub fn lock_hosts(
                 ));
             }
             Ok(Some(Message::LockBusy)) => {
-                result
-                    .failures
-                    .push((host.clone(), ConnectFailure::LockBusy));
+                progress.update(
+                    host,
+                    HostState::Failed("another deployment is in progress".to_string()),
+                );
             }
             other => {
-                result.failures.push((
-                    host.clone(),
-                    ConnectFailure::ConnectionFailed(format!(
-                        "unexpected lock response: {other:?}"
-                    )),
-                ));
+                progress.update(
+                    host,
+                    HostState::Failed(format!("unexpected lock response: {other:?}")),
+                );
             }
         }
     }
@@ -214,15 +267,20 @@ pub fn lock_hosts(
 pub fn apply_hosts(
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
+    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
     mut on_message: impl FnMut(&Hostname, Message),
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
+        progress.update(host, HostState::Applying);
         let request = Request::Apply {
             target_commit: plan.commit.clone(),
         };
         conn.send_request(&request)?;
         conn.close();
         while let Some(message) = conn.read_message()? {
+            if matches!(message, Message::ApplyComplete { .. }) {
+                progress.update(host, HostState::Done);
+            }
             on_message(host, message);
         }
     }
@@ -240,8 +298,10 @@ pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
+    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
+        progress.update(host, HostState::Pushing);
         let have_commit = plan.hosts[host]
             .expected_current
             .as_ref()
@@ -328,6 +388,11 @@ mod tests {
     use crate::session::HostSession;
     use crate::testutil::{TempDir, commit_files};
 
+    fn test_progress(hosts: &[&str]) -> DeployProgress<impl FnMut(&[Hostname], &[HostState])> {
+        let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
+        DeployProgress::new(hosts, |_, _| {})
+    }
+
     /// In-memory connection that wraps a HostSession directly.
     struct LocalConnection {
         session: HostSession,
@@ -409,13 +474,19 @@ mod tests {
         let host = test_host()?;
         let plan = single_host_plan(host.commit_oid.into());
         let mut conn = Some(host.conn);
-        let mut lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        let mut progress = test_progress(&["web1"]);
+        let mut lock_result = lock_hosts(
+            &plan,
+            |_| Ok(conn.take().expect("connect called once")),
+            &mut progress,
+        );
 
-        assert!(lock_result.failures.is_empty());
         assert_eq!(lock_result.locked.len(), 1);
 
         let mut messages = Vec::new();
-        apply_hosts(&plan, &mut lock_result.locked, |_, msg| messages.push(msg))?;
+        apply_hosts(&plan, &mut lock_result.locked, &mut progress, |_, msg| {
+            messages.push(msg)
+        })?;
 
         assert!(matches!(
             messages.last(),
@@ -462,7 +533,12 @@ mod tests {
 
         let plan = single_host_plan(Oid::from("0000000000000000000000000000000000000000"));
         let mut conn = Some(conn);
-        let lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
+        let mut progress = test_progress(&["web1"]);
+        let lock_result = lock_hosts(
+            &plan,
+            |_| Ok(conn.take().expect("connect called once")),
+            &mut progress,
+        );
 
         assert!(lock_result.locked.is_empty());
         assert_eq!(lock_result.stale.len(), 1);
@@ -504,14 +580,20 @@ mod tests {
 
         let plan = single_host_plan(commit_oid.into());
         let mut conn = Some(conn);
-        let lock_result = lock_hosts(&plan, |_| Ok(conn.take().expect("connect called once")));
-        assert!(lock_result.failures.is_empty());
+        let mut progress = test_progress(&["web1"]);
+        let lock_result = lock_hosts(
+            &plan,
+            |_| Ok(conn.take().expect("connect called once")),
+            &mut progress,
+        );
 
         let mut connections = lock_result.locked;
-        push_packs(&driver_repo, &plan, &mut connections)?;
+        push_packs(&driver_repo, &plan, &mut connections, &mut progress)?;
 
         let mut messages = Vec::new();
-        apply_hosts(&plan, &mut connections, |_, msg| messages.push(msg))?;
+        apply_hosts(&plan, &mut connections, &mut progress, |_, msg| {
+            messages.push(msg)
+        })?;
 
         assert!(matches!(
             messages.last(),
@@ -634,29 +716,34 @@ mod tests {
         };
 
         // Lock should report stale: target has commit_v2, not commit_v1.
-        let mut lock_result = lock_hosts(&plan, |_| {
-            let repo = git2::Repository::open(target_store.path())?;
-            let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
-            let session = HostSession::new(
-                repo,
-                "web1".into(),
-                apps.path().to_path_buf(),
-                units.path().to_path_buf(),
-                on_units_changed,
-            );
-            let hello = Hello {
-                version: protocol::VERSION.to_string(),
-                hostname: "web1".to_string(),
-            };
-            Ok(Box::new(LocalConnection {
-                session,
-                hello,
-                message_buffer: VecDeque::new(),
-                _store: TempDir::new("unused"),
-                _apps: TempDir::new("unused"),
-                _units: TempDir::new("unused"),
-            }) as Box<dyn Connection>)
-        });
+        let mut progress = test_progress(&["web1"]);
+        let mut lock_result = lock_hosts(
+            &plan,
+            |_| {
+                let repo = git2::Repository::open(target_store.path())?;
+                let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
+                let session = HostSession::new(
+                    repo,
+                    "web1".into(),
+                    apps.path().to_path_buf(),
+                    units.path().to_path_buf(),
+                    on_units_changed,
+                );
+                let hello = Hello {
+                    version: protocol::VERSION.to_string(),
+                    hostname: "web1".to_string(),
+                };
+                Ok(Box::new(LocalConnection {
+                    session,
+                    hello,
+                    message_buffer: VecDeque::new(),
+                    _store: TempDir::new("unused"),
+                    _apps: TempDir::new("unused"),
+                    _units: TempDir::new("unused"),
+                }) as Box<dyn Connection>)
+            },
+            &mut progress,
+        );
 
         assert!(lock_result.locked.is_empty());
         assert_eq!(lock_result.stale.len(), 1);
