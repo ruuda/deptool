@@ -11,53 +11,103 @@ use crate::error::Result;
 use crate::plan::{AppDiff, Plan, UnitChanges, app_enabled_units, diff_enabled};
 use crate::prim::{Hostname, Oid};
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum UseColor {
+    Yes,
+    No,
+}
+
+impl UseColor {
+    /// Respect the NO_COLOR convention: color is off when `NO_COLOR` is set.
+    pub fn from_env() -> Self {
+        match std::env::var_os("NO_COLOR") {
+            Some(val) if !val.is_empty() => UseColor::No,
+            _ => UseColor::Yes,
+        }
+    }
+
+    fn green(self, text: &str) -> String {
+        match self {
+            UseColor::Yes => format!("\x1b[32m{text}\x1b[0m"),
+            UseColor::No => text.to_string(),
+        }
+    }
+
+    fn red(self, text: &str) -> String {
+        match self {
+            UseColor::Yes => format!("\x1b[31m{text}\x1b[0m"),
+            UseColor::No => text.to_string(),
+        }
+    }
+
+    fn yellow(self, text: &str) -> String {
+        match self {
+            UseColor::Yes => format!("\x1b[33m{text}\x1b[0m"),
+            UseColor::No => text.to_string(),
+        }
+    }
+}
+
 /// The Git empty tree object, used as the base for diffs against new hosts.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Write the deployment plan as a diffstat.
-pub fn print_plan(out: &mut impl Write, repo: &Repository, plan: &Plan) -> Result<()> {
+pub fn print_plan(
+    out: &mut impl Write,
+    repo: &Repository,
+    plan: &Plan,
+    color: UseColor,
+) -> Result<()> {
     for (host, host_plan) in &plan.hosts {
         writeln!(out, "{host}")?;
         for (app, diff) in &host_plan.apps {
             match diff {
                 AppDiff::Add { new_tree } => {
-                    writeln!(out, "  + {app}")?;
+                    writeln!(out, "  {} {app}", color.green("+"))?;
                     for (prefix, file) in
                         diff_files(repo, empty_tree_oid(), git2::Oid::from(new_tree))?
                     {
-                        writeln!(out, "      {prefix} {file}")?;
+                        writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                     let units = diff_enabled(
                         &BTreeSet::new(),
                         &app_enabled_units(repo, git2::Oid::from(new_tree))?,
                     );
-                    write_unit_actions(out, &units)?;
+                    write_unit_actions(out, &units, color)?;
                 }
                 AppDiff::Remove { old_tree } => {
-                    writeln!(out, "  - {app}")?;
+                    writeln!(out, "  {} {app}", color.red("-"))?;
                     let units = diff_enabled(
                         &app_enabled_units(repo, git2::Oid::from(old_tree))?,
                         &BTreeSet::new(),
                     );
-                    write_unit_actions(out, &units)?;
+                    write_unit_actions(out, &units, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
-                    writeln!(out, "  ~ {app}")?;
+                    writeln!(out, "  {} {app}", color.yellow("~"))?;
                     for (prefix, file) in
                         diff_files(repo, git2::Oid::from(old_tree), git2::Oid::from(new_tree))?
                     {
-                        writeln!(out, "      {prefix} {file}")?;
+                        writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                     let units = diff_enabled(
                         &app_enabled_units(repo, git2::Oid::from(old_tree))?,
                         &app_enabled_units(repo, git2::Oid::from(new_tree))?,
                     );
-                    write_unit_actions(out, &units)?;
+                    write_unit_actions(out, &units, color)?;
                 }
             }
         }
     }
     Ok(())
+}
+
+fn color_prefix(color: UseColor, prefix: char) -> String {
+    match prefix {
+        '+' => color.green("+"),
+        '-' => color.red("-"),
+        _ => color.yellow("~"),
+    }
 }
 
 pub enum Decision {
@@ -121,15 +171,15 @@ fn empty_tree_oid() -> git2::Oid {
     git2::Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
-fn write_unit_actions(out: &mut impl Write, units: &UnitChanges) -> Result<()> {
+fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
     for unit in &units.enable {
-        writeln!(out, "      enable {unit}")?;
+        writeln!(out, "      {} {unit}", color.green("enable"))?;
     }
     for unit in &units.restart {
-        writeln!(out, "      restart {unit}")?;
+        writeln!(out, "      {} {unit}", color.yellow("restart"))?;
     }
     for unit in &units.disable {
-        writeln!(out, "      disable {unit}")?;
+        writeln!(out, "      {} {unit}", color.red("disable"))?;
     }
     Ok(())
 }
@@ -197,7 +247,7 @@ mod tests {
 
     fn render(repo: &git2::Repository, plan: &Plan) -> Result<String> {
         let mut out = Vec::new();
-        print_plan(&mut out, repo, plan)?;
+        print_plan(&mut out, repo, plan, UseColor::No)?;
         Ok(String::from_utf8(out).expect("output is utf-8"))
     }
 

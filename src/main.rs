@@ -125,7 +125,8 @@ fn run_deploy(
         return Ok(());
     }
 
-    display::print_plan(&mut std::io::stdout(), &repo, &plan)?;
+    let color = display::UseColor::from_env();
+    display::print_plan(&mut std::io::stdout(), &repo, &plan, color)?;
 
     if plan_only {
         return Ok(());
