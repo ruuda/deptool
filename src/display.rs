@@ -46,6 +46,13 @@ impl UseColor {
             UseColor::No => text.to_string(),
         }
     }
+
+    fn blue(self, text: &str) -> String {
+        match self {
+            UseColor::Yes => format!("\x1b[34m{text}\x1b[0m"),
+            UseColor::No => text.to_string(),
+        }
+    }
 }
 
 /// The Git empty tree object, used as the base for diffs against new hosts.
@@ -119,7 +126,12 @@ pub enum Decision {
 ///
 /// `d` pages through the full file diff for each host sequentially, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
-pub fn confirm(repo: &Repository, plan: &Plan, store: &Path) -> Result<Decision> {
+pub fn confirm(
+    repo: &Repository,
+    plan: &Plan,
+    store: &Path,
+    color: UseColor,
+) -> Result<Decision> {
     let n = plan.hosts.len();
     let noun = if n == 1 { "host" } else { "hosts" };
     loop {
@@ -130,18 +142,18 @@ pub fn confirm(repo: &Repository, plan: &Plan, store: &Path) -> Result<Decision>
         io::stdin().read_line(&mut input)?;
         match input.trim() {
             "y" | "Y" => return Ok(Decision::Apply),
-            "d" | "D" => show_diffs(repo, plan, store)?,
+            "d" | "D" => show_diffs(repo, plan, store, color)?,
             _ => return Ok(Decision::Abort),
         }
     }
 }
 
 /// Open a pager with the full file diff for each host in the plan.
-fn show_diffs(repo: &Repository, plan: &Plan, store: &Path) -> Result<()> {
+fn show_diffs(repo: &Repository, plan: &Plan, store: &Path, color: UseColor) -> Result<()> {
     for (host, host_plan) in &plan.hosts {
         let old_oid = host_tree_oid(repo, host_plan.expected_current.as_ref(), host)?;
         let new_oid = host_tree_oid(repo, Some(&plan.commit), host)?;
-        println!("=== {host} ===");
+        println!("\n{}", color.blue(&host.to_string()));
         Command::new("git")
             .arg("--git-dir")
             .arg(store)

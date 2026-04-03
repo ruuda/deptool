@@ -134,7 +134,7 @@ fn run_deploy(
 
     let decision = match confirm_mode {
         ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
-        ConfirmMode::Prompt => display::confirm(&repo, &plan, &store)?,
+        ConfirmMode::Prompt => display::confirm(&repo, &plan, &store, color)?,
     };
     if let display::Decision::Abort = decision {
         return Ok(());
