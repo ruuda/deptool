@@ -1,6 +1,6 @@
 //! Plan display and deploy confirmation prompt.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
@@ -246,26 +246,31 @@ impl StatusPrinter {
         }
     }
 
-    pub fn print(&mut self, hosts: &[Hostname], states: &[HostState]) {
-        self.render(&mut io::stdout(), hosts, states)
+    pub fn print(&mut self, states: &BTreeMap<Hostname, HostState>) {
+        self.render(&mut io::stdout(), states)
             .expect("stdout is writable");
     }
 
     fn render(
         &mut self,
         out: &mut impl Write,
-        hosts: &[Hostname],
-        states: &[HostState],
+        states: &BTreeMap<Hostname, HostState>,
     ) -> Result<()> {
-        let n = hosts.len();
+        let n = states.len();
         if self.rendered {
             // Move cursor up to overwrite previous output.
             write!(out, "\x1b[{n}A")?;
         }
-        for (host, state) in hosts.iter().zip(states.iter()) {
-            // Clear line, then print.
+        let name_width = states.keys().map(|h| h.0.len()).max().unwrap_or(0);
+        for (host, state) in states {
+            let label = format!("{host}:");
             write!(out, "\x1b[2K")?;
-            writeln!(out, "  {host}: {}", self.color_state(state))?;
+            writeln!(
+                out,
+                "  {label:<width$} {}",
+                self.color_state(state),
+                width = name_width + 1,
+            )?;
         }
         out.flush()?;
         self.rendered = true;
@@ -275,20 +280,18 @@ impl StatusPrinter {
     fn color_state(&self, state: &HostState) -> String {
         match state {
             HostState::Done => self.color.green(&state.to_string()),
-            HostState::Failed(_) => self.color.red(&state.to_string()),
+            HostState::Failed(_) | HostState::Stale | HostState::LockBusy => {
+                self.color.red(&state.to_string())
+            }
             _ => self.color.yellow(&state.to_string()),
         }
     }
 
     /// Render to a buffer, for testing.
     #[cfg(test)]
-    fn render_to_string(
-        &mut self,
-        hosts: &[Hostname],
-        states: &[HostState],
-    ) -> String {
+    fn render_to_string(&mut self, states: &BTreeMap<Hostname, HostState>) -> String {
         let mut buf = Vec::new();
-        self.render(&mut buf, hosts, states)
+        self.render(&mut buf, states)
             .expect("writing to Vec never fails");
         String::from_utf8(buf).expect("output is utf-8")
     }
@@ -507,11 +510,13 @@ web1
 
     #[test]
     fn status_printer_initial_render() {
-        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
-        let states = vec![HostState::Connecting, HostState::Connecting];
+        let states = BTreeMap::from([
+            (Hostname::from("web1"), HostState::Connecting),
+            (Hostname::from("web2"), HostState::Connecting),
+        ]);
         let mut printer = StatusPrinter::new(UseColor::No);
         assert_eq!(
-            printer.render_to_string(&hosts, &states),
+            printer.render_to_string(&states),
             "\
 \x1b[2K  web1: connecting
 \x1b[2K  web2: connecting
@@ -521,11 +526,18 @@ web1
 
     #[test]
     fn status_printer_second_render_moves_cursor_up() {
-        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
         let mut printer = StatusPrinter::new(UseColor::No);
-        printer.render_to_string(&hosts, &[HostState::Connecting, HostState::Connecting]);
+        let states = BTreeMap::from([
+            (Hostname::from("web1"), HostState::Connecting),
+            (Hostname::from("web2"), HostState::Connecting),
+        ]);
+        printer.render_to_string(&states);
+        let states = BTreeMap::from([
+            (Hostname::from("web1"), HostState::Locked),
+            (Hostname::from("web2"), HostState::Connecting),
+        ]);
         assert_eq!(
-            printer.render_to_string(&hosts, &[HostState::Locked, HostState::Connecting]),
+            printer.render_to_string(&states),
             "\
 \x1b[2A\x1b[2K  web1: locked
 \x1b[2K  web2: connecting
@@ -535,17 +547,32 @@ web1
 
     #[test]
     fn status_printer_colors_states() {
-        let hosts = vec![Hostname::from("web1"), Hostname::from("web2")];
-        let states = vec![
-            HostState::Done,
-            HostState::Failed("stale".to_string()),
-        ];
+        let states = BTreeMap::from([
+            (Hostname::from("web1"), HostState::Done),
+            (Hostname::from("web2"), HostState::Stale),
+        ]);
         let mut printer = StatusPrinter::new(UseColor::Yes);
         assert_eq!(
-            printer.render_to_string(&hosts, &states),
+            printer.render_to_string(&states),
             "\
 \x1b[2K  web1: \x1b[32mdone\x1b[0m
-\x1b[2K  web2: \x1b[31mfailed: stale\x1b[0m
+\x1b[2K  web2: \x1b[31mstale\x1b[0m
+",
+        );
+    }
+
+    #[test]
+    fn status_printer_aligns_hostnames() {
+        let states = BTreeMap::from([
+            (Hostname::from("frontend"), HostState::Locked),
+            (Hostname::from("backend"), HostState::Connecting),
+        ]);
+        let mut printer = StatusPrinter::new(UseColor::No);
+        assert_eq!(
+            printer.render_to_string(&states),
+            "\
+\x1b[2K  backend:  connecting
+\x1b[2K  frontend: locked
 ",
         );
     }

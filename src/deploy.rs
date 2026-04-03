@@ -6,71 +6,79 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
+use std::collections::BTreeMap;
+
 use crate::error::{Error, Result};
 use crate::plan::Plan;
 use crate::prim::{Hostname, Oid};
 use crate::protocol::{self, Hello, Message, Request};
 
 pub enum HostState {
+    Pending,
     Connecting,
     Locked,
     Pushing,
     Applying,
     Done,
+    Stale,
+    LockBusy,
     Failed(String),
+}
+
+impl HostState {
+    pub fn is_failure(&self) -> bool {
+        matches!(
+            self,
+            HostState::Stale | HostState::LockBusy | HostState::Failed(_)
+        )
+    }
 }
 
 impl std::fmt::Display for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HostState::Pending => f.write_str("pending"),
             HostState::Connecting => f.write_str("connecting"),
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
             HostState::Done => f.write_str("done"),
+            HostState::Stale => f.write_str("stale"),
+            HostState::LockBusy => f.write_str("locked by another deploy"),
             HostState::Failed(reason) => write!(f, "failed: {reason}"),
         }
     }
 }
 
 /// Tracks per-host deploy state, calling `on_change` after each update.
-pub struct DeployProgress<F> {
-    hosts: Vec<Hostname>,
-    states: Vec<HostState>,
-    on_change: F,
+pub struct DeployProgress {
+    states: BTreeMap<Hostname, HostState>,
+    on_change: Box<dyn FnMut(&BTreeMap<Hostname, HostState>)>,
 }
 
-impl<F: FnMut(&[Hostname], &[HostState])> DeployProgress<F> {
-    pub fn new(hosts: Vec<Hostname>, on_change: F) -> Self {
-        let states = hosts.iter().map(|_| HostState::Connecting).collect();
-        Self {
-            hosts,
-            states,
-            on_change,
-        }
+impl DeployProgress {
+    pub fn new(
+        hosts: Vec<Hostname>,
+        on_change: Box<dyn FnMut(&BTreeMap<Hostname, HostState>)>,
+    ) -> Self {
+        let states = hosts
+            .into_iter()
+            .map(|h| (h, HostState::Pending))
+            .collect();
+        Self { states, on_change }
     }
 
     pub fn update(&mut self, host: &Hostname, state: HostState) {
-        let idx = self
-            .hosts
-            .iter()
-            .position(|h| h == host)
-            .expect("host is in the plan");
-        self.states[idx] = state;
-        (self.on_change)(&self.hosts, &self.states);
+        *self.states.get_mut(host).expect("host is in the plan") = state;
+        (self.on_change)(&self.states);
     }
 
     pub fn has_failures(&self) -> bool {
-        self.states
-            .iter()
-            .any(|s| matches!(s, HostState::Failed(_)))
+        self.states.values().any(|s| s.is_failure())
     }
 
     pub fn num_failed(&self) -> usize {
-        self.states
-            .iter()
-            .filter(|s| matches!(s, HostState::Failed(_)))
-            .count()
+        self.states.values().filter(|s| s.is_failure()).count()
     }
 }
 
@@ -194,7 +202,7 @@ pub struct LockResult {
 pub fn lock_hosts(
     plan: &Plan,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
-    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
+    progress: &mut DeployProgress,
 ) -> LockResult {
     let mut result = LockResult {
         locked: Vec::new(),
@@ -235,7 +243,7 @@ pub fn lock_hosts(
                 expected_commit,
                 actual_commit,
             })) => {
-                progress.update(host, HostState::Failed("stale".to_string()));
+                progress.update(host, HostState::Stale);
                 result.stale.push((
                     host.clone(),
                     StaleHost {
@@ -246,10 +254,7 @@ pub fn lock_hosts(
                 ));
             }
             Ok(Some(Message::LockBusy)) => {
-                progress.update(
-                    host,
-                    HostState::Failed("another deployment is in progress".to_string()),
-                );
+                progress.update(host, HostState::LockBusy);
             }
             other => {
                 progress.update(
@@ -267,7 +272,7 @@ pub fn lock_hosts(
 pub fn apply_hosts(
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
-    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
+    progress: &mut DeployProgress,
     mut on_message: impl FnMut(&Hostname, Message),
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
@@ -298,7 +303,7 @@ pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
-    progress: &mut DeployProgress<impl FnMut(&[Hostname], &[HostState])>,
+    progress: &mut DeployProgress,
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
         progress.update(host, HostState::Pushing);
@@ -388,9 +393,9 @@ mod tests {
     use crate::session::HostSession;
     use crate::testutil::{TempDir, commit_files};
 
-    fn test_progress(hosts: &[&str]) -> DeployProgress<impl FnMut(&[Hostname], &[HostState])> {
+    fn test_progress(hosts: &[&str]) -> DeployProgress {
         let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
-        DeployProgress::new(hosts, |_, _| {})
+        DeployProgress::new(hosts, Box::new(|_| {}))
     }
 
     /// In-memory connection that wraps a HostSession directly.

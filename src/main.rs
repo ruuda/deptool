@@ -214,16 +214,16 @@ fn run_deploy(
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let mut printer = display::StatusPrinter::new(color);
     let mut progress =
-        deploy::DeployProgress::new(hosts, |hosts, states| printer.print(hosts, states));
+        deploy::DeployProgress::new(hosts, Box::new(move |states| printer.print(states)));
     let mut lock_result = deploy::lock_hosts(&plan, make_session, &mut progress);
 
-    if !lock_result.stale.is_empty() || progress.has_failures() {
+    if progress.has_failures() {
         // Fetch objects from stale hosts over their still-open
         // sessions so we have the data for the next plan.
         if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
             eprintln!("failed to fetch stale objects: {err}");
         }
-        let n = lock_result.stale.len() + progress.num_failed();
+        let n = progress.num_failed();
         return Err(Error::InvalidConfig(format!(
             "failed to lock {n} host(s), aborting",
         )));
