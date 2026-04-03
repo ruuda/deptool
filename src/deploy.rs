@@ -16,6 +16,7 @@ use crate::protocol::{self, Hello, Message, Request};
 pub enum HostState {
     Pending,
     Connecting,
+    InstallingAgent,
     Locked,
     Pushing,
     Applying,
@@ -39,6 +40,7 @@ impl std::fmt::Display for HostState {
         match self {
             HostState::Pending => f.write_str("pending"),
             HostState::Connecting => f.write_str("connecting"),
+            HostState::InstallingAgent => f.write_str("installing agent"),
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
@@ -113,7 +115,9 @@ impl RemoteSession {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            // Suppress stderr so "command not found" on first connect
+            // (before agent installation) doesn't disturb the status display.
+            .stderr(Stdio::null())
             .spawn()?;
 
         let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
@@ -199,6 +203,7 @@ pub struct LockResult {
 pub fn lock_hosts(
     plan: &Plan,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
+    mut install: impl FnMut(&Hostname) -> Result<()>,
     progress: &mut DeployProgress,
 ) -> LockResult {
     let mut result = LockResult {
@@ -211,6 +216,20 @@ pub fn lock_hosts(
 
         let mut conn = match connect(host) {
             Ok(c) => c,
+            Err(Error::AgentNotInstalled) => {
+                progress.update(host, HostState::InstallingAgent);
+                if let Err(err) = install(host) {
+                    progress.update(host, HostState::Failed(err.to_string()));
+                    continue;
+                }
+                match connect(host) {
+                    Ok(c) => c,
+                    Err(err) => {
+                        progress.update(host, HostState::Failed(err.to_string()));
+                        continue;
+                    }
+                }
+            }
             Err(err) => {
                 progress.update(host, HostState::Failed(err.to_string()));
                 continue;
@@ -480,6 +499,7 @@ mod tests {
         let mut lock_result = lock_hosts(
             &plan,
             |_| Ok(conn.take().expect("connect called once")),
+            |_| panic!("install not expected"),
             &mut progress,
         );
 
@@ -539,6 +559,7 @@ mod tests {
         let lock_result = lock_hosts(
             &plan,
             |_| Ok(conn.take().expect("connect called once")),
+            |_| panic!("install not expected"),
             &mut progress,
         );
 
@@ -586,6 +607,7 @@ mod tests {
         let lock_result = lock_hosts(
             &plan,
             |_| Ok(conn.take().expect("connect called once")),
+            |_| panic!("install not expected"),
             &mut progress,
         );
 
@@ -744,6 +766,7 @@ mod tests {
                     _units: TempDir::new("unused"),
                 }) as Box<dyn Connection>)
             },
+            |_| panic!("install not expected"),
             &mut progress,
         );
 

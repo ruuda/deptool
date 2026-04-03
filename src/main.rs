@@ -165,8 +165,8 @@ fn run_deploy(
         "remote binary path is free of shell metacharacters"
     );
 
-    let make_session_cmd = |host: &Hostname| -> Command {
-        match mode {
+    let connect = |host: &Hostname| -> Result<Box<dyn Connection>> {
+        let cmd = match mode {
             DeployMode::Local => {
                 let mut cmd =
                     Command::new(std::env::current_exe().expect("current exe path is known"));
@@ -189,33 +189,18 @@ fn run_deploy(
                 ]);
                 cmd
             }
-        }
+        };
+        let session = deploy::RemoteSession::new(cmd)?;
+        Ok(Box::new(session))
     };
-    let make_session = |host: &Hostname| -> Result<Box<dyn Connection>> {
-        match deploy::RemoteSession::new(make_session_cmd(host)) {
-            Ok(session) => return Ok(Box::new(session)),
-            Err(Error::AgentNotInstalled) => {}
-            Err(e) => return Err(e),
-        }
-        println!(
-            "Agent is not yet available on {}, installing it now ...",
-            host.0
-        );
-        setup::install_binary(host, &remote_bin_path, &binary)?;
-        match deploy::RemoteSession::new(make_session_cmd(host)) {
-            Ok(session) => Ok(Box::new(session)),
-            Err(Error::AgentNotInstalled) => Err(Error::SetupProtocolError(
-                "agent not found after installation".into(),
-            )),
-            Err(e) => return Err(e),
-        }
-    };
+    let install =
+        |host: &Hostname| -> Result<()> { setup::install_binary(host, &remote_bin_path, &binary) };
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let mut printer = display::StatusPrinter::new(color);
     let mut progress =
         deploy::DeployProgress::new(hosts, Box::new(move |states| printer.print(states)));
-    let mut lock_result = deploy::lock_hosts(&plan, make_session, &mut progress);
+    let mut lock_result = deploy::lock_hosts(&plan, connect, install, &mut progress);
 
     if progress.has_failures() {
         // Fetch objects from stale hosts over their still-open
