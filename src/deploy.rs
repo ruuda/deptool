@@ -133,7 +133,8 @@ pub struct LockResult {
 ///
 /// Tries every host even if some fail, so the caller gets all stale info
 /// in one pass. Hosts are locked in plan iteration order (asciibetical,
-/// since the plan uses a BTreeMap).
+/// since the plan uses a BTreeMap) to avoid deadlocks in case of concurrent
+/// deploys.
 pub fn lock_hosts(
     plan: &Plan,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
@@ -231,7 +232,10 @@ pub fn apply_hosts(
 /// Send packfiles to all locked hosts over their session connections.
 ///
 /// Packs are built per-host, containing only objects the host doesn't
-/// already have (based on the plan's expected_current for that host).
+/// already have, based on the plan's `expected_current` for that host. We only
+/// execute this if we acquired a lock on the host, and we can only take the
+/// lock if our expected commit is up to date, so `expected_current` is a valid
+/// base for the packfile.
 pub fn push_packs(
     repo: &git2::Repository,
     plan: &Plan,

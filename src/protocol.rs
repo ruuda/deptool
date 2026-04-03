@@ -50,7 +50,7 @@ pub enum Message {
         restarted_units: Vec<String>,
         disabled_units: Vec<String>,
     },
-    /// A packfile containing the host's current commit and its objects.
+    /// A base64-encoded packfile in response to `RequestObjects`.
     SendPack {
         pack_data: String,
     },
