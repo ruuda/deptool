@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 use crate::plan::Plan;
 use crate::prim::{Hostname, Oid};
 use crate::protocol::{self, Hello, Message, Request};
+use crate::store::{RefUpdate, Store};
 
 #[derive(Debug, PartialEq)]
 pub enum HostState {
@@ -313,7 +314,7 @@ pub fn lock_hosts(
 
 /// Send Apply to all locked hosts and stream responses.
 pub fn apply_hosts(
-    repo: &git2::Repository,
+    store: &Store,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
     progress: &mut DeployProgress,
@@ -329,11 +330,10 @@ pub fn apply_hosts(
         while let Some(message) = conn.read_message()? {
             if let Message::ApplyComplete { ref commit, .. } = message {
                 progress.update(host, HostState::Done);
-                crate::store::set_ref(
-                    repo,
+                store.set_ref(
                     &format!("refs/remotes/{host}/current"),
                     git2::Oid::from(commit),
-                    crate::store::RefUpdate::ApplyComplete,
+                    RefUpdate::ApplyComplete,
                 )?;
             }
             on_message(host, message);
@@ -350,7 +350,7 @@ pub fn apply_hosts(
 /// lock if our expected commit is up to date, so `expected_current` is a valid
 /// base for the packfile.
 pub fn push_packs(
-    repo: &git2::Repository,
+    store: &Store,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
     progress: &mut DeployProgress,
@@ -361,8 +361,7 @@ pub fn push_packs(
             .expected_current
             .as_ref()
             .map(git2::Oid::from);
-        let pack_bytes =
-            crate::store::create_pack(repo, git2::Oid::from(&plan.commit), have_commit)?;
+        let pack_bytes = store.create_pack(git2::Oid::from(&plan.commit), have_commit)?;
         let encoded = BASE64.encode(&pack_bytes);
         conn.send_request(&Request::ReceivePack { pack_data: encoded })?;
         match conn.read_message()? {
@@ -387,10 +386,7 @@ pub fn push_packs(
 /// For each stale host whose actual commit we don't already have, sends
 /// `RequestObjects` and receives a packfile. Updates the local tracking
 /// ref for each host.
-pub fn fetch_stale_objects(
-    repo: &git2::Repository,
-    stale: &mut [(Hostname, StaleHost)],
-) -> Result<()> {
+pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -> Result<()> {
     for (host, info) in stale.iter_mut() {
         let actual_commit = match &info.actual_commit {
             Some(c) => c.clone(),
@@ -398,7 +394,11 @@ pub fn fetch_stale_objects(
         };
 
         // Fetch the pack if we don't already have this commit.
-        if repo.find_commit(git2::Oid::from(&actual_commit)).is_err() {
+        if store
+            .repo
+            .find_commit(git2::Oid::from(&actual_commit))
+            .is_err()
+        {
             info.connection.send_request(&Request::RequestObjects {
                 have_commit: info.expected_commit.clone(),
             })?;
@@ -408,7 +408,7 @@ pub fn fetch_stale_objects(
                     let bytes = BASE64
                         .decode(&pack_data)
                         .expect("SendPack contains valid base64");
-                    crate::store::write_pack(repo, &bytes)?;
+                    store.write_pack(&bytes)?;
                 }
                 Some(Message::Error { message }) => {
                     return Err(Error::ProtocolError(format!(
@@ -423,11 +423,10 @@ pub fn fetch_stale_objects(
             }
         }
 
-        crate::store::set_ref(
-            repo,
+        store.set_ref(
             &format!("refs/remotes/{host}/current"),
             git2::Oid::from(&actual_commit),
-            crate::store::RefUpdate::FetchStale,
+            RefUpdate::FetchStale,
         )?;
     }
     Ok(())
@@ -439,7 +438,7 @@ pub fn fetch_stale_objects(
 /// objects from stale hosts and aborts without pushing or applying to any
 /// host.
 pub fn run_deploy(
-    repo: &git2::Repository,
+    store: &Store,
     plan: &Plan,
     connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
     install: impl FnMut(&Hostname) -> Result<()>,
@@ -449,15 +448,15 @@ pub fn run_deploy(
 
     if progress.has_failures() {
         // Fetch objects from stale hosts so we have the data for the next plan.
-        fetch_stale_objects(repo, &mut lock_result.stale)?;
+        fetch_stale_objects(store, &mut lock_result.stale)?;
         let n = progress.num_failed();
         return Err(Error::InvalidConfig(format!(
             "failed to lock {n} host(s), aborting",
         )));
     }
 
-    push_packs(repo, plan, &mut lock_result.locked, progress)?;
-    apply_hosts(repo, plan, &mut lock_result.locked, progress, |_, _| {})?;
+    push_packs(store, plan, &mut lock_result.locked, progress)?;
+    apply_hosts(store, plan, &mut lock_result.locked, progress, |_, _| {})?;
     Ok(())
 }
 
@@ -478,7 +477,7 @@ mod tests {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
         let mut progress = test_progress(&hostnames);
         run_deploy(
-            &driver.repo,
+            &driver.store,
             plan,
             |host| {
                 let target = targets
@@ -553,7 +552,7 @@ mod tests {
         let plan = make_plan(commit_v3.into(), &[("web1", Some(commit_v1.into()))]);
         let mut progress = test_progress(&["web1"]);
         let result = run_deploy(
-            &driver_b.repo,
+            &driver_b.store,
             &plan,
             |_| Ok(target.connect()),
             |_| panic!("install not expected"),
@@ -566,7 +565,7 @@ mod tests {
 
         // The stale fetch should have brought commit_v2 into driver B,
         // so B can re-plan with up-to-date information.
-        assert!(driver_b.repo.find_commit(commit_v2).is_ok());
+        assert!(driver_b.store.repo.find_commit(commit_v2).is_ok());
         assert_eq!(driver_b.get_host_tracking_ref("web1"), Some(commit_v2));
 
         Ok(())
@@ -606,7 +605,7 @@ mod tests {
         );
         let mut progress = test_progress(&["web1", "web2"]);
         let result = run_deploy(
-            &driver.repo,
+            &driver.store,
             &plan,
             |host| match host.0.as_str() {
                 "web1" => Ok(web1.connect()),
@@ -638,7 +637,7 @@ mod tests {
         let commit = driver.commit(&[("web1/app/conf", b"v1")]);
 
         // Simulate another driver holding the lock.
-        let lock_path = target.session.repo.path().join("deptool.lock");
+        let lock_path = target.session.store.repo.path().join("deptool.lock");
         let lock_holder = std::fs::File::create(&lock_path).expect("lock file is created");
         assert!(
             crate::session::try_flock_exclusive(&lock_holder).expect("flock succeeds"),
@@ -648,7 +647,7 @@ mod tests {
         let plan = make_plan(commit.into(), &[("web1", None)]);
         let mut progress = test_progress(&["web1"]);
         let result = run_deploy(
-            &driver.repo,
+            &driver.store,
             &plan,
             |_| Ok(target.connect()),
             |_| panic!("install not expected"),
@@ -672,7 +671,7 @@ mod tests {
         let plan = make_plan(commit.into(), &[("web1", None), ("web2", None)]);
         let mut progress = test_progress(&["web1", "web2"]);
         let result = run_deploy(
-            &driver.repo,
+            &driver.store,
             &plan,
             |host| match host.0.as_str() {
                 "web1" => Ok(web1.connect()),

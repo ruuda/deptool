@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use git2::Repository;
 
 use crate::prim::{Hostname, Oid};
 use crate::protocol::{Message, Request};
+use crate::store::Store;
 
 /// Try to acquire an exclusive, non-blocking file lock.
 ///
@@ -30,7 +30,7 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 pub struct HostSession {
-    pub repo: Repository,
+    pub store: Store,
     pub hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
@@ -41,14 +41,14 @@ pub struct HostSession {
 
 impl HostSession {
     pub fn new(
-        repo: Repository,
+        store: Store,
         hostname: Hostname,
         apps_dir: PathBuf,
         unit_dir: PathBuf,
         on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
     ) -> Self {
         HostSession {
-            repo,
+            store,
             hostname,
             apps_dir,
             unit_dir,
@@ -60,15 +60,14 @@ impl HostSession {
     /// Create a session for testing that does not touch systemd.
     #[cfg(test)]
     pub fn new_test(
-        repo: Repository,
+        repo: git2::Repository,
         hostname: &str,
         apps_dir: &std::path::Path,
         unit_dir: &std::path::Path,
     ) -> Self {
-        // In tests, skip the daemon-reload + restart step.
         let on_units_changed = Box::new(|_: &_| Ok(()));
         HostSession::new(
-            repo,
+            Store { repo },
             hostname.into(),
             apps_dir.to_path_buf(),
             unit_dir.to_path_buf(),
@@ -77,7 +76,8 @@ impl HostSession {
     }
 
     fn current_commit(&self) -> Option<Oid> {
-        self.repo
+        self.store
+            .repo
             .find_reference("refs/heads/current")
             .ok()
             .map(|r| r.peel_to_commit().expect("current ref points to a commit"))
@@ -89,7 +89,7 @@ impl HostSession {
         expected_current_commit: Option<crate::prim::Oid>,
         emit_message: &mut impl FnMut(Message),
     ) {
-        let lock_path = self.repo.path().join("deptool.lock");
+        let lock_path = self.store.repo.path().join("deptool.lock");
         let file = match File::create(&lock_path) {
             Ok(f) => f,
             Err(err) => {
@@ -130,7 +130,7 @@ impl HostSession {
 
     fn handle_receive_pack(&self, pack_data: &str, emit_message: &mut impl FnMut(Message)) {
         let bytes = BASE64.decode(pack_data).expect("pack_data is valid base64");
-        match crate::store::write_pack(&self.repo, &bytes) {
+        match self.store.write_pack(&bytes) {
             Ok(()) => emit_message(Message::PackReceived),
             Err(err) => emit_message(Message::Error {
                 message: format!("failed to write pack: {err}"),
@@ -154,7 +154,7 @@ impl HostSession {
                     .expect("RequestObjects implies a current commit exists");
                 let git_oid = git2::Oid::from(&commit);
                 let have = have_commit.as_ref().map(git2::Oid::from);
-                match crate::store::create_pack(&self.repo, git_oid, have) {
+                match self.store.create_pack(git_oid, have) {
                     Ok(bytes) => emit_message(Message::SendPack {
                         pack_data: BASE64.encode(&bytes),
                     }),
@@ -167,7 +167,7 @@ impl HostSession {
                 let current_commit = self.current_commit();
 
                 let result = crate::apply::apply_host(
-                    &self.repo,
+                    &self.store,
                     git2::Oid::from(&target_commit),
                     current_commit.map(git2::Oid::from),
                     &self.hostname,
@@ -214,6 +214,7 @@ impl HostSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::RefUpdate;
     use crate::testutil::TestHost;
 
     #[test]
@@ -228,13 +229,10 @@ mod tests {
     #[test]
     fn lock_succeeds_when_current_ref_matches_expected() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
-        crate::store::set_ref(
-            &host.session.repo,
-            "refs/heads/current",
-            oid,
-            crate::store::RefUpdate::SetCurrent,
-        )
-        .expect("ref is set");
+        host.session
+            .store
+            .set_ref("refs/heads/current", oid, RefUpdate::SetCurrent)
+            .expect("ref is set");
         let responses = host.interact(Request::Lock {
             expected_current_commit: Some(oid.into()),
         });
@@ -244,13 +242,10 @@ mod tests {
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
-        crate::store::set_ref(
-            &host.session.repo,
-            "refs/heads/current",
-            oid,
-            crate::store::RefUpdate::SetCurrent,
-        )
-        .expect("ref is set");
+        host.session
+            .store
+            .set_ref("refs/heads/current", oid, RefUpdate::SetCurrent)
+            .expect("ref is set");
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
         });
@@ -272,7 +267,7 @@ mod tests {
         let mut host = TestHost::new("web1");
 
         // Acquire the lock from another file descriptor.
-        let lock_path = host.session.repo.path().join("deptool.lock");
+        let lock_path = host.session.store.repo.path().join("deptool.lock");
         let lock_holder = File::create(&lock_path).expect("lock file is created");
         assert!(
             try_flock_exclusive(&lock_holder).expect("flock succeeds"),

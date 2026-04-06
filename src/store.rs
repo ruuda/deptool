@@ -9,21 +9,159 @@ use git2::Repository;
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
 
-/// Open an existing bare repo, or create one with reflogs enabled.
-pub fn open_or_init(path: &Path) -> Result<Repository> {
-    match Repository::open(path) {
-        Ok(r) => Ok(r),
-        Err(_) => {
-            let repo = Repository::init_bare(path)?;
-            // Bare repos don't create reflogs by default.
-            repo.config()?.set_bool("core.logAllRefUpdates", true)?;
-            Ok(repo)
+/// A bare Git repository used as the config store.
+pub struct Store {
+    pub repo: Repository,
+}
+
+impl Store {
+    pub fn open(path: &Path) -> Result<Self> {
+        Ok(Store {
+            repo: Repository::open(path)?,
+        })
+    }
+
+    /// Open an existing bare repo, or create one with reflogs enabled.
+    pub fn open_or_init(path: &Path) -> Result<Self> {
+        let repo = match Repository::open(path) {
+            Ok(r) => r,
+            Err(_) => {
+                let repo = Repository::init_bare(path)?;
+                // Bare repos don't create reflogs by default.
+                repo.config()?.set_bool("core.logAllRefUpdates", true)?;
+                repo
+            }
+        };
+        Ok(Store { repo })
+    }
+
+    /// Recursively build a Git tree from a directory on disk.
+    pub fn build_tree(&self, dir: &Path) -> Result<git2::Oid> {
+        build_tree_recursive(&self.repo, dir)
+    }
+
+    pub fn commit_tree(&self, tree_oid: git2::Oid) -> Result<git2::Oid> {
+        let tree = self.repo.find_tree(tree_oid)?;
+
+        // Use the ambient Git author metadata if configured, fall back to
+        // hard-coded credentials otherwise. This is mostly relevant in tests when
+        // they run in e.g. an isolated Nix build environment.
+        let author_sig = match self.repo.signature() {
+            Ok(sig) => sig,
+            Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
+        };
+
+        let parent = self
+            .repo
+            .find_reference("refs/heads/main")
+            .ok()
+            .map(|r| r.peel_to_commit())
+            .transpose()?;
+        let parents: Vec<&git2::Commit> = parent.iter().collect();
+
+        Ok(self.repo.commit(
+            Some("refs/heads/main"),
+            &author_sig,
+            &author_sig,
+            "Update config",
+            &tree,
+            &parents,
+        )?)
+    }
+
+    /// Check out a subtree (host/app) from a commit into a target directory.
+    pub fn checkout_app(
+        &self,
+        commit_oid: git2::Oid,
+        host: &Hostname,
+        app: &str,
+        target: &Path,
+    ) -> Result<()> {
+        let commit = self.repo.find_commit(commit_oid)?;
+        let tree = commit.tree()?;
+        let entry = tree.get_path(Path::new(&host.0).join(app).as_ref())?;
+        let subtree = self.repo.find_tree(entry.id())?;
+        let mut cb = git2::build::CheckoutBuilder::new();
+        cb.target_dir(target).force();
+        self.repo
+            .checkout_tree(subtree.as_object(), Some(&mut cb))?;
+        Ok(())
+    }
+
+    pub fn set_ref(&self, refname: &str, oid: git2::Oid, reason: RefUpdate) -> Result<()> {
+        let reflog_msg = match reason {
+            RefUpdate::SetTarget => "apply: begin deployment, set target",
+            RefUpdate::SetCurrent => "apply: conclude deployment, set current",
+            RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref",
+            RefUpdate::FetchStale => "deploy: fetched stale commit from host",
+        };
+        let force = true;
+        self.repo.reference(refname, oid, force, reflog_msg)?;
+        Ok(())
+    }
+
+    /// Build a packfile of objects reachable from a commit.
+    ///
+    /// If `have_commit` is provided, objects reachable from it are excluded,
+    /// so only the delta between the two commits is packed.
+    pub fn create_pack(
+        &self,
+        want_commit: git2::Oid,
+        have_commit: Option<git2::Oid>,
+    ) -> Result<Vec<u8>> {
+        let mut walk = self.repo.revwalk()?;
+        walk.push(want_commit)?;
+        if let Some(have) = have_commit {
+            walk.hide(have)?;
+        }
+        let mut builder = self.repo.packbuilder()?;
+        builder.insert_walk(&mut walk)?;
+        let mut buf = git2::Buf::new();
+        builder.write_buf(&mut buf)?;
+        Ok(buf.to_vec())
+    }
+
+    /// Write raw packfile bytes into the repository's object database.
+    pub fn write_pack(&self, data: &[u8]) -> Result<()> {
+        let odb = self.repo.odb()?;
+        let mut writer = odb.packwriter()?;
+        std::io::Write::write_all(&mut writer, data)?;
+        writer.commit()?;
+        Ok(())
+    }
+
+    /// Get the app tree oids for a host from a config tree.
+    pub fn get_host_apps(
+        &self,
+        config_tree: &git2::Tree,
+        host: &Hostname,
+    ) -> Result<BTreeMap<String, git2::Oid>> {
+        match config_tree.get_name(&host.0) {
+            Some(e) => Ok(tree_entries(&self.repo.find_tree(e.id())?)),
+            None => Ok(BTreeMap::new()),
         }
     }
 }
 
-/// Recursively build a Git tree from a directory on disk.
-pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
+pub enum RefUpdate {
+    SetTarget,
+    SetCurrent,
+    ApplyComplete,
+    FetchStale,
+}
+
+/// Get the tree entries (name -> oid) one level deep.
+pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
+    let mut entries = BTreeMap::new();
+    for entry in tree.iter() {
+        if let Some(name) = entry.name() {
+            entries.insert(name.to_string(), entry.id());
+        }
+    }
+    entries
+}
+
+fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
@@ -35,7 +173,7 @@ pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
 
         match entry.file_type()? {
             ft if ft.is_dir() => {
-                let oid = build_tree(repo, &entry.path())?;
+                let oid = build_tree_recursive(repo, &entry.path())?;
                 tb.insert(name, oid, 0o040000)?;
             }
             ft if ft.is_file() => {
@@ -50,124 +188,6 @@ pub fn build_tree(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
     Ok(tb.write()?)
 }
 
-pub fn commit_tree(repo: &Repository, tree_oid: git2::Oid) -> Result<git2::Oid> {
-    let tree = repo.find_tree(tree_oid)?;
-
-    // Use the ambient Git author metadata if configured, fall back to
-    // hard-coded credentials otherwise. This is mostly relevant in tests when
-    // they run in e.g. an isolated Nix build environment.
-    let author_sig = match repo.signature() {
-        Ok(sig) => sig,
-        Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
-    };
-
-    let parent = repo
-        .find_reference("refs/heads/main")
-        .ok()
-        .map(|r| r.peel_to_commit())
-        .transpose()?;
-    let parents: Vec<&git2::Commit> = parent.iter().collect();
-
-    Ok(repo.commit(
-        Some("refs/heads/main"),
-        &author_sig,
-        &author_sig,
-        "Update config",
-        &tree,
-        &parents,
-    )?)
-}
-
-/// Check out a subtree (host/app) from a commit into a target directory.
-pub fn checkout_app(
-    repo: &Repository,
-    commit_oid: git2::Oid,
-    host: &Hostname,
-    app: &str,
-    target: &Path,
-) -> Result<()> {
-    let commit = repo.find_commit(commit_oid)?;
-    let tree = commit.tree()?;
-    let entry = tree.get_path(Path::new(&host.0).join(app).as_ref())?;
-    let subtree = repo.find_tree(entry.id())?;
-    let mut cb = git2::build::CheckoutBuilder::new();
-    cb.target_dir(target).force();
-    repo.checkout_tree(subtree.as_object(), Some(&mut cb))?;
-    Ok(())
-}
-
-pub enum RefUpdate {
-    SetTarget,
-    SetCurrent,
-    ApplyComplete,
-    FetchStale,
-}
-
-pub fn set_ref(repo: &Repository, refname: &str, oid: git2::Oid, reason: RefUpdate) -> Result<()> {
-    let reflog_msg = match reason {
-        RefUpdate::SetTarget => "apply: begin deployment, set target",
-        RefUpdate::SetCurrent => "apply: conclude deployment, set current",
-        RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref",
-        RefUpdate::FetchStale => "deploy: fetched stale commit from host",
-    };
-    let force = true;
-    repo.reference(refname, oid, force, reflog_msg)?;
-    Ok(())
-}
-
-/// Build a packfile of objects reachable from a commit.
-///
-/// If `have_commit` is provided, objects reachable from it are excluded,
-/// so only the delta between the two commits is packed.
-pub fn create_pack(
-    repo: &Repository,
-    want_commit: git2::Oid,
-    have_commit: Option<git2::Oid>,
-) -> Result<Vec<u8>> {
-    let mut walk = repo.revwalk()?;
-    walk.push(want_commit)?;
-    if let Some(have) = have_commit {
-        walk.hide(have)?;
-    }
-    let mut builder = repo.packbuilder()?;
-    builder.insert_walk(&mut walk)?;
-    let mut buf = git2::Buf::new();
-    builder.write_buf(&mut buf)?;
-    Ok(buf.to_vec())
-}
-
-/// Write raw packfile bytes into a repository's object database.
-pub fn write_pack(repo: &Repository, data: &[u8]) -> Result<()> {
-    let odb = repo.odb()?;
-    let mut writer = odb.packwriter()?;
-    std::io::Write::write_all(&mut writer, data)?;
-    writer.commit()?;
-    Ok(())
-}
-
-/// Get the tree entries (name -> oid) one level deep.
-pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
-    let mut entries = BTreeMap::new();
-    for entry in tree.iter() {
-        if let Some(name) = entry.name() {
-            entries.insert(name.to_string(), entry.id());
-        }
-    }
-    entries
-}
-
-/// Get the app tree oids for a host from a config tree.
-pub fn get_host_apps(
-    repo: &Repository,
-    config_tree: &git2::Tree,
-    host: &Hostname,
-) -> Result<BTreeMap<String, git2::Oid>> {
-    match config_tree.get_name(&host.0) {
-        Some(e) => Ok(tree_entries(&repo.find_tree(e.id())?)),
-        None => Ok(BTreeMap::new()),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use crate::error::Result;
@@ -179,7 +199,7 @@ mod tests {
         let c1 = t.commit(&[("web1/app/config", b"v1")]);
         let c2 = t.commit(&[("web1/app/config", b"v2")]);
 
-        let commit = t.repo.find_commit(c2)?;
+        let commit = t.store.repo.find_commit(c2)?;
         assert_eq!(commit.parent_count(), 1);
         assert_eq!(commit.parent_id(0)?, c1);
         Ok(())

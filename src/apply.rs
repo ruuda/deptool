@@ -8,7 +8,7 @@ use std::path::Path;
 use crate::error::Result;
 use crate::plan::{AppDiff, SystemdConfig, UnitChanges, diff_enabled};
 use crate::prim::Hostname;
-use crate::store;
+use crate::store::{self, Store};
 
 const OID_PREFIX_LEN: usize = 10;
 
@@ -26,7 +26,7 @@ fn oid_prefix(oid: git2::Oid) -> String {
 /// and re-checked out. Then `<apps_dir>/<app>/current` is atomically swapped
 /// to point to the new checkout.
 pub fn apply_app(
-    repo: &git2::Repository,
+    store: &Store,
     commit_oid: git2::Oid,
     host: &Hostname,
     app: &str,
@@ -41,7 +41,7 @@ pub fn apply_app(
         fs::remove_dir_all(&version_dir)?;
     }
     fs::create_dir_all(&version_dir)?;
-    store::checkout_app(repo, commit_oid, host, app, &version_dir)?;
+    store.checkout_app(commit_oid, host, app, &version_dir)?;
 
     // Atomic symlink swap: create temp symlink, rename over `current`.
     let current = app_dir.join("current");
@@ -70,7 +70,7 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// each changed app, reconciles unit symlinks, and sets the current ref.
 /// Calls `on_app` for each changed app.
 pub fn apply_host(
-    repo: &git2::Repository,
+    store: &Store,
     commit_oid: git2::Oid,
     actual_current: Option<git2::Oid>,
     host: &Hostname,
@@ -78,21 +78,16 @@ pub fn apply_host(
     unit_dir: &Path,
     mut on_app: impl FnMut(&str, &AppDiff),
 ) -> Result<UnitChanges> {
-    store::set_ref(
-        repo,
-        "refs/heads/target",
-        commit_oid,
-        store::RefUpdate::SetTarget,
-    )?;
+    store.set_ref("refs/heads/target", commit_oid, store::RefUpdate::SetTarget)?;
 
-    let target_tree = repo.find_commit(commit_oid)?.tree()?;
-    let target_apps = store::get_host_apps(repo, &target_tree, host)?;
+    let target_tree = store.repo.find_commit(commit_oid)?.tree()?;
+    let target_apps = store.get_host_apps(&target_tree, host)?;
 
     let (current_tree, current_apps) = match actual_current {
         None => (None, BTreeMap::new()),
         Some(oid) => {
-            let tree = repo.find_commit(oid)?.tree()?;
-            let apps = store::get_host_apps(repo, &tree, host)?;
+            let tree = store.repo.find_commit(oid)?.tree()?;
+            let apps = store.get_host_apps(&tree, host)?;
             (Some(tree), apps)
         }
     };
@@ -102,7 +97,7 @@ pub fn apply_host(
     for (app, change) in &diff {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
-                apply_app(repo, commit_oid, host, app, apps_dir)?;
+                apply_app(store, commit_oid, host, app, apps_dir)?;
             }
             AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
@@ -114,7 +109,7 @@ pub fn apply_host(
     // Make all units from the target tree available to systemd by
     // symlinking them into the unit dir. This is independent of whether
     // they are enabled or not.
-    let desired_units = collect_desired_units(repo, &target_tree, host, apps_dir)?;
+    let desired_units = collect_desired_units(store, &target_tree, host, apps_dir)?;
     reconcile_symlinks(&desired_units, apps_dir, unit_dir)?;
 
     // Compute unit lifecycle actions. We collect enabled units only from
@@ -124,13 +119,12 @@ pub fn apply_host(
     let changed_apps: BTreeSet<&str> = diff.keys().map(|app| app.as_str()).collect();
     let prev_enabled = match &current_tree {
         None => BTreeSet::new(),
-        Some(tree) => collect_enabled_units(repo, tree, host, &changed_apps)?,
+        Some(tree) => collect_enabled_units(store, tree, host, &changed_apps)?,
     };
-    let target_enabled = collect_enabled_units(repo, &target_tree, host, &changed_apps)?;
+    let target_enabled = collect_enabled_units(store, &target_tree, host, &changed_apps)?;
     let unit_changes = diff_enabled(&prev_enabled, &target_enabled);
 
-    store::set_ref(
-        repo,
+    store.set_ref(
         "refs/heads/current",
         commit_oid,
         store::RefUpdate::SetCurrent,
@@ -179,20 +173,20 @@ fn reconcile_symlinks(
 /// For each app, checks for a `systemd/` subtree and maps unit filenames
 /// to their absolute path under `apps_dir/<app>/current/systemd/`.
 fn collect_desired_units(
-    repo: &git2::Repository,
+    store: &Store,
     config_tree: &git2::Tree,
     host: &Hostname,
     apps_dir: &Path,
 ) -> Result<BTreeMap<String, std::path::PathBuf>> {
-    let apps = store::get_host_apps(repo, config_tree, host)?;
+    let apps = store.get_host_apps(config_tree, host)?;
     let mut units = BTreeMap::new();
     for (app, app_tree_oid) in &apps {
-        let app_tree = repo.find_tree(*app_tree_oid)?;
+        let app_tree = store.repo.find_tree(*app_tree_oid)?;
         let systemd_entry = match app_tree.get_name("systemd") {
             Some(entry) => entry,
             None => continue,
         };
-        let systemd_tree = repo.find_tree(systemd_entry.id())?;
+        let systemd_tree = store.repo.find_tree(systemd_entry.id())?;
         for entry in systemd_tree.iter() {
             if let Some(name) = entry.name() {
                 let target = apps_dir
@@ -211,23 +205,23 @@ fn collect_desired_units(
 ///
 /// If an app has no `systemd.json`, none of its units are enabled.
 fn collect_enabled_units(
-    repo: &git2::Repository,
+    store: &Store,
     config_tree: &git2::Tree,
     host: &Hostname,
     filter_apps: &BTreeSet<&str>,
 ) -> Result<BTreeSet<String>> {
-    let host_apps = store::get_host_apps(repo, config_tree, host)?;
+    let host_apps = store.get_host_apps(config_tree, host)?;
     let mut enabled = BTreeSet::new();
     for (app, app_tree_oid) in &host_apps {
         if !filter_apps.contains(app.as_str()) {
             continue;
         }
-        let app_tree = repo.find_tree(*app_tree_oid)?;
+        let app_tree = store.repo.find_tree(*app_tree_oid)?;
         let entry = match app_tree.get_name("systemd.json") {
             Some(entry) => entry,
             None => continue,
         };
-        let blob = repo.find_blob(entry.id())?;
+        let blob = store.repo.find_blob(entry.id())?;
         let config: SystemdConfig = serde_json::from_slice(blob.content())?;
         enabled.extend(config.units_enabled);
     }
@@ -282,7 +276,7 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
 
         let prefix = oid_prefix(c1);
         let version_dir = apps.path().join("nginx").join(&prefix);
@@ -308,7 +302,7 @@ mod tests {
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -324,11 +318,11 @@ mod tests {
         let apps = TempDir::new("apps");
         let current = apps.path().join("nginx/current");
 
-        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(&t.repo, c2, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.store, c2, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
@@ -345,7 +339,7 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
         assert!(apps.path().join("nginx").exists());
 
         remove_app("nginx", apps.path())?;
@@ -468,7 +462,7 @@ mod tests {
         let actual_current = None;
         let on_app = |_: &str, _: &AppDiff| {};
         apply_host(
-            &t.repo,
+            &t.store,
             c1,
             actual_current,
             &"web1".into(),
@@ -478,11 +472,13 @@ mod tests {
         )?;
 
         let current = t
+            .store
             .repo
             .find_reference("refs/heads/current")?
             .peel_to_commit()?
             .id();
         let target = t
+            .store
             .repo
             .find_reference("refs/heads/target")?
             .peel_to_commit()?
@@ -502,7 +498,7 @@ mod tests {
         let actual_current = None;
         let mut applied = Vec::new();
         apply_host(
-            &t.repo,
+            &t.store,
             c1,
             actual_current,
             &"web1".into(),
@@ -534,7 +530,7 @@ mod tests {
         let actual_current = None;
         let on_app = |_: &str, _: &AppDiff| {};
         let changes = apply_host(
-            &t.repo,
+            &t.store,
             c1,
             actual_current,
             &"web1".into(),

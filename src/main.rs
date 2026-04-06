@@ -19,11 +19,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use bpaf::Bpaf;
-use git2::Repository;
 
 use deploy::Connection;
 use error::{Error, Result};
 use prim::Hostname;
+use store::Store;
 
 #[derive(Debug, Clone, Bpaf)]
 enum AgentCmd {
@@ -117,7 +117,7 @@ fn run_deploy(
     confirm_mode: ConfirmMode,
     mode: DeployMode,
 ) -> Result<()> {
-    let repo = Repository::open(&store)?;
+    let repo = Store::open(&store)?;
     let plan = plan::make_plan(&repo)?;
 
     if plan.hosts.is_empty() {
@@ -209,9 +209,9 @@ fn run() -> Result<()> {
 
     match args.cmd {
         Cmd::Commit { store, dir } => {
-            let repo = store::open_or_init(&store)?;
-            let tree_oid = store::build_tree(&repo, &dir)?;
-            let commit_oid = store::commit_tree(&repo, tree_oid)?;
+            let store = Store::open_or_init(&store)?;
+            let tree_oid = store.build_tree(&dir)?;
+            let commit_oid = store.commit_tree(tree_oid)?;
             println!("{commit_oid}");
         }
         Cmd::Deploy {
@@ -262,9 +262,9 @@ fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
     Ok(())
 }
 
-fn make_host_session(repo: Repository, hostname: String) -> session::HostSession {
+fn make_host_session(store: Store, hostname: String) -> session::HostSession {
     session::HostSession::new(
-        repo,
+        store,
         prim::Hostname(hostname),
         PathBuf::from(DEFAULT_APPS_DIR),
         PathBuf::from(DEFAULT_UNIT_DIR),
@@ -275,9 +275,9 @@ fn make_host_session(repo: Repository, hostname: String) -> session::HostSession
 fn run_agent(cmd: AgentCmd) -> Result<()> {
     match cmd {
         AgentCmd::Apply { store, commit } => {
-            let repo = Repository::open(&store)?;
+            let store = Store::open(&store)?;
             let hostname = read_hostname();
-            let mut session = make_host_session(repo, hostname);
+            let mut session = make_host_session(store, hostname);
             let request = protocol::Request::Apply {
                 target_commit: commit.as_str().into(),
             };
@@ -286,9 +286,9 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             });
         }
         AgentCmd::Session { store } => {
-            let repo = store::open_or_init(&store)?;
+            let store = Store::open_or_init(&store)?;
             let hostname = read_hostname();
-            let mut session = make_host_session(repo, hostname.clone());
+            let mut session = make_host_session(store, hostname.clone());
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
 

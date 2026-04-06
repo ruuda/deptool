@@ -10,7 +10,7 @@ use git2::Repository;
 use crate::deploy::Connection;
 use crate::error::Result;
 use crate::protocol::{self, Hello, Message, Request};
-use crate::store::commit_tree;
+use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -60,52 +60,53 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<g
 }
 
 /// Create a commit with the given files, without touching the filesystem.
-fn commit_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
-    let tree_oid = build_tree_from_files(repo, files)?;
-    commit_tree(repo, tree_oid)
+fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
+    let tree_oid = build_tree_from_files(&store.repo, files)?;
+    store.commit_tree(tree_oid)
 }
 
 /// A bare Git repository backed by a temporary directory.
 pub struct TestRepo {
-    pub repo: Repository,
-    _store: TempDir,
+    pub store: Store,
+    _dir: TempDir,
 }
 
 impl TestRepo {
     pub fn new() -> Self {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        let dir = TempDir::new("store");
+        let repo = Repository::init_bare(dir.path()).expect("repo is created");
         TestRepo {
-            repo,
-            _store: store,
+            store: Store { repo },
+            _dir: dir,
         }
     }
 
     /// Create a byte-for-byte copy of another TestRepo's git store.
     pub fn copy_from(other: &TestRepo) -> Self {
-        let store = TempDir::new("store");
-        fs::remove_dir_all(store.path()).expect("temp dir is removed");
+        let dir = TempDir::new("store");
+        fs::remove_dir_all(dir.path()).expect("temp dir is removed");
         std::process::Command::new("cp")
             .args(["-r"])
-            .arg(other.repo.path())
-            .arg(store.path())
+            .arg(other.store.repo.path())
+            .arg(dir.path())
             .status()
             .expect("cp succeeds");
-        let repo = Repository::open(store.path()).expect("repo is opened");
+        let repo = Repository::open(dir.path()).expect("repo is opened");
         TestRepo {
-            repo,
-            _store: store,
+            store: Store { repo },
+            _dir: dir,
         }
     }
 
     /// Create a commit with the given files, without touching the filesystem.
     pub fn commit(&self, files: &[(&str, &[u8])]) -> git2::Oid {
-        commit_files(&self.repo, files).expect("commit succeeds")
+        commit_files(&self.store, files).expect("commit succeeds")
     }
 
     /// Read the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
     pub fn get_host_tracking_ref(&self, host: &str) -> Option<git2::Oid> {
-        self.repo
+        self.store
+            .repo
             .find_reference(&format!("refs/remotes/{host}/current"))
             .ok()
             .map(|r| {
@@ -117,13 +118,13 @@ impl TestRepo {
 
     /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
     pub fn set_host_tracking_ref(&self, host: &str, commit_oid: git2::Oid) {
-        crate::store::set_ref(
-            &self.repo,
-            &format!("refs/remotes/{host}/current"),
-            commit_oid,
-            crate::store::RefUpdate::SetCurrent,
-        )
-        .expect("ref is set");
+        self.store
+            .set_ref(
+                &format!("refs/remotes/{host}/current"),
+                commit_oid,
+                RefUpdate::SetCurrent,
+            )
+            .expect("ref is set");
     }
 }
 
@@ -157,13 +158,16 @@ impl TestHost {
 
     pub fn with_commit(hostname: &str, files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
         let host = Self::new(hostname);
-        let oid = commit_files(&host.session.repo, files).expect("commit succeeds");
+        // Open the same repo as a Store to create the commit.
+        let store = Store::open(host.session.store.repo.path()).expect("repo is opened");
+        let oid = commit_files(&store, files).expect("commit succeeds");
         (host, oid)
     }
 
     /// The host-local `refs/heads/current` commit, if any.
     pub fn get_current(&self) -> Option<git2::Oid> {
         self.session
+            .store
             .repo
             .find_reference("refs/heads/current")
             .ok()
@@ -188,7 +192,7 @@ impl TestHost {
     /// new SSH connection to the same host. The apps and units directories
     /// are shared across connections, as they would be in production.
     pub fn connect(&self) -> Box<dyn Connection> {
-        let repo = Repository::open(self.session.repo.path()).expect("repo is opened");
+        let repo = Repository::open(self.session.store.repo.path()).expect("repo is opened");
         let hostname = self.session.hostname.0.clone();
         let session = crate::session::HostSession::new_test(
             repo,

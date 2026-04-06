@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use git2::Repository;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -12,7 +11,7 @@ pub struct SystemdConfig {
 
 use crate::error::Result;
 use crate::prim::{Hostname, Oid};
-use crate::store::get_host_apps;
+use crate::store::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
@@ -127,7 +126,10 @@ pub fn diff_apps(
 /// Read the enabled units from an app tree's `systemd.json`.
 ///
 /// Returns an empty set if the app has no `systemd.json`.
-pub fn app_enabled_units(repo: &Repository, app_tree_oid: git2::Oid) -> Result<BTreeSet<String>> {
+pub fn app_enabled_units(
+    repo: &git2::Repository,
+    app_tree_oid: git2::Oid,
+) -> Result<BTreeSet<String>> {
     let tree = repo.find_tree(app_tree_oid)?;
     let entry = match tree.get_name("systemd.json") {
         Some(entry) => entry,
@@ -139,23 +141,19 @@ pub fn app_enabled_units(repo: &Repository, app_tree_oid: git2::Oid) -> Result<B
 }
 
 /// Validate that every unit in `systemd.json` has a file in `systemd/`.
-fn validate_systemd_config(
-    repo: &Repository,
-    config_tree: &git2::Tree,
-    host: &Hostname,
-) -> Result<()> {
-    let apps = get_host_apps(repo, config_tree, host)?;
+fn validate_systemd_config(store: &Store, config_tree: &git2::Tree, host: &Hostname) -> Result<()> {
+    let apps = store.get_host_apps(config_tree, host)?;
     for (app, app_tree_oid) in &apps {
-        let app_tree = repo.find_tree(*app_tree_oid)?;
+        let app_tree = store.repo.find_tree(*app_tree_oid)?;
         let config_entry = match app_tree.get_name("systemd.json") {
             Some(entry) => entry,
             None => continue,
         };
-        let blob = repo.find_blob(config_entry.id())?;
+        let blob = store.repo.find_blob(config_entry.id())?;
         let config: SystemdConfig = serde_json::from_slice(blob.content())?;
 
         let systemd_tree = match app_tree.get_name("systemd") {
-            Some(e) => repo.find_tree(e.id())?,
+            Some(e) => store.repo.find_tree(e.id())?,
             None => {
                 return Err(crate::error::Error::InvalidConfig(format!(
                     "app {app} has systemd.json but no systemd/ directory",
@@ -180,8 +178,11 @@ fn validate_systemd_config(
 /// stages: first eliminate hosts that we definitely do not need to touch based
 /// on current refs. Then for hosts that do need touching we refresh their refs,
 /// and plan again. We could just use the same plan function for that though.
-pub fn make_plan(repo: &Repository) -> Result<Plan> {
-    let main_commit = repo.find_reference("refs/heads/main")?.peel_to_commit()?;
+pub fn make_plan(store: &Store) -> Result<Plan> {
+    let main_commit = store
+        .repo
+        .find_reference("refs/heads/main")?
+        .peel_to_commit()?;
     let commit = main_commit.id();
     let main_tree = main_commit.tree()?;
 
@@ -190,18 +191,20 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        validate_systemd_config(repo, &main_tree, &host)?;
-        let target_apps = get_host_apps(repo, &main_tree, &host)?;
+        validate_systemd_config(store, &main_tree, &host)?;
+        let target_apps = store.get_host_apps(&main_tree, &host)?;
 
-        let (expected_current, current_apps) =
-            match repo.find_reference(&format!("refs/remotes/{host}/current")) {
-                Err(_) => (None, BTreeMap::new()),
-                Ok(r) => {
-                    let c = r.peel_to_commit()?;
-                    let tree = c.tree()?;
-                    (Some(c.id().into()), get_host_apps(repo, &tree, &host)?)
-                }
-            };
+        let (expected_current, current_apps) = match store
+            .repo
+            .find_reference(&format!("refs/remotes/{host}/current"))
+        {
+            Err(_) => (None, BTreeMap::new()),
+            Ok(r) => {
+                let c = r.peel_to_commit()?;
+                let tree = c.tree()?;
+                (Some(c.id().into()), store.get_host_apps(&tree, &host)?)
+            }
+        };
 
         let apps = diff_apps(&current_apps, &target_apps);
 
@@ -233,7 +236,7 @@ mod tests {
         let t = TestRepo::new();
         t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.repo)?;
+        let plan = make_plan(&t.store)?;
         assert_eq!(plan.hosts.len(), 1);
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 2);
@@ -250,7 +253,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
-        let plan = make_plan(&t.repo)?;
+        let plan = make_plan(&t.store)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["nginx"], AppDiff::Update { .. }));
@@ -265,7 +268,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&t.repo)?;
+        let plan = make_plan(&t.store)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["rofld"], AppDiff::Remove { .. }));
@@ -280,7 +283,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.repo)?;
+        let plan = make_plan(&t.store)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
         let apps = &plan.hosts[&"web2".into()].apps;
         assert_eq!(apps.len(), 1);
@@ -296,7 +299,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&t.repo)?;
+        let plan = make_plan(&t.store)?;
         assert!(plan.hosts.is_empty());
         Ok(())
     }
@@ -310,8 +313,8 @@ mod tests {
             ("web1/nginx/systemd.json", systemd_json),
         ]);
 
-        let tree = t.repo.find_commit(c1).unwrap().tree().unwrap();
-        let err = validate_systemd_config(&t.repo, &tree, &"web1".into()).unwrap_err();
+        let tree = t.store.repo.find_commit(c1).unwrap().tree().unwrap();
+        let err = validate_systemd_config(&t.store, &tree, &"web1".into()).unwrap_err();
 
         let msg = err.to_string();
         assert!(
