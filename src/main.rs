@@ -150,7 +150,7 @@ fn run_deploy(
     // and short enough to keep paths and commands readable and debuggable.
     let suffix = setup::truncated_sha256(&binary, 5);
     let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
-    let remote_bin_path = format!("/var/lib/deptool/bin/{bin_name}");
+    let remote_bin_path = format!("{}/{bin_name}", setup::BIN_DIR);
 
     // SSH concatenates remote arguments into a single shell string.
     // We assert the inputs are shell-safe; in the future we should
@@ -286,6 +286,17 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             });
         }
         AgentCmd::Session { store } => {
+            // Since we install the exact agent binary that the driver needs on
+            // demand, versions can pile up on the target host (especially
+            // during development), so GC the bin directory.
+            let gc_result = match std::env::current_exe() {
+                Ok(exe) => setup::gc_bin_dir(&exe),
+                Err(_) => Ok(()), // Can't determine our path, skip GC.
+            };
+            if let Err(err) = gc_result {
+                eprintln!("gc: {err}");
+            }
+
             let store = Store::open_or_init(&store)?;
             let hostname = read_hostname();
             let mut session = make_host_session(store, hostname.clone());

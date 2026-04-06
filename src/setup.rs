@@ -1,9 +1,16 @@
-//! Installation of the `deptool` binary on target hosts.
+//! Installation and cleanup of the `deptool` binary on target hosts.
 
+use std::path::Path;
 use std::process::Command;
+use std::time::SystemTime;
 
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
+
+pub const BIN_DIR: &str = "/var/lib/deptool/bin";
+
+const GC_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+const GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Return the truncated and hex-formatted SHA256 of `bytes`.
 ///
@@ -20,8 +27,8 @@ pub fn truncated_sha256(bytes: &[u8], prefix_len: usize) -> String {
 /// Install the the binary on the target host.
 ///
 /// We execute a single command over SSH. The command reads the binary from
-/// stdin via `dd`, makes it executable, symlinks it as the current version, and
-/// prints its sha256sum so the caller can verify the transfer was successful.
+/// stdin via `dd`, makes it executable, and prints its sha256sum so the
+/// caller can verify the transfer was successful.
 pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> Result<()> {
     let install_command = [
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
@@ -63,6 +70,62 @@ pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> 
             actual_hash: actual_hash.into(),
             expected_hash,
         });
+    }
+
+    Ok(())
+}
+
+/// Remove old `deptool-*` binaries from the bin dir until total size is
+/// under 64 MiB.
+///
+/// Skips if `current_exe` is not inside the bin dir (we're not running from
+/// the expected production location). Never deletes the currently-running
+/// binary or files younger than 24 hours.
+pub fn gc_bin_dir(current_exe: &Path) -> Result<()> {
+    // This function deliberately hard-codes the bin dir, so we don't delete
+    // files in arbitrary locations from the system it runs on.
+    let bin_dir = Path::new(BIN_DIR);
+
+    if !current_exe.starts_with(bin_dir) {
+        return Ok(());
+    }
+
+    let now = SystemTime::now();
+    let mut total_size: u64 = 0;
+
+    // Collect deletable files: deptool-* files that are not the current
+    // exe and are older than 24h. Track total size of all deptool-* files
+    // (including non-deletable ones) to decide whether GC is needed.
+    let mut deletable: Vec<(std::path::PathBuf, u64, SystemTime)> = Vec::new();
+    for entry in std::fs::read_dir(bin_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if n.starts_with("deptool-") => {}
+            _ => continue,
+        };
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) if m.is_file() => m,
+            _ => continue,
+        };
+        let mtime = meta.modified().unwrap_or(now);
+        total_size += meta.len();
+
+        let age = now.duration_since(mtime).unwrap_or_default();
+        if path != current_exe && age >= GC_MIN_AGE {
+            deletable.push((path, meta.len(), mtime));
+        }
+    }
+
+    // Oldest first.
+    deletable.sort_by_key(|(_, _, mtime)| *mtime);
+
+    for (path, size, _) in &deletable {
+        if total_size <= GC_MAX_SIZE_BYTES {
+            break;
+        }
+        std::fs::remove_file(path)?;
+        total_size -= size;
     }
 
     Ok(())
