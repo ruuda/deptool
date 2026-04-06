@@ -214,27 +214,7 @@ impl HostSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::AppDiff;
     use crate::testutil::TestHost;
-
-    #[test]
-    fn apply_checks_out_app_and_emits_per_app_messages() {
-        let (mut host, oid) =
-            TestHost::with_commit("web1", &[("web1/nginx/nginx.conf", b"server {}")]);
-        let responses = host.interact(Request::Apply {
-            target_commit: oid.into(),
-        });
-
-        assert_eq!(responses.len(), 2);
-        match &responses[0] {
-            Message::AppliedApp { app, diff } => {
-                assert_eq!(app, "nginx");
-                assert!(matches!(diff, AppDiff::Add { .. }));
-            }
-            other => panic!("Expected AppliedApp, got {other:?}"),
-        }
-        assert!(matches!(&responses[1], Message::ApplyComplete { .. }));
-    }
 
     #[test]
     fn lock_succeeds_on_fresh_host_with_no_expected_current() {

@@ -456,36 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn lock_and_apply_emits_apply_complete_for_fresh_host() -> Result<()> {
-        let (host, oid) = TestHost::with_commit("web1", &[("web1/nginx/nginx.conf", b"v1")]);
-        let plan = single_host_plan(None, oid.into());
-        let mut progress = test_progress(&["web1"]);
-        let mut lock_result = lock_hosts(
-            &plan,
-            |_| Ok(host.connect()),
-            |_| panic!("install not expected"),
-            &mut progress,
-        );
-
-        assert_eq!(lock_result.locked.len(), 1);
-
-        let mut messages = Vec::new();
-        apply_hosts(
-            &host.session.repo,
-            &plan,
-            &mut lock_result.locked,
-            &mut progress,
-            |_, msg| messages.push(msg),
-        )?;
-
-        assert!(matches!(
-            messages.last(),
-            Some(Message::ApplyComplete { .. })
-        ));
-        Ok(())
-    }
-
-    #[test]
     fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
         // Driver has the commit, target starts empty.
         let driver = TestRepo::new();

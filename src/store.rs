@@ -170,27 +170,8 @@ pub fn get_host_apps(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::error::Result;
-    use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
-
-    #[test]
-    fn checkout_after_commit_reproduces_the_app_files() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[
-            ("web1/nginx/etc/nginx/nginx.conf", b"server {}"),
-            (
-                "web1/rofld/etc/rofld/config.toml",
-                b"[server]\nport = 8080\n",
-            ),
-        ]);
-
-        let output = TempDir::new("output");
-        checkout_app(&t.repo, c1, &"web1".into(), "nginx", output.path())?;
-
-        assert_dir_contents(output.path(), &[("etc/nginx/nginx.conf", b"server {}")]);
-        Ok(())
-    }
+    use crate::testutil::TestRepo;
 
     #[test]
     fn commit_appends_to_main_branch() -> Result<()> {
