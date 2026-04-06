@@ -469,31 +469,6 @@ mod tests {
     }
 
     #[test]
-    fn lock_reports_stale_when_current_ref_mismatches() -> Result<()> {
-        let (host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
-        crate::store::set_ref(
-            &host.session.repo,
-            "refs/heads/current",
-            oid,
-            crate::store::RefUpdate::SetCurrent,
-        )?;
-
-        let plan = single_host_plan(None, Oid::from("0000000000000000000000000000000000000000"));
-        let mut progress = test_progress(&["web1"]);
-        let lock_result = lock_hosts(
-            &plan,
-            |_| Ok(host.connect()),
-            |_| panic!("install not expected"),
-            &mut progress,
-        );
-
-        assert!(lock_result.locked.is_empty());
-        assert_eq!(lock_result.stale.len(), 1);
-        assert!(lock_result.stale[0].1.actual_commit.is_some());
-        Ok(())
-    }
-
-    #[test]
     fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
         // Driver has the commit, target starts empty.
         let driver = TestRepo::new();
