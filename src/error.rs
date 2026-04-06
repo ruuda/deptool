@@ -47,6 +47,10 @@ impl fmt::Display for Error {
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
             Error::AgentNotInstalled => write!(f, "agent binary not installed on target host"),
             Error::ConnectionFailed(msg) => write!(f, "{msg}"),
+            // TODO: Later we could also find the common ancestor `cc` between
+            // what the host has (`current`) and what we try to deploy, and then
+            // we can show the `git log cc..current` to point out the culprit,
+            // especially including author timestamps and metadata.
             Error::Diverged(host) => write!(
                 f,
                 "{host}: deploy is not a fast-forward. \
