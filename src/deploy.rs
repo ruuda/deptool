@@ -401,80 +401,17 @@ pub fn fetch_stale_objects(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::BTreeMap;
 
     use super::*;
     use crate::plan::HostPlan;
     use crate::prim::Oid;
     use crate::session::HostSession;
-    use crate::testutil::{TempDir, commit_files};
+    use crate::testutil::{TempDir, TestHost, TestRepo, commit_files};
 
     fn test_progress(hosts: &[&str]) -> DeployProgress {
         let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
         DeployProgress::new(hosts, Box::new(|_| {}))
-    }
-
-    /// In-memory connection that wraps a HostSession directly.
-    struct LocalConnection {
-        session: HostSession,
-        hello: Hello,
-        message_buffer: VecDeque<Message>,
-        _store: TempDir,
-        _apps: TempDir,
-        _units: TempDir,
-    }
-
-    impl Connection for LocalConnection {
-        fn hello(&self) -> &Hello {
-            &self.hello
-        }
-
-        fn send_request(&mut self, request: &Request) -> Result<()> {
-            let buffer = &mut self.message_buffer;
-            self.session
-                .handle_request(request.clone(), &mut |msg| buffer.push_back(msg));
-            Ok(())
-        }
-
-        fn read_message(&mut self) -> Result<Option<Message>> {
-            Ok(self.message_buffer.pop_front())
-        }
-
-        fn close(&mut self) {}
-    }
-
-    struct TestHost {
-        conn: Box<dyn Connection>,
-        commit_oid: git2::Oid,
-    }
-
-    fn test_host() -> Result<TestHost> {
-        let store = TempDir::new("store");
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let commit_oid = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
-        let on_units_changed = Box::new(|_: &_| Ok(()));
-        let session = HostSession::new(
-            repo,
-            "web1".into(),
-            apps.path().to_path_buf(),
-            units.path().to_path_buf(),
-            on_units_changed,
-        );
-        let hello = Hello {
-            version: protocol::VERSION.to_string(),
-            hostname: "web1".to_string(),
-        };
-        let conn = Box::new(LocalConnection {
-            session,
-            hello,
-            message_buffer: VecDeque::new(),
-            _store: store,
-            _apps: apps,
-            _units: units,
-        });
-        Ok(TestHost { conn, commit_oid })
     }
 
     fn single_host_plan(commit: Oid) -> Plan {
@@ -492,9 +429,9 @@ mod tests {
 
     #[test]
     fn lock_and_apply_emits_apply_complete_for_fresh_host() -> Result<()> {
-        let host = test_host()?;
-        let plan = single_host_plan(host.commit_oid.into());
-        let mut conn = Some(host.conn);
+        let (host, oid) = TestHost::with_commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let plan = single_host_plan(oid.into());
+        let mut conn = Some(host.into_connection());
         let mut progress = test_progress(&["web1"]);
         let mut lock_result = lock_hosts(
             &plan,
@@ -519,42 +456,16 @@ mod tests {
 
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-
-        let actual_commit = commit_files(&repo, &[("web1/nginx/conf", b"v1")])?;
+        let (host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
-            &repo,
+            &host.session.repo,
             "refs/heads/current",
-            actual_commit,
+            oid,
             crate::store::RefUpdate::SetCurrent,
         )?;
 
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let on_units_changed = Box::new(|_: &_| Ok(()));
-        let session = HostSession::new(
-            repo,
-            "web1".into(),
-            apps.path().to_path_buf(),
-            units.path().to_path_buf(),
-            on_units_changed,
-        );
-        let hello = Hello {
-            version: protocol::VERSION.to_string(),
-            hostname: "web1".to_string(),
-        };
-        let conn: Box<dyn Connection> = Box::new(LocalConnection {
-            session,
-            hello,
-            message_buffer: VecDeque::new(),
-            _store: store,
-            _apps: apps,
-            _units: units,
-        });
-
         let plan = single_host_plan(Oid::from("0000000000000000000000000000000000000000"));
-        let mut conn = Some(conn);
+        let mut conn = Some(host.into_connection());
         let mut progress = test_progress(&["web1"]);
         let lock_result = lock_hosts(
             &plan,
@@ -572,37 +483,12 @@ mod tests {
     #[test]
     fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
         // Driver has the commit, target starts empty.
-        let driver_store = TempDir::new("driver");
-        let driver_repo = git2::Repository::init_bare(driver_store.path())?;
-        let commit_oid = commit_files(&driver_repo, &[("web1/app/conf", b"hello")])?;
+        let driver = TestRepo::new();
+        let commit_oid = driver.commit(&[("web1/app/conf", b"hello")]);
 
-        let target_store = TempDir::new("target");
-        let target_repo = git2::Repository::init_bare(target_store.path())?;
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
-        let session = HostSession::new(
-            target_repo,
-            "web1".into(),
-            apps.path().to_path_buf(),
-            units.path().to_path_buf(),
-            on_units_changed,
-        );
-        let hello = Hello {
-            version: protocol::VERSION.to_string(),
-            hostname: "web1".to_string(),
-        };
-        let conn: Box<dyn Connection> = Box::new(LocalConnection {
-            session,
-            hello,
-            message_buffer: VecDeque::new(),
-            _store: target_store,
-            _apps: apps,
-            _units: units,
-        });
-
+        let target = TestHost::new();
         let plan = single_host_plan(commit_oid.into());
-        let mut conn = Some(conn);
+        let mut conn = Some(target.into_connection());
         let mut progress = test_progress(&["web1"]);
         let lock_result = lock_hosts(
             &plan,
@@ -612,7 +498,7 @@ mod tests {
         );
 
         let mut connections = lock_result.locked;
-        push_packs(&driver_repo, &plan, &mut connections, &mut progress)?;
+        push_packs(&driver.repo, &plan, &mut connections, &mut progress)?;
 
         let mut messages = Vec::new();
         apply_hosts(&plan, &mut connections, &mut progress, |_, msg| {
@@ -642,30 +528,15 @@ mod tests {
         let repo = git2::Repository::open(target_path)?;
         crate::store::write_pack(&repo, &pack)?;
 
-        let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
-        let mut session = HostSession::new(
-            repo,
-            "web1".into(),
-            apps_path.to_path_buf(),
-            units_path.to_path_buf(),
-            on_units_changed,
-        );
-        let mut messages = Vec::new();
-        session.handle_request(
-            Request::Lock {
-                expected_current_commit: expected_current,
-            },
-            &mut |msg| messages.push(msg),
-        );
+        let mut session = HostSession::new_test(repo, "web1", apps_path, units_path);
+        let messages = session.handle_collect(Request::Lock {
+            expected_current_commit: expected_current,
+        });
         assert_eq!(messages, vec![Message::Locked], "lock should succeed");
 
-        messages.clear();
-        session.handle_request(
-            Request::Apply {
-                target_commit: target_commit.into(),
-            },
-            &mut |msg| messages.push(msg),
-        );
+        let messages = session.handle_collect(Request::Apply {
+            target_commit: target_commit.into(),
+        });
         assert!(
             matches!(messages.last(), Some(Message::ApplyComplete { .. })),
             "apply should succeed, got: {messages:?}",
@@ -675,20 +546,17 @@ mod tests {
 
     #[test]
     fn fetch_resolves_stale_after_concurrent_deploy() -> Result<()> {
-        let target_store = TempDir::new("target");
-        let target_repo = git2::Repository::init_bare(target_store.path())?;
-        drop(target_repo);
+        let target = TestRepo::new();
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
         // Driver A commits v1, pushes pack to target, applies.
-        let driver_a = TempDir::new("driver_a");
-        let repo_a = git2::Repository::init_bare(driver_a.path())?;
-        let commit_v1 = commit_files(&repo_a, &[("web1/app/conf", b"v1")])?;
+        let driver_a = TestRepo::new();
+        let commit_v1 = driver_a.commit(&[("web1/app/conf", b"v1")]);
 
         push_and_apply(
-            &repo_a,
-            target_store.path(),
+            &driver_a.repo,
+            target.repo.path(),
             apps.path(),
             units.path(),
             commit_v1,
@@ -696,7 +564,7 @@ mod tests {
             None,
         )?;
         crate::store::set_ref(
-            &repo_a,
+            &driver_a.repo,
             "refs/remotes/web1/current",
             commit_v1,
             crate::store::RefUpdate::ApplyComplete,
@@ -707,16 +575,16 @@ mod tests {
         std::fs::remove_dir_all(driver_b.path())?;
         std::process::Command::new("cp")
             .args(["-r"])
-            .arg(driver_a.path())
+            .arg(driver_a.repo.path())
             .arg(driver_b.path())
             .status()?;
         let repo_b = git2::Repository::open(driver_b.path())?;
 
         // Driver A deploys v2.
-        let commit_v2 = commit_files(&repo_a, &[("web1/app/conf", b"v2")])?;
+        let commit_v2 = driver_a.commit(&[("web1/app/conf", b"v2")]);
         push_and_apply(
-            &repo_a,
-            target_store.path(),
+            &driver_a.repo,
+            target.repo.path(),
             apps.path(),
             units.path(),
             commit_v2,
@@ -744,27 +612,9 @@ mod tests {
         let mut lock_result = lock_hosts(
             &plan,
             |_| {
-                let repo = git2::Repository::open(target_store.path())?;
-                let on_units_changed: Box<dyn Fn(&_) -> Result<()>> = Box::new(|_: &_| Ok(()));
-                let session = HostSession::new(
-                    repo,
-                    "web1".into(),
-                    apps.path().to_path_buf(),
-                    units.path().to_path_buf(),
-                    on_units_changed,
-                );
-                let hello = Hello {
-                    version: protocol::VERSION.to_string(),
-                    hostname: "web1".to_string(),
-                };
-                Ok(Box::new(LocalConnection {
-                    session,
-                    hello,
-                    message_buffer: VecDeque::new(),
-                    _store: TempDir::new("unused"),
-                    _apps: TempDir::new("unused"),
-                    _units: TempDir::new("unused"),
-                }) as Box<dyn Connection>)
+                let repo = git2::Repository::open(target.repo.path())?;
+                let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
+                Ok(session.into_test_connection())
             },
             |_| panic!("install not expected"),
             &mut progress,

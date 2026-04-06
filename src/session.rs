@@ -30,7 +30,7 @@ fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 pub struct HostSession {
-    repo: Repository,
+    pub repo: Repository,
     hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
@@ -59,7 +59,7 @@ impl HostSession {
 
     /// Create a session for testing that does not touch systemd.
     #[cfg(test)]
-    fn new_test(
+    pub fn new_test(
         repo: Repository,
         hostname: &str,
         apps_dir: &std::path::Path,
@@ -74,6 +74,23 @@ impl HostSession {
             unit_dir.to_path_buf(),
             on_units_changed,
         )
+    }
+
+    /// Send a request and collect all responses. Test-only convenience.
+    #[cfg(test)]
+    pub fn handle_collect(
+        &mut self,
+        request: crate::protocol::Request,
+    ) -> Vec<crate::protocol::Message> {
+        let mut responses = Vec::new();
+        self.handle_request(request, &mut |r| responses.push(r));
+        responses
+    }
+
+    /// Wrap this session into a boxed `Connection` for deploy tests.
+    #[cfg(test)]
+    pub fn into_test_connection(self) -> Box<dyn crate::deploy::Connection> {
+        crate::testutil::session_into_connection(self)
     }
 
     fn current_commit(&self) -> Option<Oid> {
@@ -215,60 +232,14 @@ impl HostSession {
 mod tests {
     use super::*;
     use crate::plan::AppDiff;
-    use crate::testutil::{TempDir, commit_files};
-
-    struct TestEnv {
-        session: HostSession,
-        _store: TempDir,
-        _apps: TempDir,
-        _units: TempDir,
-    }
-
-    fn test_env() -> TestEnv {
-        let store = TempDir::new("store");
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
-        TestEnv {
-            session,
-            _store: store,
-            _apps: apps,
-            _units: units,
-        }
-    }
-
-    fn test_env_with_commit(files: &[(&str, &[u8])]) -> (TestEnv, git2::Oid) {
-        let store = TempDir::new("store");
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let oid = commit_files(&repo, files).expect("commit succeeds");
-        let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
-        (
-            TestEnv {
-                session,
-                _store: store,
-                _apps: apps,
-                _units: units,
-            },
-            oid,
-        )
-    }
-
-    fn collect(session: &mut HostSession, request: Request) -> Vec<Message> {
-        let mut responses = Vec::new();
-        session.handle_request(request, &mut |r| responses.push(r));
-        responses
-    }
+    use crate::testutil::TestHost;
 
     #[test]
     fn apply_checks_out_app_and_emits_per_app_messages() {
-        let (mut env, oid) = test_env_with_commit(&[("web1/nginx/nginx.conf", b"server {}")]);
-        let req = Request::Apply {
+        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let responses = host.collect(Request::Apply {
             target_commit: oid.into(),
-        };
-        let responses = collect(&mut env.session, req);
+        });
 
         assert_eq!(responses.len(), 2);
         match &responses[0] {
@@ -283,45 +254,42 @@ mod tests {
 
     #[test]
     fn lock_succeeds_on_fresh_host_with_no_expected_current() {
-        let mut env = test_env();
-        let req = Request::Lock {
+        let mut host = TestHost::new();
+        let responses = host.collect(Request::Lock {
             expected_current_commit: None,
-        };
-        let responses = collect(&mut env.session, req);
+        });
         assert_eq!(responses, vec![Message::Locked]);
     }
 
     #[test]
     fn lock_succeeds_when_current_ref_matches_expected() {
-        let (mut env, oid) = test_env_with_commit(&[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
-            &env.session.repo,
+            &host.session.repo,
             "refs/heads/current",
             oid,
             crate::store::RefUpdate::SetCurrent,
         )
         .expect("ref is set");
-        let req = Request::Lock {
+        let responses = host.collect(Request::Lock {
             expected_current_commit: Some(oid.into()),
-        };
-        let responses = collect(&mut env.session, req);
+        });
         assert_eq!(responses, vec![Message::Locked]);
     }
 
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() {
-        let (mut env, oid) = test_env_with_commit(&[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
-            &env.session.repo,
+            &host.session.repo,
             "refs/heads/current",
             oid,
             crate::store::RefUpdate::SetCurrent,
         )
         .expect("ref is set");
-        let req = Request::Lock {
+        let responses = host.collect(Request::Lock {
             expected_current_commit: None,
-        };
-        let responses = collect(&mut env.session, req);
+        });
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             Message::LockStale {
@@ -337,20 +305,19 @@ mod tests {
 
     #[test]
     fn lock_reports_busy_when_already_held() {
-        let mut env = test_env();
+        let mut host = TestHost::new();
 
         // Acquire the lock from another file descriptor.
-        let lock_path = env.session.repo.path().join("deptool.lock");
+        let lock_path = host.session.repo.path().join("deptool.lock");
         let lock_holder = File::create(&lock_path).expect("lock file is created");
         assert!(
             try_flock_exclusive(&lock_holder).expect("flock succeeds"),
             "lock is acquired",
         );
 
-        let req = Request::Lock {
+        let responses = host.collect(Request::Lock {
             expected_current_commit: None,
-        };
-        let responses = collect(&mut env.session, req);
+        });
         assert_eq!(responses, vec![Message::LockBusy]);
 
         drop(lock_holder);

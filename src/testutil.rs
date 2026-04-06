@@ -1,13 +1,15 @@
 //! Shared test helpers: temp directories and convenience functions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use git2::Repository;
 
+use crate::deploy::Connection;
 use crate::error::Result;
+use crate::protocol::{self, Hello, Message, Request};
 use crate::store::commit_tree;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -61,6 +63,147 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<g
 pub fn commit_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
     let tree_oid = build_tree_from_files(repo, files)?;
     commit_tree(repo, tree_oid)
+}
+
+/// A bare Git repository backed by a temporary directory.
+pub struct TestRepo {
+    pub repo: Repository,
+    _store: TempDir,
+}
+
+impl TestRepo {
+    pub fn new() -> Self {
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        TestRepo {
+            repo,
+            _store: store,
+        }
+    }
+
+    /// Create a commit with the given files, without touching the filesystem.
+    pub fn commit(&self, files: &[(&str, &[u8])]) -> git2::Oid {
+        commit_files(&self.repo, files).expect("commit succeeds")
+    }
+
+    /// Record that a host has already seen a commit.
+    pub fn set_current(&self, host: &str, commit_oid: git2::Oid) {
+        crate::store::set_ref(
+            &self.repo,
+            &format!("refs/remotes/{host}/current"),
+            commit_oid,
+            crate::store::RefUpdate::SetCurrent,
+        )
+        .expect("ref is set");
+    }
+}
+
+/// A host-side test environment: a bare repo with apps and units directories.
+///
+/// Wraps a `HostSession` and provides helpers for sending requests and
+/// collecting responses.
+pub struct TestHost {
+    pub session: crate::session::HostSession,
+    _store: TempDir,
+    _apps: TempDir,
+    _units: TempDir,
+}
+
+impl TestHost {
+    pub fn new() -> Self {
+        let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        let session =
+            crate::session::HostSession::new_test(repo, "web1", apps.path(), units.path());
+        TestHost {
+            session,
+            _store: store,
+            _apps: apps,
+            _units: units,
+        }
+    }
+
+    pub fn with_commit(files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
+        let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        let oid = commit_files(&repo, files).expect("commit succeeds");
+        let session =
+            crate::session::HostSession::new_test(repo, "web1", apps.path(), units.path());
+        let host = TestHost {
+            session,
+            _store: store,
+            _apps: apps,
+            _units: units,
+        };
+        (host, oid)
+    }
+
+    /// Send a request and collect all response messages.
+    pub fn collect(&mut self, request: Request) -> Vec<Message> {
+        let mut responses = Vec::new();
+        self.session
+            .handle_request(request, &mut |r| responses.push(r));
+        responses
+    }
+
+    /// Convert into a boxed `Connection` for deploy tests.
+    pub fn into_connection(self) -> Box<dyn Connection> {
+        let keepalive = vec![self._store, self._apps, self._units];
+        make_local_connection(self.session, keepalive)
+    }
+}
+
+/// Wrap a HostSession into a boxed Connection, without owning any TempDirs.
+pub fn session_into_connection(session: crate::session::HostSession) -> Box<dyn Connection> {
+    make_local_connection(session, Vec::new())
+}
+
+fn make_local_connection(
+    session: crate::session::HostSession,
+    keepalive: Vec<TempDir>,
+) -> Box<dyn Connection> {
+    let hello = Hello {
+        version: protocol::VERSION.to_string(),
+        hostname: "web1".to_string(),
+    };
+    Box::new(LocalConnection {
+        session,
+        hello,
+        message_buffer: VecDeque::new(),
+        _keepalive: keepalive,
+    })
+}
+
+/// In-memory connection that wraps a HostSession directly.
+struct LocalConnection {
+    session: crate::session::HostSession,
+    hello: Hello,
+    message_buffer: VecDeque<Message>,
+    /// TempDirs kept alive for the connection's lifetime.
+    _keepalive: Vec<TempDir>,
+}
+
+impl Connection for LocalConnection {
+    fn hello(&self) -> &Hello {
+        &self.hello
+    }
+
+    fn send_request(&mut self, request: &Request) -> Result<()> {
+        let buffer = &mut self.message_buffer;
+        self.session
+            .handle_request(request.clone(), &mut |msg| buffer.push_back(msg));
+        Ok(())
+    }
+
+    fn read_message(&mut self) -> Result<Option<Message>> {
+        Ok(self.message_buffer.pop_front())
+    }
+
+    fn close(&mut self) {}
 }
 
 /// Assert that a directory contains exactly the given files with the given contents.
