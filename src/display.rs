@@ -61,7 +61,11 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Write the deployment plan as a diffstat.
 pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
     for (host, host_plan) in &plan.hosts {
-        writeln!(out, "{host}")?;
+        if host_plan.is_fast_forward {
+            writeln!(out, "{host}")?;
+        } else {
+            writeln!(out, "{} {host}", color.red("!"))?;
+        }
         for (app, diff) in &host_plan.apps {
             match diff {
                 AppDiff::Add { new_tree } => {
@@ -332,6 +336,7 @@ mod tests {
                 HostPlan {
                     apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
                     expected_current: None,
+                    is_fast_forward: true,
                 },
             )]),
         };
@@ -364,6 +369,7 @@ web1
                 HostPlan {
                     apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
                     expected_current: None,
+                    is_fast_forward: true,
                 },
             )]),
         };
@@ -398,6 +404,7 @@ web1
                 HostPlan {
                     apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
                     expected_current: Some(c1.into()),
+                    is_fast_forward: true,
                 },
             )]),
         };
@@ -429,6 +436,7 @@ web1
                         AppDiff::Update { old_tree, new_tree },
                     )]),
                     expected_current: Some(c1.into()),
+                    is_fast_forward: true,
                 },
             )]),
         };
@@ -467,6 +475,7 @@ web1
                         AppDiff::Update { old_tree, new_tree },
                     )]),
                     expected_current: Some(c1.into()),
+                    is_fast_forward: true,
                 },
             )]),
         };

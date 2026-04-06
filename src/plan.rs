@@ -13,6 +13,12 @@ use crate::error::Result;
 use crate::prim::{Hostname, Oid};
 use crate::store::Store;
 
+#[derive(Debug, Clone, Copy)]
+pub enum PushMode {
+    ForwardOnly,
+    ForcePush,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
     Add { new_tree: Oid },
@@ -24,6 +30,7 @@ pub enum AppDiff {
 pub struct HostPlan {
     pub apps: BTreeMap<String, AppDiff>,
     pub expected_current: Option<Oid>,
+    pub is_fast_forward: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -161,7 +168,7 @@ fn validate_systemd_config(store: &Store, config_tree: &git2::Tree, host: &Hostn
 /// stages: first eliminate hosts that we definitely do not need to touch based
 /// on current refs. Then for hosts that do need touching we refresh their refs,
 /// and plan again. We could just use the same plan function for that though.
-pub fn make_plan(store: &Store) -> Result<Plan> {
+pub fn make_plan(store: &Store, push_mode: PushMode) -> Result<Plan> {
     let main_commit = store
         .repo
         .find_reference("refs/heads/main")?
@@ -192,11 +199,30 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
         let apps = diff_apps(&current_apps, &target_apps);
 
         if !apps.is_empty() {
+            let is_fast_forward = match &expected_current {
+                None => true,
+                Some(current) => store
+                    .repo
+                    .graph_descendant_of(commit, git2::Oid::from(current))?,
+            };
+
+            if !is_fast_forward {
+                if let PushMode::ForwardOnly = push_mode {
+                    let current_oid = expected_current.as_ref().expect("non-ff implies a current");
+                    let short = &format!("{}", git2::Oid::from(current_oid))[..10];
+                    return Err(crate::error::Error::InvalidConfig(format!(
+                        "{host}: deploy is not a fast-forward (current is {short}). \
+                         Pull the latest state, or run with --force-push to override.",
+                    )));
+                }
+            }
+
             hosts.insert(
                 host,
                 HostPlan {
                     apps,
                     expected_current,
+                    is_fast_forward,
                 },
             );
         }
@@ -219,7 +245,7 @@ mod tests {
         let t = TestRepo::new();
         t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, PushMode::ForwardOnly)?;
         assert_eq!(plan.hosts.len(), 1);
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 2);
@@ -236,7 +262,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, PushMode::ForwardOnly)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["nginx"], AppDiff::Update { .. }));
@@ -251,7 +277,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, PushMode::ForwardOnly)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["rofld"], AppDiff::Remove { .. }));
@@ -266,7 +292,7 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, PushMode::ForwardOnly)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
         let apps = &plan.hosts[&"web2".into()].apps;
         assert_eq!(apps.len(), 1);
@@ -282,8 +308,46 @@ mod tests {
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, PushMode::ForwardOnly)?;
         assert!(plan.hosts.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn plan_rejects_non_fast_forward_in_forward_only_mode() {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        // Simulate another driver deploying c2 (descendant of c1).
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
+        t.set_host_tracking_ref("web1", c2);
+
+        // Reset main back to c1 so the next commit branches from c1,
+        // not from c2. This simulates our local repo diverging.
+        t.store
+            .set_ref("refs/heads/main", c1, crate::store::RefUpdate::SetCurrent)
+            .unwrap();
+        t.commit(&[("web1/nginx/conf", b"v3")]);
+
+        // The new commit descends from c1, but the host has c2. Not a fast-forward.
+        let err = make_plan(&t.store, PushMode::ForwardOnly).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("not a fast-forward"), "error message: {msg}");
+        assert!(msg.contains("--force-push"), "error message: {msg}");
+    }
+
+    #[test]
+    fn plan_allows_non_fast_forward_with_force_push() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
+        t.set_host_tracking_ref("web1", c2);
+
+        t.store
+            .set_ref("refs/heads/main", c1, crate::store::RefUpdate::SetCurrent)?;
+        t.commit(&[("web1/nginx/conf", b"v3")]);
+
+        let plan = make_plan(&t.store, PushMode::ForcePush)?;
+        assert!(!plan.hosts[&"web1".into()].is_fast_forward);
         Ok(())
     }
 

@@ -502,6 +502,7 @@ mod tests {
                         HostPlan {
                             apps: BTreeMap::new(),
                             expected_current: expected_current.clone(),
+                            is_fast_forward: true,
                         },
                     )
                 })
