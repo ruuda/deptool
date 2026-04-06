@@ -87,12 +87,6 @@ impl HostSession {
         responses
     }
 
-    /// Wrap this session into a boxed `Connection` for deploy tests.
-    #[cfg(test)]
-    pub fn into_test_connection(self) -> Box<dyn crate::deploy::Connection> {
-        crate::testutil::session_into_connection(self)
-    }
-
     fn current_commit(&self) -> Option<Oid> {
         self.repo
             .find_reference("refs/heads/current")

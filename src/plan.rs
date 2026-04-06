@@ -246,7 +246,7 @@ mod tests {
     fn plan_detects_updated_and_unchanged_apps() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
-        t.set_current("web1", c1);
+        t.set_host_tracking_ref("web1", c1);
 
         t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
@@ -261,7 +261,7 @@ mod tests {
     fn plan_detects_removed_apps() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
-        t.set_current("web1", c1);
+        t.set_host_tracking_ref("web1", c1);
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 
@@ -276,7 +276,7 @@ mod tests {
     fn plan_includes_new_host_alongside_up_to_date_host() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
-        t.set_current("web1", c1);
+        t.set_host_tracking_ref("web1", c1);
 
         t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
@@ -292,7 +292,7 @@ mod tests {
     fn plan_omits_hosts_that_are_up_to_date() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
-        t.set_current("web1", c1);
+        t.set_host_tracking_ref("web1", c1);
 
         t.commit(&[("web1/nginx/conf", b"a")]);
 

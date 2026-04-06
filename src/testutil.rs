@@ -86,8 +86,8 @@ impl TestRepo {
         commit_files(&self.repo, files).expect("commit succeeds")
     }
 
-    /// Record that a host has already seen a commit.
-    pub fn set_current(&self, host: &str, commit_oid: git2::Oid) {
+    /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
+    pub fn set_host_tracking_ref(&self, host: &str, commit_oid: git2::Oid) {
         crate::store::set_ref(
             &self.repo,
             &format!("refs/remotes/{host}/current"),
@@ -126,28 +126,14 @@ impl TestHost {
     }
 
     pub fn with_commit(files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
-        let store = TempDir::new("store");
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let oid = commit_files(&repo, files).expect("commit succeeds");
-        let session =
-            crate::session::HostSession::new_test(repo, "web1", apps.path(), units.path());
-        let host = TestHost {
-            session,
-            _store: store,
-            _apps: apps,
-            _units: units,
-        };
+        let host = Self::new();
+        let oid = commit_files(&host.session.repo, files).expect("commit succeeds");
         (host, oid)
     }
 
     /// Send a request and collect all response messages.
     pub fn collect(&mut self, request: Request) -> Vec<Message> {
-        let mut responses = Vec::new();
-        self.session
-            .handle_request(request, &mut |r| responses.push(r));
-        responses
+        self.session.handle_collect(request)
     }
 
     /// Convert into a boxed `Connection` for deploy tests.

@@ -614,7 +614,7 @@ mod tests {
             |_| {
                 let repo = git2::Repository::open(target.repo.path())?;
                 let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
-                Ok(session.into_test_connection())
+                Ok(crate::testutil::session_into_connection(session))
             },
             |_| panic!("install not expected"),
             &mut progress,
