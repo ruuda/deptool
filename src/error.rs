@@ -10,6 +10,7 @@ pub enum Error {
     NonUtf8FileName,
     InvalidConfig(String),
     AgentNotInstalled,
+    ConnectionFailed(String),
     SetupChecksumMismatch {
         expected_hash: String,
         actual_hash: String,
@@ -44,6 +45,7 @@ impl fmt::Display for Error {
             Error::Json(e) => write!(f, "{e}"),
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
             Error::AgentNotInstalled => write!(f, "agent binary not installed on target host"),
+            Error::ConnectionFailed(msg) => write!(f, "{msg}"),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             Error::SetupChecksumMismatch {
                 expected_hash,

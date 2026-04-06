@@ -124,9 +124,7 @@ impl RemoteSession {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Suppress stderr so "command not found" on first connect
-            // (before agent installation) doesn't disturb the status display.
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
 
         let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
@@ -135,8 +133,20 @@ impl RemoteSession {
         let mut line = String::new();
         let hello = match reader.read_line(&mut line) {
             Ok(0) => {
-                // EOF before hello: check whether the binary was missing.
+                // EOF before hello — the process exited without speaking
+                // our protocol. Read stderr for diagnostics and classify
+                // by exit code.
+                let mut stderr = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
+                }
+                let stderr = stderr.trim();
                 match child.wait()?.code() {
+                    // 255: SSH connection failure (host unreachable, DNS
+                    // failure, connection refused, timeout, etc.)
+                    Some(255) => {
+                        return Err(Error::ConnectionFailed(stderr.to_string()));
+                    }
                     // When we run `deptool` directly and the shell reports that
                     // the binary is not found, the exit code is 127, but when
                     // we run it through sudo, then sudo fails and exits with
@@ -144,9 +154,17 @@ impl RemoteSession {
                     // the current user and the let it reexec itself under sudo
                     // if its uid is unexpected?
                     Some(1 | 127) => return Err(Error::AgentNotInstalled),
-                    other => {
+                    Some(code) => {
                         return Err(Error::ProtocolError(format!(
-                            "agent exited before sending hello; exit status {other:?}"
+                            "ssh exited with status {code} \
+                             before agent sent hello: {stderr}"
+                        )));
+                    }
+                    // On Unix, None means the process was killed by a signal.
+                    None => {
+                        return Err(Error::ProtocolError(format!(
+                            "ssh killed by signal \
+                             before agent sent hello: {stderr}"
                         )));
                     }
                 }
@@ -658,7 +676,9 @@ mod tests {
             &plan,
             |host| match host.0.as_str() {
                 "web1" => Ok(web1.connect()),
-                _ => Err(Error::ProtocolError("web2: host unreachable".into())),
+                other => Err(Error::ConnectionFailed(format!(
+                    "ssh: connect to host {other}: Connection timed out",
+                ))),
             },
             |_| panic!("install not expected"),
             &mut progress,
