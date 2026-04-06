@@ -286,6 +286,7 @@ pub fn lock_hosts(
 
 /// Send Apply to all locked hosts and stream responses.
 pub fn apply_hosts(
+    repo: &git2::Repository,
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
     progress: &mut DeployProgress,
@@ -299,8 +300,14 @@ pub fn apply_hosts(
         conn.send_request(&request)?;
         conn.close();
         while let Some(message) = conn.read_message()? {
-            if matches!(message, Message::ApplyComplete { .. }) {
+            if let Message::ApplyComplete { ref commit, .. } = message {
                 progress.update(host, HostState::Done);
+                crate::store::set_ref(
+                    repo,
+                    &format!("refs/remotes/{host}/current"),
+                    git2::Oid::from(commit),
+                    crate::store::RefUpdate::ApplyComplete,
+                )?;
             }
             on_message(host, message);
         }
@@ -438,7 +445,13 @@ mod tests {
         assert_eq!(lock_result.locked.len(), 1, "lock should succeed");
         push_packs(&driver.repo, plan, &mut lock_result.locked, &mut progress)?;
         let on_message = |_: &Hostname, _: Message| {};
-        apply_hosts(plan, &mut lock_result.locked, &mut progress, on_message)?;
+        apply_hosts(
+            &driver.repo,
+            plan,
+            &mut lock_result.locked,
+            &mut progress,
+            on_message,
+        )?;
         Ok(())
     }
 
@@ -457,9 +470,13 @@ mod tests {
         assert_eq!(lock_result.locked.len(), 1);
 
         let mut messages = Vec::new();
-        apply_hosts(&plan, &mut lock_result.locked, &mut progress, |_, msg| {
-            messages.push(msg)
-        })?;
+        apply_hosts(
+            &host.session.repo,
+            &plan,
+            &mut lock_result.locked,
+            &mut progress,
+            |_, msg| messages.push(msg),
+        )?;
 
         assert!(matches!(
             messages.last(),
@@ -493,7 +510,6 @@ mod tests {
             &target,
             &single_host_plan(None, commit_v1.into()),
         )?;
-        driver_a.set_host_tracking_ref("web1", commit_v1);
 
         // Driver B: copy of A at this point (same main, same tracking ref).
         let driver_b = TestRepo::copy_from(&driver_a);
