@@ -465,14 +465,16 @@ mod tests {
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
+        let actual_current = None;
+        let on_app = |_: &str, _: &AppDiff| {};
         apply_host(
             &t.repo,
             c1,
-            None,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
-            |_, _| {},
+            on_app,
         )?;
 
         let current = t
@@ -497,11 +499,12 @@ mod tests {
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
+        let actual_current = None;
         let mut applied = Vec::new();
         apply_host(
             &t.repo,
             c1,
-            None,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
@@ -528,14 +531,16 @@ mod tests {
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
+        let actual_current = None;
+        let on_app = |_: &str, _: &AppDiff| {};
         let changes = apply_host(
             &t.repo,
             c1,
-            None,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
-            |_, _| {},
+            on_app,
         )?;
 
         // Both units are symlinked (available).

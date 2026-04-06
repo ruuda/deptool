@@ -31,7 +31,7 @@ fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 
 pub struct HostSession {
     pub repo: Repository,
-    hostname: Hostname,
+    pub hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
     on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
@@ -74,17 +74,6 @@ impl HostSession {
             unit_dir.to_path_buf(),
             on_units_changed,
         )
-    }
-
-    /// Send a request and collect all responses. Test-only convenience.
-    #[cfg(test)]
-    pub fn handle_collect(
-        &mut self,
-        request: crate::protocol::Request,
-    ) -> Vec<crate::protocol::Message> {
-        let mut responses = Vec::new();
-        self.handle_request(request, &mut |r| responses.push(r));
-        responses
     }
 
     fn current_commit(&self) -> Option<Oid> {
@@ -230,8 +219,9 @@ mod tests {
 
     #[test]
     fn apply_checks_out_app_and_emits_per_app_messages() {
-        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/nginx.conf", b"server {}")]);
-        let responses = host.collect(Request::Apply {
+        let (mut host, oid) =
+            TestHost::with_commit("web1", &[("web1/nginx/nginx.conf", b"server {}")]);
+        let responses = host.interact(Request::Apply {
             target_commit: oid.into(),
         });
 
@@ -248,8 +238,8 @@ mod tests {
 
     #[test]
     fn lock_succeeds_on_fresh_host_with_no_expected_current() {
-        let mut host = TestHost::new();
-        let responses = host.collect(Request::Lock {
+        let mut host = TestHost::new("web1");
+        let responses = host.interact(Request::Lock {
             expected_current_commit: None,
         });
         assert_eq!(responses, vec![Message::Locked]);
@@ -257,7 +247,7 @@ mod tests {
 
     #[test]
     fn lock_succeeds_when_current_ref_matches_expected() {
-        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
             &host.session.repo,
             "refs/heads/current",
@@ -265,7 +255,7 @@ mod tests {
             crate::store::RefUpdate::SetCurrent,
         )
         .expect("ref is set");
-        let responses = host.collect(Request::Lock {
+        let responses = host.interact(Request::Lock {
             expected_current_commit: Some(oid.into()),
         });
         assert_eq!(responses, vec![Message::Locked]);
@@ -273,7 +263,7 @@ mod tests {
 
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() {
-        let (mut host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
             &host.session.repo,
             "refs/heads/current",
@@ -281,7 +271,7 @@ mod tests {
             crate::store::RefUpdate::SetCurrent,
         )
         .expect("ref is set");
-        let responses = host.collect(Request::Lock {
+        let responses = host.interact(Request::Lock {
             expected_current_commit: None,
         });
         assert_eq!(responses.len(), 1);
@@ -299,7 +289,7 @@ mod tests {
 
     #[test]
     fn lock_reports_busy_when_already_held() {
-        let mut host = TestHost::new();
+        let mut host = TestHost::new("web1");
 
         // Acquire the lock from another file descriptor.
         let lock_path = host.session.repo.path().join("deptool.lock");
@@ -309,7 +299,7 @@ mod tests {
             "lock is acquired",
         );
 
-        let responses = host.collect(Request::Lock {
+        let responses = host.interact(Request::Lock {
             expected_current_commit: None,
         });
         assert_eq!(responses, vec![Message::LockBusy]);

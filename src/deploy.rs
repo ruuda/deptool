@@ -406,36 +406,50 @@ mod tests {
     use super::*;
     use crate::plan::HostPlan;
     use crate::prim::Oid;
-    use crate::session::HostSession;
-    use crate::testutil::{TempDir, TestHost, TestRepo, commit_files};
+    use crate::testutil::{TestHost, TestRepo};
 
     fn test_progress(hosts: &[&str]) -> DeployProgress {
         let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
         DeployProgress::new(hosts, Box::new(|_| {}))
     }
 
-    fn single_host_plan(commit: Oid) -> Plan {
+    fn single_host_plan(expected_current: Option<Oid>, commit: Oid) -> Plan {
         Plan {
             commit,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
                     apps: BTreeMap::new(),
-                    expected_current: None,
+                    expected_current,
                 },
             )]),
         }
     }
 
+    /// Run a full deploy (lock → push → apply) from driver to target.
+    fn deploy(driver: &TestRepo, target: &TestHost, plan: &Plan) -> Result<()> {
+        let mut progress = test_progress(&["web1"]);
+        let mut lock_result = lock_hosts(
+            plan,
+            |_| Ok(target.connect()),
+            |_| panic!("install not expected"),
+            &mut progress,
+        );
+        assert_eq!(lock_result.locked.len(), 1, "lock should succeed");
+        push_packs(&driver.repo, plan, &mut lock_result.locked, &mut progress)?;
+        let on_message = |_: &Hostname, _: Message| {};
+        apply_hosts(plan, &mut lock_result.locked, &mut progress, on_message)?;
+        Ok(())
+    }
+
     #[test]
     fn lock_and_apply_emits_apply_complete_for_fresh_host() -> Result<()> {
-        let (host, oid) = TestHost::with_commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let plan = single_host_plan(oid.into());
-        let mut conn = Some(host.into_connection());
+        let (host, oid) = TestHost::with_commit("web1", &[("web1/nginx/nginx.conf", b"v1")]);
+        let plan = single_host_plan(None, oid.into());
         let mut progress = test_progress(&["web1"]);
         let mut lock_result = lock_hosts(
             &plan,
-            |_| Ok(conn.take().expect("connect called once")),
+            |_| Ok(host.connect()),
             |_| panic!("install not expected"),
             &mut progress,
         );
@@ -456,7 +470,7 @@ mod tests {
 
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() -> Result<()> {
-        let (host, oid) = TestHost::with_commit(&[("web1/nginx/conf", b"v1")]);
+        let (host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         crate::store::set_ref(
             &host.session.repo,
             "refs/heads/current",
@@ -464,12 +478,11 @@ mod tests {
             crate::store::RefUpdate::SetCurrent,
         )?;
 
-        let plan = single_host_plan(Oid::from("0000000000000000000000000000000000000000"));
-        let mut conn = Some(host.into_connection());
+        let plan = single_host_plan(None, Oid::from("0000000000000000000000000000000000000000"));
         let mut progress = test_progress(&["web1"]);
         let lock_result = lock_hosts(
             &plan,
-            |_| Ok(conn.take().expect("connect called once")),
+            |_| Ok(host.connect()),
             |_| panic!("install not expected"),
             &mut progress,
         );
@@ -486,159 +499,71 @@ mod tests {
         let driver = TestRepo::new();
         let commit_oid = driver.commit(&[("web1/app/conf", b"hello")]);
 
-        let target = TestHost::new();
-        let plan = single_host_plan(commit_oid.into());
-        let mut conn = Some(target.into_connection());
-        let mut progress = test_progress(&["web1"]);
-        let lock_result = lock_hosts(
-            &plan,
-            |_| Ok(conn.take().expect("connect called once")),
-            |_| panic!("install not expected"),
-            &mut progress,
-        );
+        let target = TestHost::new("web1");
+        let plan = single_host_plan(None, commit_oid.into());
+        deploy(&driver, &target, &plan)?;
 
-        let mut connections = lock_result.locked;
-        push_packs(&driver.repo, &plan, &mut connections, &mut progress)?;
-
-        let mut messages = Vec::new();
-        apply_hosts(&plan, &mut connections, &mut progress, |_, msg| {
-            messages.push(msg)
-        })?;
-
-        assert!(matches!(
-            messages.last(),
-            Some(Message::ApplyComplete { .. })
-        ));
-        Ok(())
-    }
-
-    /// Push objects and apply a commit on a target via HostSession.
-    ///
-    /// Uses the same create_pack + write_pack machinery as production.
-    fn push_and_apply(
-        driver_repo: &git2::Repository,
-        target_path: &std::path::Path,
-        apps_path: &std::path::Path,
-        units_path: &std::path::Path,
-        target_commit: git2::Oid,
-        have_commit: Option<git2::Oid>,
-        expected_current: Option<Oid>,
-    ) -> Result<()> {
-        let pack = crate::store::create_pack(driver_repo, target_commit, have_commit)?;
-        let repo = git2::Repository::open(target_path)?;
-        crate::store::write_pack(&repo, &pack)?;
-
-        let mut session = HostSession::new_test(repo, "web1", apps_path, units_path);
-        let messages = session.handle_collect(Request::Lock {
-            expected_current_commit: expected_current,
-        });
-        assert_eq!(messages, vec![Message::Locked], "lock should succeed");
-
-        let messages = session.handle_collect(Request::Apply {
-            target_commit: target_commit.into(),
-        });
-        assert!(
-            matches!(messages.last(), Some(Message::ApplyComplete { .. })),
-            "apply should succeed, got: {messages:?}",
-        );
         Ok(())
     }
 
     #[test]
     fn fetch_resolves_stale_after_concurrent_deploy() -> Result<()> {
-        let target = TestRepo::new();
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-
-        // Driver A commits v1, pushes pack to target, applies.
+        let target = TestHost::new("web1");
         let driver_a = TestRepo::new();
-        let commit_v1 = driver_a.commit(&[("web1/app/conf", b"v1")]);
 
-        push_and_apply(
-            &driver_a.repo,
-            target.repo.path(),
-            apps.path(),
-            units.path(),
-            commit_v1,
-            None,
-            None,
+        // Driver A deploys v1, pushes pack to target, applies.
+        let commit_v1 = driver_a.commit(&[("web1/app/conf", b"v1")]);
+        deploy(
+            &driver_a,
+            &target,
+            &single_host_plan(None, commit_v1.into()),
         )?;
-        crate::store::set_ref(
-            &driver_a.repo,
-            "refs/remotes/web1/current",
-            commit_v1,
-            crate::store::RefUpdate::ApplyComplete,
-        )?;
+        driver_a.set_host_tracking_ref("web1", commit_v1);
 
         // Driver B: copy of A at this point (same main, same tracking ref).
-        let driver_b = TempDir::new("driver_b");
-        std::fs::remove_dir_all(driver_b.path())?;
-        std::process::Command::new("cp")
-            .args(["-r"])
-            .arg(driver_a.repo.path())
-            .arg(driver_b.path())
-            .status()?;
-        let repo_b = git2::Repository::open(driver_b.path())?;
+        let driver_b = TestRepo::copy_from(&driver_a);
 
         // Driver A deploys v2.
         let commit_v2 = driver_a.commit(&[("web1/app/conf", b"v2")]);
-        push_and_apply(
-            &driver_a.repo,
-            target.repo.path(),
-            apps.path(),
-            units.path(),
-            commit_v2,
-            Some(commit_v1),
-            Some(commit_v1.into()),
+        deploy(
+            &driver_a,
+            &target,
+            &single_host_plan(Some(commit_v1.into()), commit_v2.into()),
         )?;
 
         // Driver B commits v3 (diverges from A's v2) and tries to lock.
-        let commit_v3 = commit_files(&repo_b, &[("web1/app/conf", b"v3")])?;
-
-        // B's plan still thinks current is commit_v1.
-        let plan = Plan {
-            commit: commit_v3.into(),
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::new(),
-                    expected_current: Some(commit_v1.into()),
-                },
-            )]),
-        };
-
-        // Lock should report stale: target has commit_v2, not commit_v1.
+        // B's plan still thinks current is commit_v1, but target has commit_v2.
+        let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
+        let plan = single_host_plan(Some(commit_v1.into()), commit_v3.into());
         let mut progress = test_progress(&["web1"]);
         let mut lock_result = lock_hosts(
             &plan,
-            |_| {
-                let repo = git2::Repository::open(target.repo.path())?;
-                let session = HostSession::new_test(repo, "web1", apps.path(), units.path());
-                Ok(crate::testutil::session_into_connection(session))
-            },
+            |_| Ok(target.connect()),
             |_| panic!("install not expected"),
             &mut progress,
         );
 
+        // Lock should report stale: target has commit_v2, not commit_v1.
         assert!(lock_result.locked.is_empty());
         assert_eq!(lock_result.stale.len(), 1);
         assert_eq!(lock_result.stale[0].1.actual_commit, Some(commit_v2.into()));
 
         // Driver B doesn't have commit_v2 locally.
         assert!(
-            repo_b.find_commit(commit_v2).is_err(),
+            driver_b.repo.find_commit(commit_v2).is_err(),
             "commit_v2 should not exist in driver B yet"
         );
 
-        // Fetch objects over the stale session connection.
-        fetch_stale_objects(&repo_b, &mut lock_result.stale)?;
+        // Fetch objects over the stale connection.
+        fetch_stale_objects(&driver_b.repo, &mut lock_result.stale)?;
 
         // B now has the objects and tracking ref.
-        let tracking_ref = repo_b
+        let tracking_ref = driver_b
+            .repo
             .find_reference("refs/remotes/web1/current")?
             .peel_to_commit()?;
         assert_eq!(tracking_ref.id(), commit_v2);
-        assert!(repo_b.find_commit(commit_v2).is_ok());
+        assert!(driver_b.repo.find_commit(commit_v2).is_ok());
 
         Ok(())
     }
