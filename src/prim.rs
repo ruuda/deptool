@@ -1,44 +1,45 @@
-//! Primitive newtypes: Git object ids and hostnames.
+//! Primitive newtypes and serde helpers.
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// A Git object id as a hex string. Serializes cleanly and converts to/from `git2::Oid`.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct Oid(String);
+/// Serde helpers for types that don't implement Serialize/Deserialize.
+///
+/// Used via `#[serde(with = "crate::prim::ser::oid")]` on struct fields.
+pub mod ser {
+    pub mod oid {
+        use ::serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-// TODO: We use both this and git2::Oid extensively across the codebase and it
-// gets messy. Is it possible to just pick one and be consistent, or at least
-// push all conversions into a single module?
+        pub fn serialize<S: Serializer>(oid: &git2::Oid, s: S) -> Result<S::Ok, S::Error> {
+            oid.to_string().serialize(s)
+        }
 
-impl From<git2::Oid> for Oid {
-    fn from(oid: git2::Oid) -> Self {
-        Oid(oid.to_string())
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<git2::Oid, D::Error> {
+            let hex = String::deserialize(d)?;
+            git2::Oid::from_str(&hex).map_err(::serde::de::Error::custom)
+        }
     }
-}
 
-impl From<&Oid> for git2::Oid {
-    fn from(oid: &Oid) -> Self {
-        git2::Oid::from_str(&oid.0).expect("Oid wrapper contains valid oids.")
-    }
-}
+    pub mod oid_option {
+        use ::serde::{Deserialize, Deserializer, Serializer};
 
-impl From<Oid> for git2::Oid {
-    fn from(oid: Oid) -> Self {
-        git2::Oid::from_str(&oid.0).expect("Oid wrapper contains valid oids.")
-    }
-}
+        pub fn serialize<S: Serializer>(oid: &Option<git2::Oid>, s: S) -> Result<S::Ok, S::Error> {
+            match oid {
+                Some(oid) => s.serialize_some(&oid.to_string()),
+                None => s.serialize_none(),
+            }
+        }
 
-impl From<&str> for Oid {
-    fn from(s: &str) -> Self {
-        Oid(s.to_string())
-    }
-}
-
-impl fmt::Display for Oid {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&self.0)
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<git2::Oid>, D::Error> {
+            let hex: Option<String> = Option::deserialize(d)?;
+            match hex {
+                Some(h) => git2::Oid::from_str(&h)
+                    .map(Some)
+                    .map_err(::serde::de::Error::custom),
+                None => Ok(None),
+            }
+        }
     }
 }
 

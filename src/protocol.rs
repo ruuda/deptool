@@ -1,8 +1,7 @@
 //! Request and response types for the host session protocol.
 
+use git2::Oid;
 use serde::{Deserialize, Serialize};
-
-use crate::prim::Oid;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -10,17 +9,18 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub enum Request {
     /// Acquire the deploy lock and verify the host's current commit.
     Lock {
+        #[serde(with = "crate::prim::ser::oid_option")]
         expected_current_commit: Option<Oid>,
     },
     /// Receive a base64-encoded packfile into the store.
-    ReceivePack {
-        pack_data: String,
-    },
+    ReceivePack { pack_data: String },
     /// Request a packfile containing the host's current commit.
     RequestObjects {
+        #[serde(with = "crate::prim::ser::oid_option")]
         have_commit: Option<Oid>,
     },
     Apply {
+        #[serde(with = "crate::prim::ser::oid")]
         target_commit: Oid,
     },
 }
@@ -36,7 +36,9 @@ pub enum Message {
     Locked,
     PackReceived,
     LockStale {
+        #[serde(with = "crate::prim::ser::oid_option")]
         expected_commit: Option<Oid>,
+        #[serde(with = "crate::prim::ser::oid_option")]
         actual_commit: Option<Oid>,
     },
     LockBusy,
@@ -45,6 +47,7 @@ pub enum Message {
         diff: crate::plan::AppDiff,
     },
     ApplyComplete {
+        #[serde(with = "crate::prim::ser::oid")]
         commit: Oid,
         enabled_units: Vec<String>,
         restarted_units: Vec<String>,

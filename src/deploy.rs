@@ -8,9 +8,11 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 
 use std::collections::BTreeMap;
 
+use git2::Oid;
+
 use crate::error::{Error, Result};
 use crate::plan::Plan;
-use crate::prim::{Hostname, Oid};
+use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 use crate::store::{RefUpdate, Store};
 
@@ -332,7 +334,7 @@ pub fn apply_hosts(
                 progress.update(host, HostState::Done);
                 store.set_ref(
                     &format!("refs/remotes/{host}/current"),
-                    git2::Oid::from(commit),
+                    *commit,
                     RefUpdate::ApplyComplete,
                 )?;
             }
@@ -357,11 +359,8 @@ pub fn push_packs(
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
         progress.update(host, HostState::Pushing);
-        let have_commit = plan.hosts[host]
-            .expected_current
-            .as_ref()
-            .map(git2::Oid::from);
-        let pack_bytes = store.create_pack(git2::Oid::from(&plan.commit), have_commit)?;
+        let have_commit = plan.hosts[host].expected_current;
+        let pack_bytes = store.create_pack(plan.commit, have_commit)?;
         let encoded = BASE64.encode(&pack_bytes);
         conn.send_request(&Request::ReceivePack { pack_data: encoded })?;
         match conn.read_message()? {
@@ -394,11 +393,7 @@ pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -
         };
 
         // Fetch the pack if we don't already have this commit.
-        if store
-            .repo
-            .find_commit(git2::Oid::from(&actual_commit))
-            .is_err()
-        {
+        if store.repo.find_commit(actual_commit).is_err() {
             info.connection.send_request(&Request::RequestObjects {
                 have_commit: info.expected_commit.clone(),
             })?;
@@ -425,7 +420,7 @@ pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -
 
         store.set_ref(
             &format!("refs/remotes/{host}/current"),
-            git2::Oid::from(&actual_commit),
+            actual_commit,
             RefUpdate::FetchStale,
         )?;
     }
@@ -464,7 +459,6 @@ pub fn run_deploy(
 mod tests {
     use super::*;
     use crate::plan::HostPlan;
-    use crate::prim::Oid;
     use crate::testutil::{TestHost, TestRepo};
 
     fn test_progress(hosts: &[&str]) -> DeployProgress {
@@ -517,7 +511,7 @@ mod tests {
         let commit_oid = driver.commit(&[("web1/app/conf", b"hello")]);
 
         let target = TestHost::new("web1");
-        let plan = make_plan(commit_oid.into(), &[("web1", None)]);
+        let plan = make_plan(commit_oid, &[("web1", None)]);
         deploy_to(&driver, &[&target], &plan)?;
 
         Ok(())
@@ -533,7 +527,7 @@ mod tests {
         deploy_to(
             &driver_a,
             &[&target],
-            &make_plan(commit_v1.into(), &[("web1", None)]),
+            &make_plan(commit_v1, &[("web1", None)]),
         )?;
 
         // Driver B: copy of A at this point (same main, same tracking ref).
@@ -544,13 +538,13 @@ mod tests {
         deploy_to(
             &driver_a,
             &[&target],
-            &make_plan(commit_v2.into(), &[("web1", Some(commit_v1.into()))]),
+            &make_plan(commit_v2, &[("web1", Some(commit_v1))]),
         )?;
 
         // Driver B commits v3 (diverges from A's v2) and tries to deploy.
         // B's plan still thinks current is commit_v1, but target has commit_v2.
         let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
-        let plan = make_plan(commit_v3.into(), &[("web1", Some(commit_v1.into()))]);
+        let plan = make_plan(commit_v3, &[("web1", Some(commit_v1))]);
         let mut progress = test_progress(&["web1"]);
         let result = run_deploy(
             &driver_b.store,
@@ -583,7 +577,7 @@ mod tests {
         deploy_to(
             &driver,
             &[&web1, &web2],
-            &make_plan(commit_v1.into(), &[("web1", None), ("web2", None)]),
+            &make_plan(commit_v1, &[("web1", None), ("web2", None)]),
         )?;
 
         // Another driver sneaks in and deploys v2 to web1 only.
@@ -592,17 +586,14 @@ mod tests {
         deploy_to(
             &other,
             &[&web1],
-            &make_plan(commit_v2.into(), &[("web1", Some(commit_v1.into()))]),
+            &make_plan(commit_v2, &[("web1", Some(commit_v1))]),
         )?;
 
         // Our driver tries to deploy v3 to both hosts. web1 is stale, web2 is fine.
         let commit_v3 = driver.commit(&[("web1/app/conf", b"v3"), ("web2/app/conf", b"v3")]);
         let plan = make_plan(
-            commit_v3.into(),
-            &[
-                ("web1", Some(commit_v1.into())),
-                ("web2", Some(commit_v1.into())),
-            ],
+            commit_v3,
+            &[("web1", Some(commit_v1)), ("web2", Some(commit_v1))],
         );
         let mut progress = test_progress(&["web1", "web2"]);
         let result = run_deploy(
@@ -645,7 +636,7 @@ mod tests {
             "lock is acquired",
         );
 
-        let plan = make_plan(commit.into(), &[("web1", None)]);
+        let plan = make_plan(commit, &[("web1", None)]);
         let mut progress = test_progress(&["web1"]);
         let result = run_deploy(
             &driver.store,
@@ -669,7 +660,7 @@ mod tests {
         let commit = driver.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
 
         // web2 is in the plan but unreachable.
-        let plan = make_plan(commit.into(), &[("web1", None), ("web2", None)]);
+        let plan = make_plan(commit, &[("web1", None), ("web2", None)]);
         let mut progress = test_progress(&["web1", "web2"]);
         let result = run_deploy(
             &driver.store,

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use git2::Repository;
+use git2::{Oid, Repository};
 
 use crate::deploy::Connection;
 use crate::error::Result;
@@ -37,7 +37,7 @@ impl Drop for TempDir {
 }
 
 /// Build a tree from in-memory file data, supporting nested paths like "a/b/c".
-fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
+fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<Oid> {
     let mut subdirs: BTreeMap<&str, Vec<(&str, &[u8])>> = BTreeMap::new();
     let mut builder = repo.treebuilder(None)?;
 
@@ -60,7 +60,7 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<g
 }
 
 /// Create a commit with the given files, without touching the filesystem.
-fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
+fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
     store.commit_tree(tree_oid)
 }
@@ -99,12 +99,12 @@ impl TestRepo {
     }
 
     /// Create a commit with the given files, without touching the filesystem.
-    pub fn commit(&self, files: &[(&str, &[u8])]) -> git2::Oid {
+    pub fn commit(&self, files: &[(&str, &[u8])]) -> Oid {
         commit_files(&self.store, files).expect("commit succeeds")
     }
 
     /// Read the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
-    pub fn get_host_tracking_ref(&self, host: &str) -> Option<git2::Oid> {
+    pub fn get_host_tracking_ref(&self, host: &str) -> Option<Oid> {
         self.store
             .repo
             .find_reference(&format!("refs/remotes/{host}/current"))
@@ -117,7 +117,7 @@ impl TestRepo {
     }
 
     /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
-    pub fn set_host_tracking_ref(&self, host: &str, commit_oid: git2::Oid) {
+    pub fn set_host_tracking_ref(&self, host: &str, commit_oid: Oid) {
         self.store
             .set_ref(
                 &format!("refs/remotes/{host}/current"),
@@ -156,7 +156,7 @@ impl TestHost {
         }
     }
 
-    pub fn with_commit(hostname: &str, files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
+    pub fn with_commit(hostname: &str, files: &[(&str, &[u8])]) -> (Self, Oid) {
         let host = Self::new(hostname);
         // Open the same repo as a Store to create the commit.
         let store = Store::open(host.session.store.path()).expect("repo is opened");
@@ -165,7 +165,7 @@ impl TestHost {
     }
 
     /// The host-local `refs/heads/current` commit, if any.
-    pub fn get_current(&self) -> Option<git2::Oid> {
+    pub fn get_current(&self) -> Option<Oid> {
         self.session
             .store
             .repo

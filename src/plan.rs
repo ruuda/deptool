@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use git2::Oid;
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -10,19 +11,31 @@ pub struct SystemdConfig {
 }
 
 use crate::error::Result;
-use crate::prim::{Hostname, Oid};
+use crate::prim::Hostname;
 use crate::store::Store;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
-    Add { new_tree: Oid },
-    Remove { old_tree: Oid },
-    Update { old_tree: Oid, new_tree: Oid },
+    Add {
+        #[serde(with = "crate::prim::ser::oid")]
+        new_tree: Oid,
+    },
+    Remove {
+        #[serde(with = "crate::prim::ser::oid")]
+        old_tree: Oid,
+    },
+    Update {
+        #[serde(with = "crate::prim::ser::oid")]
+        old_tree: Oid,
+        #[serde(with = "crate::prim::ser::oid")]
+        new_tree: Oid,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostPlan {
     pub apps: BTreeMap<String, AppDiff>,
+    #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
     pub is_fast_forward: bool,
 }
@@ -30,6 +43,7 @@ pub struct HostPlan {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub hosts: BTreeMap<Hostname, HostPlan>,
+    #[serde(with = "crate::prim::ser::oid")]
     pub commit: Oid,
 }
 
@@ -82,8 +96,8 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitC
 
 /// Diff two sets of app tree oids for a single host.
 pub fn diff_apps(
-    current: &BTreeMap<String, git2::Oid>,
-    target: &BTreeMap<String, git2::Oid>,
+    current: &BTreeMap<String, Oid>,
+    target: &BTreeMap<String, Oid>,
 ) -> BTreeMap<String, AppDiff> {
     let mut changes = BTreeMap::new();
 
@@ -93,7 +107,7 @@ pub fn diff_apps(
                 changes.insert(
                     name.clone(),
                     AppDiff::Add {
-                        new_tree: (*target_oid).into(),
+                        new_tree: *target_oid,
                     },
                 );
             }
@@ -101,8 +115,8 @@ pub fn diff_apps(
                 changes.insert(
                     name.clone(),
                     AppDiff::Update {
-                        old_tree: (*cur_oid).into(),
-                        new_tree: (*target_oid).into(),
+                        old_tree: *cur_oid,
+                        new_tree: *target_oid,
                     },
                 );
             }
@@ -112,12 +126,7 @@ pub fn diff_apps(
 
     for (name, oid) in current {
         if !target.contains_key(name) {
-            changes.insert(
-                name.clone(),
-                AppDiff::Remove {
-                    old_tree: (*oid).into(),
-                },
-            );
+            changes.insert(name.clone(), AppDiff::Remove { old_tree: *oid });
         }
     }
 
@@ -186,7 +195,7 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
             Ok(r) => {
                 let c = r.peel_to_commit()?;
                 let tree = c.tree()?;
-                (Some(c.id().into()), store.get_host_apps(&tree, &host)?)
+                (Some(c.id()), store.get_host_apps(&tree, &host)?)
             }
         };
 
@@ -195,9 +204,7 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
         if !apps.is_empty() {
             let is_fast_forward = match &expected_current {
                 None => true,
-                Some(current) => store
-                    .repo
-                    .graph_descendant_of(commit, git2::Oid::from(current))?,
+                Some(current) => store.repo.graph_descendant_of(commit, *current)?,
             };
 
             hosts.insert(
@@ -211,10 +218,7 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
         }
     }
 
-    Ok(Plan {
-        hosts,
-        commit: commit.into(),
-    })
+    Ok(Plan { hosts, commit })
 }
 
 #[cfg(test)]

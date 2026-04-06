@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use git2::Repository;
+use git2::{Oid, Repository};
 
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
@@ -41,16 +41,16 @@ impl Store {
     }
 
     /// Get the tree for a commit.
-    pub fn get_commit_tree(&self, commit_oid: git2::Oid) -> Result<git2::Tree<'_>> {
+    pub fn get_commit_tree(&self, commit_oid: Oid) -> Result<git2::Tree<'_>> {
         Ok(self.repo.find_commit(commit_oid)?.tree()?)
     }
 
     /// Recursively build a Git tree from a directory on disk.
-    pub fn build_tree(&self, dir: &Path) -> Result<git2::Oid> {
+    pub fn build_tree(&self, dir: &Path) -> Result<Oid> {
         build_tree_recursive(&self.repo, dir)
     }
 
-    pub fn commit_tree(&self, tree_oid: git2::Oid) -> Result<git2::Oid> {
+    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Oid> {
         let tree = self.repo.find_tree(tree_oid)?;
 
         // Use the ambient Git author metadata if configured, fall back to
@@ -82,7 +82,7 @@ impl Store {
     /// Check out a subtree (host/app) from a commit into a target directory.
     pub fn checkout_app(
         &self,
-        commit_oid: git2::Oid,
+        commit_oid: Oid,
         host: &Hostname,
         app: &str,
         target: &Path,
@@ -98,7 +98,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_ref(&self, refname: &str, oid: git2::Oid, reason: RefUpdate) -> Result<()> {
+    pub fn set_ref(&self, refname: &str, oid: Oid, reason: RefUpdate) -> Result<()> {
         let reflog_msg = match reason {
             RefUpdate::SetTarget => "apply: begin deployment, set target",
             RefUpdate::SetCurrent => "apply: conclude deployment, set current",
@@ -114,11 +114,7 @@ impl Store {
     ///
     /// If `have_commit` is provided, objects reachable from it are excluded,
     /// so only the delta between the two commits is packed.
-    pub fn create_pack(
-        &self,
-        want_commit: git2::Oid,
-        have_commit: Option<git2::Oid>,
-    ) -> Result<Vec<u8>> {
+    pub fn create_pack(&self, want_commit: Oid, have_commit: Option<Oid>) -> Result<Vec<u8>> {
         let mut walk = self.repo.revwalk()?;
         walk.push(want_commit)?;
         if let Some(have) = have_commit {
@@ -150,7 +146,7 @@ impl Store {
     /// Returns an empty set if the app has no `systemd.json`.
     pub fn app_enabled_units(
         &self,
-        app_tree_oid: git2::Oid,
+        app_tree_oid: Oid,
     ) -> Result<std::collections::BTreeSet<String>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
         let entry = match tree.get_name("systemd.json") {
@@ -167,7 +163,7 @@ impl Store {
         &self,
         config_tree: &git2::Tree,
         host: &Hostname,
-    ) -> Result<BTreeMap<String, git2::Oid>> {
+    ) -> Result<BTreeMap<String, Oid>> {
         match config_tree.get_name(&host.0) {
             Some(e) => Ok(tree_entries(&self.repo.find_tree(e.id())?)),
             None => Ok(BTreeMap::new()),
@@ -183,7 +179,7 @@ pub enum RefUpdate {
 }
 
 /// Get the tree entries (name -> oid) one level deep.
-pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
+pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, Oid> {
     let mut entries = BTreeMap::new();
     for entry in tree.iter() {
         if let Some(name) = entry.name() {
@@ -193,7 +189,7 @@ pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, git2::Oid> {
     entries
 }
 
-fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<git2::Oid> {
+fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;

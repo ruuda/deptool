@@ -6,8 +6,9 @@ use std::path::PathBuf;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use git2::Oid;
 
-use crate::prim::{Hostname, Oid};
+use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::Store;
 
@@ -81,12 +82,12 @@ impl HostSession {
             .find_reference("refs/heads/current")
             .ok()
             .map(|r| r.peel_to_commit().expect("current ref points to a commit"))
-            .map(|c| c.id().into())
+            .map(|c| c.id())
     }
 
     fn handle_lock(
         &mut self,
-        expected_current_commit: Option<crate::prim::Oid>,
+        expected_current_commit: Option<Oid>,
         emit_message: &mut impl FnMut(Message),
     ) {
         let lock_path = self.store.get_lock_file_path();
@@ -152,9 +153,7 @@ impl HostSession {
                 let commit = self
                     .current_commit()
                     .expect("RequestObjects implies a current commit exists");
-                let git_oid = git2::Oid::from(&commit);
-                let have = have_commit.as_ref().map(git2::Oid::from);
-                match self.store.create_pack(git_oid, have) {
+                match self.store.create_pack(commit, have_commit) {
                     Ok(bytes) => emit_message(Message::SendPack {
                         pack_data: BASE64.encode(&bytes),
                     }),
@@ -168,8 +167,8 @@ impl HostSession {
 
                 let result = crate::apply::apply_host(
                     &self.store,
-                    git2::Oid::from(&target_commit),
-                    current_commit.map(git2::Oid::from),
+                    target_commit,
+                    current_commit,
                     &self.hostname,
                     &self.apps_dir,
                     &self.unit_dir,

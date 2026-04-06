@@ -5,10 +5,12 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
+use git2::Oid;
+
 use crate::deploy::HostState;
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, UnitChanges, diff_enabled};
-use crate::prim::{Hostname, Oid};
+use crate::prim::Hostname;
 use crate::store::Store;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -77,37 +79,27 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
             match diff {
                 AppDiff::Add { new_tree } => {
                     writeln!(out, "  {} {app}", color.green("+"))?;
-                    for (prefix, file) in
-                        diff_files(&store.repo, empty_tree_oid(), git2::Oid::from(new_tree))?
-                    {
+                    for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
-                    let units = diff_enabled(
-                        &BTreeSet::new(),
-                        &store.app_enabled_units(git2::Oid::from(new_tree))?,
-                    );
+                    let units =
+                        diff_enabled(&BTreeSet::new(), &store.app_enabled_units(*new_tree)?);
                     write_unit_actions(out, &units, color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
-                    let units = diff_enabled(
-                        &store.app_enabled_units(git2::Oid::from(old_tree))?,
-                        &BTreeSet::new(),
-                    );
+                    let units =
+                        diff_enabled(&store.app_enabled_units(*old_tree)?, &BTreeSet::new());
                     write_unit_actions(out, &units, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "  {} {app}", color.yellow("~"))?;
-                    for (prefix, file) in diff_files(
-                        &store.repo,
-                        git2::Oid::from(old_tree),
-                        git2::Oid::from(new_tree),
-                    )? {
+                    for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                     let units = diff_enabled(
-                        &store.app_enabled_units(git2::Oid::from(old_tree))?,
-                        &store.app_enabled_units(git2::Oid::from(new_tree))?,
+                        &store.app_enabled_units(*old_tree)?,
+                        &store.app_enabled_units(*new_tree)?,
                     );
                     write_unit_actions(out, &units, color)?;
                 }
@@ -141,7 +133,7 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
         println!(
             "This will {} to {diverged} {noun}, \
              which may inadvertently reverse previous changes!",
-             color.bold("force-push"),
+            color.bold("force-push"),
         );
     }
 
@@ -179,11 +171,11 @@ fn show_diffs(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) ->
 }
 
 /// Get the tree oid for a host's subtree from a given commit, or the empty tree.
-fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result<git2::Oid> {
+fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result<Oid> {
     match commit {
         None => Ok(empty_tree_oid()),
         Some(oid) => {
-            let tree = store.get_commit_tree(git2::Oid::from(oid))?;
+            let tree = store.get_commit_tree(*oid)?;
             match tree.get_name(&host.0) {
                 Some(tree) => Ok(tree.id()),
                 None => Ok(empty_tree_oid()),
@@ -192,8 +184,8 @@ fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result
     }
 }
 
-fn empty_tree_oid() -> git2::Oid {
-    git2::Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
+fn empty_tree_oid() -> Oid {
+    Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
 fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
@@ -210,11 +202,7 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
 }
 
 /// Diff two app trees, returning (prefix_char, filename) pairs.
-fn diff_files(
-    repo: &git2::Repository,
-    old_oid: git2::Oid,
-    new_oid: git2::Oid,
-) -> Result<Vec<(char, String)>> {
+fn diff_files(repo: &git2::Repository, old_oid: Oid, new_oid: Oid) -> Result<Vec<(char, String)>> {
     let old_tree = repo.find_tree(old_oid)?;
     let new_tree = repo.find_tree(new_oid)?;
     let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
@@ -317,15 +305,10 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::plan::{AppDiff, HostPlan, Plan};
-    use crate::prim::{Hostname, Oid};
+    use crate::prim::Hostname;
     use crate::testutil::TestRepo;
 
-    fn app_tree_oid(
-        repo: &git2::Repository,
-        commit_oid: git2::Oid,
-        host: &str,
-        app: &str,
-    ) -> git2::Oid {
+    fn app_tree_oid(repo: &git2::Repository, commit_oid: Oid, host: &str, app: &str) -> Oid {
         repo.find_commit(commit_oid)
             .unwrap()
             .tree()
@@ -345,9 +328,9 @@ mod tests {
     fn added_app_shows_plus_prefix_with_filenames() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}\n")]);
-        let new_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let plan = Plan {
-            commit: c1.into(),
+            commit: c1,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
@@ -378,9 +361,9 @@ web1
                 br#"{"units_enabled":["nginx.service"]}"#,
             ),
         ]);
-        let new_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let plan = Plan {
-            commit: c1.into(),
+            commit: c1,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
@@ -413,14 +396,14 @@ web1
                 br#"{"units_enabled":["nginx.service"]}"#,
             ),
         ]);
-        let old_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let plan = Plan {
-            commit: c1.into(),
+            commit: c1,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
                     apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
-                    expected_current: Some(c1.into()),
+                    expected_current: Some(c1),
                     is_fast_forward: true,
                 },
             )]),
@@ -441,10 +424,10 @@ web1
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
-        let old_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
-        let new_tree: Oid = app_tree_oid(&t.store.repo, c2, "web1", "nginx").into();
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
         let plan = Plan {
-            commit: c2.into(),
+            commit: c2,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
@@ -452,7 +435,7 @@ web1
                         "nginx".into(),
                         AppDiff::Update { old_tree, new_tree },
                     )]),
-                    expected_current: Some(c1.into()),
+                    expected_current: Some(c1),
                     is_fast_forward: true,
                 },
             )]),
@@ -480,10 +463,10 @@ web1
             ("web1/nginx/nginx.conf", b"v2"),
             ("web1/nginx/systemd.json", systemd_json),
         ]);
-        let old_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
-        let new_tree: Oid = app_tree_oid(&t.store.repo, c2, "web1", "nginx").into();
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
         let plan = Plan {
-            commit: c2.into(),
+            commit: c2,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
@@ -491,7 +474,7 @@ web1
                         "nginx".into(),
                         AppDiff::Update { old_tree, new_tree },
                     )]),
-                    expected_current: Some(c1.into()),
+                    expected_current: Some(c1),
                     is_fast_forward: true,
                 },
             )]),
@@ -512,9 +495,9 @@ web1
     fn diverged_host_shows_warning() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let new_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let plan = Plan {
-            commit: c1.into(),
+            commit: c1,
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {

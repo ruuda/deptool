@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use bpaf::Bpaf;
+use git2::Oid;
 
 use deploy::Connection;
 use error::{Error, Result};
@@ -306,7 +307,7 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             let hostname = read_hostname();
             let mut session = make_host_session(store, hostname);
             let request = protocol::Request::Apply {
-                target_commit: commit.as_str().into(),
+                target_commit: Oid::from_str(&commit)?,
             };
             session.handle_request(request, &mut |response| {
                 eprintln!("{response:?}");

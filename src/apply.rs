@@ -5,6 +5,8 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
+use git2::Oid;
+
 use crate::error::Result;
 use crate::plan::{AppDiff, SystemdConfig, UnitChanges, diff_enabled};
 use crate::prim::Hostname;
@@ -13,7 +15,7 @@ use crate::store::{self, Store};
 const OID_PREFIX_LEN: usize = 10;
 
 /// Truncate an oid to a short prefix for use in directory names.
-fn oid_prefix(oid: git2::Oid) -> String {
+fn oid_prefix(oid: Oid) -> String {
     let mut buf = oid.to_string();
     buf.truncate(OID_PREFIX_LEN);
     buf
@@ -27,7 +29,7 @@ fn oid_prefix(oid: git2::Oid) -> String {
 /// to point to the new checkout.
 pub fn apply_app(
     store: &Store,
-    commit_oid: git2::Oid,
+    commit_oid: Oid,
     host: &Hostname,
     app: &str,
     apps_dir: &Path,
@@ -71,8 +73,8 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// Calls `on_app` for each changed app.
 pub fn apply_host(
     store: &Store,
-    commit_oid: git2::Oid,
-    actual_current: Option<git2::Oid>,
+    commit_oid: Oid,
+    actual_current: Option<Oid>,
     host: &Hostname,
     apps_dir: &Path,
     unit_dir: &Path,
