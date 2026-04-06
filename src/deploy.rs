@@ -688,7 +688,4 @@ mod tests {
 
         Ok(())
     }
-
-    // TODO: Add an integration test that spawns the real deptool binary in
-    // local mode and exercises the full stdin/stdout protocol roundtrip.
 }

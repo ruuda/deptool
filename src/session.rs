@@ -12,6 +12,39 @@ use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::Store;
 
+/// Configuration for a host-side agent session.
+///
+/// Directories have a standard location for production use, but we allow
+/// overriding them with `DEPTOOL_*` environment variables, primarily to aid
+/// testing.
+pub struct AgentConfig {
+    pub hostname: String,
+    pub apps_dir: PathBuf,
+    pub unit_dir: PathBuf,
+}
+
+impl AgentConfig {
+    pub fn from_env() -> Self {
+        let hostname = std::env::var("DEPTOOL_HOSTNAME").unwrap_or_else(|_| {
+            std::fs::read_to_string("/etc/hostname")
+                .unwrap_or("(unknown hostname)".into())
+                .trim()
+                .to_string()
+        });
+        let apps_dir = PathBuf::from(
+            std::env::var("DEPTOOL_APPS_DIR").unwrap_or("/var/lib/deptool/apps".into()),
+        );
+        let unit_dir = PathBuf::from(
+            std::env::var("DEPTOOL_UNIT_DIR").unwrap_or("/etc/systemd/system".into()),
+        );
+        AgentConfig {
+            hostname,
+            apps_dir,
+            unit_dir,
+        }
+    }
+}
+
 /// Try to acquire an exclusive, non-blocking file lock.
 ///
 /// Returns `Ok(true)` if the lock was acquired, `Ok(false)` if it is
@@ -59,7 +92,7 @@ impl HostSession {
     }
 
     /// Create a session for testing that does not touch systemd.
-    #[cfg(test)]
+    #[doc(hidden)]
     pub fn new_test(
         repo: git2::Repository,
         hostname: &str,

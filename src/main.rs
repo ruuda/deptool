@@ -1,18 +1,6 @@
 //! Deptool: a simple declarative deployment tool.
 
-mod apply;
-mod deploy;
-mod display;
-mod error;
-mod plan;
-mod prim;
-mod protocol;
-mod session;
-mod setup;
-mod store;
-
-#[cfg(test)]
-mod testutil;
+use deptool::*;
 
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -101,8 +89,7 @@ enum Cmd {
         /// Allow deploying commits that don't descend from the host's current state.
         #[bpaf(long("force-push"), flag(PushMode::ForcePush, PushMode::ForwardOnly))]
         push_mode: PushMode,
-        /// Run the agent locally instead of over SSH (for testing).
-        #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote))]
+        #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote), hide)]
         mode: DeployMode,
     },
     /// Commands that run on target hosts (used internally over SSH).
@@ -255,15 +242,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-const DEFAULT_APPS_DIR: &str = "/var/lib/deptool/apps";
-const DEFAULT_UNIT_DIR: &str = "/etc/systemd/system";
-
-fn read_hostname() -> String {
-    std::fs::read_to_string("/etc/hostname")
-        .unwrap_or("(unknown hostname)".into())
-        .trim()
-        .to_string()
-}
+use session::AgentConfig;
 
 fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
     std::process::Command::new("systemctl")
@@ -290,12 +269,12 @@ fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
     Ok(())
 }
 
-fn make_host_session(store: Store, hostname: String) -> session::HostSession {
+fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession {
     session::HostSession::new(
         store,
-        prim::Hostname(hostname),
-        PathBuf::from(DEFAULT_APPS_DIR),
-        PathBuf::from(DEFAULT_UNIT_DIR),
+        prim::Hostname(config.hostname.clone()),
+        config.apps_dir.clone(),
+        config.unit_dir.clone(),
         Box::new(systemd_apply_changes),
     )
 }
@@ -304,8 +283,8 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
     match cmd {
         AgentCmd::Apply { store, commit } => {
             let store = Store::open(&store)?;
-            let hostname = read_hostname();
-            let mut session = make_host_session(store, hostname);
+            let config = AgentConfig::from_env();
+            let mut session = make_host_session(store, &config);
             let request = protocol::Request::Apply {
                 target_commit: Oid::from_str(&commit)?,
             };
@@ -326,14 +305,14 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
             }
 
             let store = Store::open_or_init(&store)?;
-            let hostname = read_hostname();
-            let mut session = make_host_session(store, hostname.clone());
+            let config = AgentConfig::from_env();
+            let mut session = make_host_session(store, &config);
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
 
             let hello = protocol::Hello {
                 version: protocol::VERSION.to_string(),
-                hostname,
+                hostname: config.hostname,
             };
             serde_json::to_writer(&mut stdout, &hello)?;
             writeln!(stdout)?;
