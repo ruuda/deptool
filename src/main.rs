@@ -217,19 +217,7 @@ fn run_deploy(
     let mut connections = lock_result.locked;
 
     deploy::push_packs(&repo, &plan, &mut connections, &mut progress)?;
-    deploy::apply_hosts(&plan, &mut connections, &mut progress, |host, message| {
-        if let protocol::Message::ApplyComplete { commit, .. } = &message {
-            let refname = format!("refs/remotes/{host}/current");
-            if let Err(err) = store::set_ref(
-                &repo,
-                &refname,
-                git2::Oid::from(commit),
-                store::RefUpdate::ApplyComplete,
-            ) {
-                eprintln!("{host}: failed to update tracking ref: {err}");
-            }
-        }
-    })?;
+    deploy::apply_hosts(&repo, &plan, &mut connections, &mut progress, |_, _| {})?;
 
     Ok(())
 }

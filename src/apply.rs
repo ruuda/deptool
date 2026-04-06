@@ -274,16 +274,15 @@ fn collect_actual_units(
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::testutil::{TempDir, assert_dir_contents, commit_files};
+    use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     #[test]
     fn apply_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"server {}")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
 
         let prefix = oid_prefix(c1);
         let version_dir = apps.path().join("nginx").join(&prefix);
@@ -298,9 +297,8 @@ mod tests {
 
     #[test]
     fn apply_app_replaces_existing_checkout() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         let apps = TempDir::new("apps");
 
@@ -310,7 +308,7 @@ mod tests {
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -319,19 +317,18 @@ mod tests {
 
     #[test]
     fn apply_app_swaps_symlink_on_update() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
-        let c2 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v2")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
         let apps = TempDir::new("apps");
         let current = apps.path().join("nginx/current");
 
-        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(&repo, c2, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.repo, c2, &"web1".into(), "nginx", apps.path())?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
@@ -344,12 +341,11 @@ mod tests {
 
     #[test]
     fn remove_app_deletes_the_app_directory() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&repo, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(&t.repo, c1, &"web1".into(), "nginx", apps.path())?;
         assert!(apps.path().join("nginx").exists());
 
         remove_app("nginx", apps.path())?;
@@ -464,28 +460,30 @@ mod tests {
 
     #[test]
     fn apply_host_sets_target_and_current_refs() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"v1")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
-        let actual_current_commit = None;
+        let actual_current = None;
+        let on_app = |_: &str, _: &AppDiff| {};
         apply_host(
-            &repo,
+            &t.repo,
             c1,
-            actual_current_commit,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
-            |_, _| {},
+            on_app,
         )?;
 
-        let current = repo
+        let current = t
+            .repo
             .find_reference("refs/heads/current")?
             .peel_to_commit()?
             .id();
-        let target = repo
+        let target = t
+            .repo
             .find_reference("refs/heads/target")?
             .peel_to_commit()?
             .id();
@@ -496,18 +494,17 @@ mod tests {
 
     #[test]
     fn apply_host_reports_per_app_changes() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
+        let actual_current = None;
         let mut applied = Vec::new();
-        let actual_current_commit = None;
         apply_host(
-            &repo,
+            &t.repo,
             c1,
-            actual_current_commit,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
@@ -524,29 +521,26 @@ mod tests {
 
     #[test]
     fn apply_host_only_enables_units_from_systemd_json() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
+        let t = TestRepo::new();
         let systemd_json = br#"{"units_enabled": ["nginx.service"]}"#;
-        let c1 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/systemd/nginx.service", b"[Service]"),
-                ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
-                ("web1/nginx/systemd.json", systemd_json),
-            ],
-        )?;
+        let c1 = t.commit(&[
+            ("web1/nginx/systemd/nginx.service", b"[Service]"),
+            ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
+            ("web1/nginx/systemd.json", systemd_json),
+        ]);
 
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
-        let actual_current_commit = None;
+        let actual_current = None;
+        let on_app = |_: &str, _: &AppDiff| {};
         let changes = apply_host(
-            &repo,
+            &t.repo,
             c1,
-            actual_current_commit,
+            actual_current,
             &"web1".into(),
             apps.path(),
             units.path(),
-            |_, _| {},
+            on_app,
         )?;
 
         // Both units are symlinked (available).

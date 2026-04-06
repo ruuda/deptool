@@ -301,7 +301,7 @@ mod tests {
     use crate::error::Result;
     use crate::plan::{AppDiff, HostPlan, Plan};
     use crate::prim::{Hostname, Oid};
-    use crate::testutil::{TempDir, commit_files};
+    use crate::testutil::TestRepo;
 
     fn app_tree_oid(
         repo: &git2::Repository,
@@ -326,10 +326,9 @@ mod tests {
 
     #[test]
     fn added_app_shows_plus_prefix_with_filenames() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"server {}\n")])?;
-        let new_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}\n")]);
+        let new_tree: Oid = app_tree_oid(&t.repo, c1, "web1", "nginx").into();
         let plan = Plan {
             commit: c1.into(),
             hosts: BTreeMap::from([(
@@ -341,7 +340,7 @@ mod tests {
             )]),
         };
         assert_eq!(
-            render(&repo, &plan)?,
+            render(&t.repo, &plan)?,
             "\
 web1
   + nginx
@@ -353,19 +352,15 @@ web1
 
     #[test]
     fn added_app_with_systemd_shows_enable_action() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/nginx.conf", b"server {}\n"),
-                (
-                    "web1/nginx/systemd.json",
-                    br#"{"units_enabled":["nginx.service"]}"#,
-                ),
-            ],
-        )?;
-        let new_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}\n"),
+            (
+                "web1/nginx/systemd.json",
+                br#"{"units_enabled":["nginx.service"]}"#,
+            ),
+        ]);
+        let new_tree: Oid = app_tree_oid(&t.repo, c1, "web1", "nginx").into();
         let plan = Plan {
             commit: c1.into(),
             hosts: BTreeMap::from([(
@@ -377,7 +372,7 @@ web1
             )]),
         };
         assert_eq!(
-            render(&repo, &plan)?,
+            render(&t.repo, &plan)?,
             "\
 web1
   + nginx
@@ -391,19 +386,15 @@ web1
 
     #[test]
     fn removed_app_shows_minus_prefix_with_disable_action() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/nginx.conf", b"server {}\n"),
-                (
-                    "web1/nginx/systemd.json",
-                    br#"{"units_enabled":["nginx.service"]}"#,
-                ),
-            ],
-        )?;
-        let old_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}\n"),
+            (
+                "web1/nginx/systemd.json",
+                br#"{"units_enabled":["nginx.service"]}"#,
+            ),
+        ]);
+        let old_tree: Oid = app_tree_oid(&t.repo, c1, "web1", "nginx").into();
         let plan = Plan {
             commit: c1.into(),
             hosts: BTreeMap::from([(
@@ -415,7 +406,7 @@ web1
             )]),
         };
         assert_eq!(
-            render(&repo, &plan)?,
+            render(&t.repo, &plan)?,
             "\
 web1
   - nginx
@@ -427,12 +418,11 @@ web1
 
     #[test]
     fn updated_app_shows_tilde_prefix_with_changed_files() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v1")])?;
-        let c2 = commit_files(&repo, &[("web1/nginx/nginx.conf", b"v2")])?;
-        let old_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
-        let new_tree: Oid = app_tree_oid(&repo, c2, "web1", "nginx").into();
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let old_tree: Oid = app_tree_oid(&t.repo, c1, "web1", "nginx").into();
+        let new_tree: Oid = app_tree_oid(&t.repo, c2, "web1", "nginx").into();
         let plan = Plan {
             commit: c2.into(),
             hosts: BTreeMap::from([(
@@ -447,7 +437,7 @@ web1
             )]),
         };
         assert_eq!(
-            render(&repo, &plan)?,
+            render(&t.repo, &plan)?,
             "\
 web1
   ~ nginx
@@ -459,25 +449,18 @@ web1
 
     #[test]
     fn updated_app_with_unchanged_unit_shows_restart_action() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = git2::Repository::init_bare(store.path())?;
+        let t = TestRepo::new();
         let systemd_json = br#"{"units_enabled":["nginx.service"]}"#;
-        let c1 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/nginx.conf", b"v1"),
-                ("web1/nginx/systemd.json", systemd_json),
-            ],
-        )?;
-        let c2 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/nginx.conf", b"v2"),
-                ("web1/nginx/systemd.json", systemd_json),
-            ],
-        )?;
-        let old_tree: Oid = app_tree_oid(&repo, c1, "web1", "nginx").into();
-        let new_tree: Oid = app_tree_oid(&repo, c2, "web1", "nginx").into();
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"v1"),
+            ("web1/nginx/systemd.json", systemd_json),
+        ]);
+        let c2 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"v2"),
+            ("web1/nginx/systemd.json", systemd_json),
+        ]);
+        let old_tree: Oid = app_tree_oid(&t.repo, c1, "web1", "nginx").into();
+        let new_tree: Oid = app_tree_oid(&t.repo, c2, "web1", "nginx").into();
         let plan = Plan {
             commit: c2.into(),
             hosts: BTreeMap::from([(
@@ -492,7 +475,7 @@ web1
             )]),
         };
         assert_eq!(
-            render(&repo, &plan)?,
+            render(&t.repo, &plan)?,
             "\
 web1
   ~ nginx

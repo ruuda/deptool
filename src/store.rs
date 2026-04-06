@@ -170,77 +170,16 @@ pub fn get_host_apps(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-
-    use git2::Repository;
-
-    use super::*;
-    use crate::testutil::{TempDir, commit_files};
-
-    fn read_dir_recursive(root: &Path, dir: &Path) -> Result<Vec<(String, Vec<u8>)>> {
-        let mut result = Vec::new();
-        let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
-        for entry in entries {
-            let ft = entry.file_type()?;
-            if ft.is_dir() {
-                result.extend(read_dir_recursive(root, &entry.path())?);
-            } else if ft.is_file() {
-                let rel = entry
-                    .path()
-                    .strip_prefix(root)
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-                    .to_string();
-                let contents = fs::read(entry.path())?;
-                result.push((rel, contents));
-            }
-        }
-        Ok(result)
-    }
-
-    #[test]
-    fn checkout_after_commit_reproduces_the_app_files() -> Result<()> {
-        let input = TempDir::new("input");
-        fs::create_dir_all(input.path().join("web1/nginx/etc/nginx"))?;
-        fs::write(
-            input.path().join("web1/nginx/etc/nginx/nginx.conf"),
-            "server {}",
-        )?;
-        fs::create_dir_all(input.path().join("web1/rofld/etc/rofld"))?;
-        fs::write(
-            input.path().join("web1/rofld/etc/rofld/config.toml"),
-            "[server]\nport = 8080\n",
-        )?;
-
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-
-        let tree_oid = build_tree(&repo, input.path())?;
-        let commit_oid = commit_tree(&repo, tree_oid)?;
-
-        let output = TempDir::new("output");
-        checkout_app(&repo, commit_oid, &"web1".into(), "nginx", output.path())?;
-
-        let out = output.path();
-        let expected = input.path().join("web1/nginx");
-        assert_eq!(
-            read_dir_recursive(out, out)?,
-            read_dir_recursive(&expected, &expected)?,
-        );
-        Ok(())
-    }
+    use crate::error::Result;
+    use crate::testutil::TestRepo;
 
     #[test]
     fn commit_appends_to_main_branch() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/app/config", b"v1")]);
+        let c2 = t.commit(&[("web1/app/config", b"v2")]);
 
-        let c1 = commit_files(&repo, &[("web1/app/config", b"v1")])?;
-        let c2 = commit_files(&repo, &[("web1/app/config", b"v2")])?;
-
-        let commit = repo.find_commit(c2)?;
+        let commit = t.repo.find_commit(c2)?;
         assert_eq!(commit.parent_count(), 1);
         assert_eq!(commit.parent_id(0)?, c1);
         Ok(())

@@ -224,23 +224,16 @@ pub fn make_plan(repo: &Repository) -> Result<Plan> {
 
 #[cfg(test)]
 mod tests {
-    use git2::Repository;
-
     use super::*;
     use crate::error::Result;
-    use crate::store::{RefUpdate, set_ref};
-    use crate::testutil::{TempDir, commit_files};
+    use crate::testutil::TestRepo;
 
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-        commit_files(
-            &repo,
-            &[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")],
-        )?;
+        let t = TestRepo::new();
+        t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
 
-        let plan = make_plan(&repo)?;
+        let plan = make_plan(&t.repo)?;
         assert_eq!(plan.hosts.len(), 1);
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 2);
@@ -251,25 +244,13 @@ mod tests {
 
     #[test]
     fn plan_detects_updated_and_unchanged_apps() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_files(
-            &repo,
-            &[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")],
-        )?;
-        set_ref(
-            &repo,
-            "refs/remotes/web1/current",
-            c1,
-            RefUpdate::SetCurrent,
-        )?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
 
-        commit_files(
-            &repo,
-            &[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")],
-        )?;
+        t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
-        let plan = make_plan(&repo)?;
+        let plan = make_plan(&t.repo)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["nginx"], AppDiff::Update { .. }));
@@ -278,22 +259,13 @@ mod tests {
 
     #[test]
     fn plan_detects_removed_apps() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_files(
-            &repo,
-            &[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")],
-        )?;
-        set_ref(
-            &repo,
-            "refs/remotes/web1/current",
-            c1,
-            RefUpdate::SetCurrent,
-        )?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
+        t.set_host_tracking_ref("web1", c1);
 
-        commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
+        t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&repo)?;
+        let plan = make_plan(&t.repo)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["rofld"], AppDiff::Remove { .. }));
@@ -302,22 +274,13 @@ mod tests {
 
     #[test]
     fn plan_includes_new_host_alongside_up_to_date_host() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
-        set_ref(
-            &repo,
-            "refs/remotes/web1/current",
-            c1,
-            RefUpdate::SetCurrent,
-        )?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
+        t.set_host_tracking_ref("web1", c1);
 
-        commit_files(
-            &repo,
-            &[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")],
-        )?;
+        t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
-        let plan = make_plan(&repo)?;
+        let plan = make_plan(&t.repo)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
         let apps = &plan.hosts[&"web2".into()].apps;
         assert_eq!(apps.len(), 1);
@@ -327,39 +290,28 @@ mod tests {
 
     #[test]
     fn plan_omits_hosts_that_are_up_to_date() -> Result<()> {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path())?;
-        let c1 = commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
-        set_ref(
-            &repo,
-            "refs/remotes/web1/current",
-            c1,
-            RefUpdate::SetCurrent,
-        )?;
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
+        t.set_host_tracking_ref("web1", c1);
 
-        commit_files(&repo, &[("web1/nginx/conf", b"a")])?;
+        t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&repo)?;
+        let plan = make_plan(&t.repo)?;
         assert!(plan.hosts.is_empty());
         Ok(())
     }
 
     #[test]
     fn validate_rejects_enabled_unit_without_file() {
-        let store = TempDir::new("store");
-        let repo = Repository::init_bare(store.path()).unwrap();
+        let t = TestRepo::new();
         let systemd_json = br#"{"units_enabled": ["ghost.service"]}"#;
-        let c1 = commit_files(
-            &repo,
-            &[
-                ("web1/nginx/systemd/nginx.service", b"[Service]"),
-                ("web1/nginx/systemd.json", systemd_json),
-            ],
-        )
-        .unwrap();
+        let c1 = t.commit(&[
+            ("web1/nginx/systemd/nginx.service", b"[Service]"),
+            ("web1/nginx/systemd.json", systemd_json),
+        ]);
 
-        let tree = repo.find_commit(c1).unwrap().tree().unwrap();
-        let err = validate_systemd_config(&repo, &tree, &"web1".into()).unwrap_err();
+        let tree = t.repo.find_commit(c1).unwrap().tree().unwrap();
+        let err = validate_systemd_config(&t.repo, &tree, &"web1".into()).unwrap_err();
 
         let msg = err.to_string();
         assert!(

@@ -1,13 +1,15 @@
 //! Shared test helpers: temp directories and convenience functions.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use git2::Repository;
 
+use crate::deploy::Connection;
 use crate::error::Result;
+use crate::protocol::{self, Hello, Message, Request};
 use crate::store::commit_tree;
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -58,9 +60,153 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<g
 }
 
 /// Create a commit with the given files, without touching the filesystem.
-pub fn commit_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
+fn commit_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<git2::Oid> {
     let tree_oid = build_tree_from_files(repo, files)?;
     commit_tree(repo, tree_oid)
+}
+
+/// A bare Git repository backed by a temporary directory.
+pub struct TestRepo {
+    pub repo: Repository,
+    _store: TempDir,
+}
+
+impl TestRepo {
+    pub fn new() -> Self {
+        let store = TempDir::new("store");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        TestRepo {
+            repo,
+            _store: store,
+        }
+    }
+
+    /// Create a byte-for-byte copy of another TestRepo's git store.
+    pub fn copy_from(other: &TestRepo) -> Self {
+        let store = TempDir::new("store");
+        fs::remove_dir_all(store.path()).expect("temp dir is removed");
+        std::process::Command::new("cp")
+            .args(["-r"])
+            .arg(other.repo.path())
+            .arg(store.path())
+            .status()
+            .expect("cp succeeds");
+        let repo = Repository::open(store.path()).expect("repo is opened");
+        TestRepo {
+            repo,
+            _store: store,
+        }
+    }
+
+    /// Create a commit with the given files, without touching the filesystem.
+    pub fn commit(&self, files: &[(&str, &[u8])]) -> git2::Oid {
+        commit_files(&self.repo, files).expect("commit succeeds")
+    }
+
+    /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
+    pub fn set_host_tracking_ref(&self, host: &str, commit_oid: git2::Oid) {
+        crate::store::set_ref(
+            &self.repo,
+            &format!("refs/remotes/{host}/current"),
+            commit_oid,
+            crate::store::RefUpdate::SetCurrent,
+        )
+        .expect("ref is set");
+    }
+}
+
+/// A host-side test environment: a bare repo with apps and units directories.
+///
+/// Wraps a `HostSession` and provides helpers for sending requests and
+/// collecting responses.
+pub struct TestHost {
+    pub session: crate::session::HostSession,
+    _store: TempDir,
+    apps: TempDir,
+    units: TempDir,
+}
+
+impl TestHost {
+    /// Create a new host with a fresh bare repo.
+    pub fn new(hostname: &str) -> Self {
+        let store = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let repo = Repository::init_bare(store.path()).expect("repo is created");
+        let session =
+            crate::session::HostSession::new_test(repo, hostname, apps.path(), units.path());
+        TestHost {
+            session,
+            _store: store,
+            apps,
+            units,
+        }
+    }
+
+    pub fn with_commit(hostname: &str, files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
+        let host = Self::new(hostname);
+        let oid = commit_files(&host.session.repo, files).expect("commit succeeds");
+        (host, oid)
+    }
+
+    /// Send a request and collect all response messages.
+    pub fn interact(&mut self, request: Request) -> Vec<Message> {
+        let mut responses = Vec::new();
+        self.session
+            .handle_request(request, &mut |r| responses.push(r));
+        responses
+    }
+
+    /// Create a fresh in-memory connection to this host.
+    ///
+    /// Each call opens the same underlying repo with a new session, like a
+    /// new SSH connection to the same host. The apps and units directories
+    /// are shared across connections, as they would be in production.
+    pub fn connect(&self) -> Box<dyn Connection> {
+        let repo = Repository::open(self.session.repo.path()).expect("repo is opened");
+        let hostname = self.session.hostname.0.clone();
+        let session = crate::session::HostSession::new_test(
+            repo,
+            &hostname,
+            self.apps.path(),
+            self.units.path(),
+        );
+        let hello = Hello {
+            version: protocol::VERSION.to_string(),
+            hostname,
+        };
+        Box::new(LocalConnection {
+            session,
+            hello,
+            message_buffer: VecDeque::new(),
+        })
+    }
+}
+
+/// In-memory connection that wraps a HostSession directly.
+struct LocalConnection {
+    session: crate::session::HostSession,
+    hello: Hello,
+    message_buffer: VecDeque<Message>,
+}
+
+impl Connection for LocalConnection {
+    fn hello(&self) -> &Hello {
+        &self.hello
+    }
+
+    fn send_request(&mut self, request: &Request) -> Result<()> {
+        let buffer = &mut self.message_buffer;
+        self.session
+            .handle_request(request.clone(), &mut |msg| buffer.push_back(msg));
+        Ok(())
+    }
+
+    fn read_message(&mut self) -> Result<Option<Message>> {
+        Ok(self.message_buffer.pop_front())
+    }
+
+    fn close(&mut self) {}
 }
 
 /// Assert that a directory contains exactly the given files with the given contents.
