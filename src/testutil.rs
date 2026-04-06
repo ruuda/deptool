@@ -103,6 +103,18 @@ impl TestRepo {
         commit_files(&self.repo, files).expect("commit succeeds")
     }
 
+    /// Read the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
+    pub fn get_host_tracking_ref(&self, host: &str) -> Option<git2::Oid> {
+        self.repo
+            .find_reference(&format!("refs/remotes/{host}/current"))
+            .ok()
+            .map(|r| {
+                r.peel_to_commit()
+                    .expect("tracking ref points to a commit")
+                    .id()
+            })
+    }
+
     /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
     pub fn set_host_tracking_ref(&self, host: &str, commit_oid: git2::Oid) {
         crate::store::set_ref(
@@ -147,6 +159,19 @@ impl TestHost {
         let host = Self::new(hostname);
         let oid = commit_files(&host.session.repo, files).expect("commit succeeds");
         (host, oid)
+    }
+
+    /// The host-local `refs/heads/current` commit, if any.
+    pub fn get_current(&self) -> Option<git2::Oid> {
+        self.session
+            .repo
+            .find_reference("refs/heads/current")
+            .ok()
+            .map(|r| {
+                r.peel_to_commit()
+                    .expect("current ref points to a commit")
+                    .id()
+            })
     }
 
     /// Send a request and collect all response messages.
