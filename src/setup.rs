@@ -27,10 +27,6 @@ pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> 
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
         &format!("sudo dd status=none of={remote_bin_path}"),
         &format!("sudo chmod +x {remote_bin_path}"),
-        // It would be nice to create the symlink /usr/bin/deptool instead,
-        // but /usr is a read-only filesystem on Flatcar, so we opt to stick
-        // to /var/lib/.
-        &format!("sudo ln -sf {remote_bin_path} /var/lib/deptool/deptool"),
         &format!("sudo sha256sum {remote_bin_path}"),
     ]
     .join(" && ");
