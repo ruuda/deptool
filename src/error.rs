@@ -11,6 +11,7 @@ pub enum Error {
     InvalidConfig(String),
     AgentNotInstalled,
     ConnectionFailed(String),
+    Diverged(crate::prim::Hostname),
     SetupChecksumMismatch {
         expected_hash: String,
         actual_hash: String,
@@ -46,6 +47,11 @@ impl fmt::Display for Error {
             Error::NonUtf8FileName => write!(f, "non-utf8 file name"),
             Error::AgentNotInstalled => write!(f, "agent binary not installed on target host"),
             Error::ConnectionFailed(msg) => write!(f, "{msg}"),
+            Error::Diverged(host) => write!(
+                f,
+                "{host}: deploy is not a fast-forward. \
+                 Pull the latest state, or run with --force-push to override."
+            ),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             Error::SetupChecksumMismatch {
                 expected_hash,

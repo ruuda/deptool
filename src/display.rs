@@ -53,6 +53,13 @@ impl UseColor {
             UseColor::No => text.to_string(),
         }
     }
+
+    fn bold(self, text: &str) -> String {
+        match self {
+            UseColor::Yes => format!("\x1b[1m{text}\x1b[0m"),
+            UseColor::No => text.to_string(),
+        }
+    }
 }
 
 /// The Git empty tree object, used as the base for diffs against new hosts.
@@ -64,7 +71,7 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
         if host_plan.is_fast_forward {
             writeln!(out, "{host}")?;
         } else {
-            writeln!(out, "{} {host}", color.red("!"))?;
+            writeln!(out, "{host} {}", color.red("(diverged)"))?;
         }
         for (app, diff) in &host_plan.apps {
             match diff {
@@ -128,6 +135,16 @@ pub enum Decision {
 /// `d` pages through the full file diff for each host sequentially, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
 pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
+    let diverged = plan.hosts.values().filter(|h| !h.is_fast_forward).count();
+    if diverged > 0 {
+        let noun = if diverged == 1 { "host" } else { "hosts" };
+        println!(
+            "This will {} to {diverged} {noun}, \
+             which may inadvertently reverse previous changes!",
+             color.bold("force-push"),
+        );
+    }
+
     let n = plan.hosts.len();
     let noun = if n == 1 { "host" } else { "hosts" };
     loop {
@@ -486,6 +503,33 @@ web1
   ~ nginx
       ~ nginx.conf
       restart nginx.service
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn diverged_host_shows_warning() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let new_tree: Oid = app_tree_oid(&t.store.repo, c1, "web1", "nginx").into();
+        let plan = Plan {
+            commit: c1.into(),
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    expected_current: None,
+                    is_fast_forward: false,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1 (diverged)
+  + nginx
+      + nginx.conf
 ",
         );
         Ok(())

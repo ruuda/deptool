@@ -58,6 +58,12 @@ enum ConfirmMode {
     ApplyWithoutPrompt,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum PushMode {
+    ForwardOnly,
+    ForcePush,
+}
+
 #[derive(Debug, Clone, Bpaf)]
 enum Cmd {
     /// Record a directory as a new commit in the store.
@@ -92,11 +98,8 @@ enum Cmd {
         )]
         confirm_mode: ConfirmMode,
         /// Allow deploying commits that don't descend from the host's current state.
-        #[bpaf(
-            long("force-push"),
-            flag(plan::PushMode::ForcePush, plan::PushMode::ForwardOnly)
-        )]
-        push_mode: plan::PushMode,
+        #[bpaf(long("force-push"), flag(PushMode::ForcePush, PushMode::ForwardOnly))]
+        push_mode: PushMode,
         /// Run the agent locally instead of over SSH (for testing).
         #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote))]
         mode: DeployMode,
@@ -121,11 +124,11 @@ fn run_deploy(
     remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
-    push_mode: plan::PushMode,
+    push_mode: PushMode,
     mode: DeployMode,
 ) -> Result<()> {
     let repo = Store::open(&store)?;
-    let plan = plan::make_plan(&repo, push_mode)?;
+    let plan = plan::make_plan(&repo)?;
 
     if plan.hosts.is_empty() {
         eprintln!("All hosts are up to date.");
@@ -137,6 +140,15 @@ fn run_deploy(
 
     if plan_only {
         return Ok(());
+    }
+
+    for (host, host_plan) in &plan.hosts {
+        if !host_plan.is_fast_forward {
+            match push_mode {
+                PushMode::ForwardOnly => return Err(Error::Diverged(host.clone())),
+                PushMode::ForcePush => break,
+            }
+        }
     }
 
     let decision = match confirm_mode {
@@ -228,7 +240,14 @@ fn run() -> Result<()> {
             confirm_mode,
             push_mode,
             mode,
-        } => run_deploy(store, remote_store, plan_only, confirm_mode, push_mode, mode)?,
+        } => run_deploy(
+            store,
+            remote_store,
+            plan_only,
+            confirm_mode,
+            push_mode,
+            mode,
+        )?,
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }
 
