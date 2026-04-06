@@ -200,26 +200,8 @@ fn run_deploy(
     let mut printer = display::StatusPrinter::new(color);
     let mut progress =
         deploy::DeployProgress::new(hosts, Box::new(move |states| printer.print(states)));
-    let mut lock_result = deploy::lock_hosts(&plan, connect, install, &mut progress);
 
-    if progress.has_failures() {
-        // Fetch objects from stale hosts over their still-open
-        // sessions so we have the data for the next plan.
-        if let Err(err) = deploy::fetch_stale_objects(&repo, &mut lock_result.stale) {
-            eprintln!("failed to fetch stale objects: {err}");
-        }
-        let n = progress.num_failed();
-        return Err(Error::InvalidConfig(format!(
-            "failed to lock {n} host(s), aborting",
-        )));
-    }
-
-    let mut connections = lock_result.locked;
-
-    deploy::push_packs(&repo, &plan, &mut connections, &mut progress)?;
-    deploy::apply_hosts(&repo, &plan, &mut connections, &mut progress, |_, _| {})?;
-
-    Ok(())
+    deploy::run_deploy(&repo, &plan, connect, install, &mut progress)
 }
 
 fn run() -> Result<()> {

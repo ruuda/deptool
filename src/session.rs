@@ -15,7 +15,7 @@ use crate::protocol::{Message, Request};
 ///
 /// Returns `Ok(true)` if the lock was acquired, `Ok(false)` if it is
 /// already held by another process.
-fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
+pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
     // LOCK_EX = exclusive lock, LOCK_NB = fail immediately instead of blocking.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc == 0 {

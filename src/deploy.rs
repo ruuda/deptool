@@ -406,6 +406,34 @@ pub fn fetch_stale_objects(
     Ok(())
 }
 
+/// Run a full deployment: lock all hosts, push packs, and apply.
+///
+/// If any host fails to lock (stale, busy, or connection error), fetches
+/// objects from stale hosts and aborts without pushing or applying to any
+/// host.
+pub fn run_deploy(
+    repo: &git2::Repository,
+    plan: &Plan,
+    connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
+    install: impl FnMut(&Hostname) -> Result<()>,
+    progress: &mut DeployProgress,
+) -> Result<()> {
+    let mut lock_result = lock_hosts(plan, connect, install, progress);
+
+    if progress.has_failures() {
+        // Fetch objects from stale hosts so we have the data for the next plan.
+        fetch_stale_objects(repo, &mut lock_result.stale)?;
+        let n = progress.num_failed();
+        return Err(Error::InvalidConfig(format!(
+            "failed to lock {n} host(s), aborting",
+        )));
+    }
+
+    push_packs(repo, plan, &mut lock_result.locked, progress)?;
+    apply_hosts(repo, plan, &mut lock_result.locked, progress, |_, _| {})?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -420,39 +448,43 @@ mod tests {
         DeployProgress::new(hosts, Box::new(|_| {}))
     }
 
-    fn single_host_plan(expected_current: Option<Oid>, commit: Oid) -> Plan {
-        Plan {
-            commit,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::new(),
-                    expected_current,
-                },
-            )]),
-        }
-    }
-
-    /// Run a full deploy (lock → push → apply) from driver to target.
-    fn deploy(driver: &TestRepo, target: &TestHost, plan: &Plan) -> Result<()> {
-        let mut progress = test_progress(&["web1"]);
-        let mut lock_result = lock_hosts(
-            plan,
-            |_| Ok(target.connect()),
-            |_| panic!("install not expected"),
-            &mut progress,
+    /// Run a deploy through run_deploy using in-memory connections.
+    fn deploy_to(
+        driver: &TestRepo,
+        targets: &BTreeMap<Hostname, &TestHost>,
+        plan: &Plan,
+    ) -> Result<()> {
+        let mut progress = test_progress(
+            &targets.keys().map(|h| h.0.as_str()).collect::<Vec<_>>(),
         );
-        assert_eq!(lock_result.locked.len(), 1, "lock should succeed");
-        push_packs(&driver.repo, plan, &mut lock_result.locked, &mut progress)?;
-        let on_message = |_: &Hostname, _: Message| {};
-        apply_hosts(
+        run_deploy(
             &driver.repo,
             plan,
-            &mut lock_result.locked,
+            |host| Ok(targets[host].connect()),
+            |_| panic!("install not expected"),
             &mut progress,
-            on_message,
-        )?;
-        Ok(())
+        )
+    }
+
+    fn make_plan(
+        commit: Oid,
+        hosts: &[(&str, Option<Oid>)],
+    ) -> Plan {
+        Plan {
+            commit,
+            hosts: hosts
+                .iter()
+                .map(|(name, expected_current)| {
+                    (
+                        Hostname::from(*name),
+                        HostPlan {
+                            apps: BTreeMap::new(),
+                            expected_current: expected_current.clone(),
+                        },
+                    )
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -462,8 +494,9 @@ mod tests {
         let commit_oid = driver.commit(&[("web1/app/conf", b"hello")]);
 
         let target = TestHost::new("web1");
-        let plan = single_host_plan(None, commit_oid.into());
-        deploy(&driver, &target, &plan)?;
+        let targets = BTreeMap::from([(Hostname::from("web1"), &target)]);
+        let plan = make_plan(commit_oid.into(), &[("web1", None)]);
+        deploy_to(&driver, &targets, &plan)?;
 
         Ok(())
     }
@@ -471,14 +504,15 @@ mod tests {
     #[test]
     fn fetch_resolves_stale_after_concurrent_deploy() -> Result<()> {
         let target = TestHost::new("web1");
+        let targets = BTreeMap::from([(Hostname::from("web1"), &target)]);
         let driver_a = TestRepo::new();
 
         // Driver A deploys v1, pushes pack to target, applies.
         let commit_v1 = driver_a.commit(&[("web1/app/conf", b"v1")]);
-        deploy(
+        deploy_to(
             &driver_a,
-            &target,
-            &single_host_plan(None, commit_v1.into()),
+            &targets,
+            &make_plan(commit_v1.into(), &[("web1", None)]),
         )?;
 
         // Driver B: copy of A at this point (same main, same tracking ref).
@@ -486,45 +520,165 @@ mod tests {
 
         // Driver A deploys v2.
         let commit_v2 = driver_a.commit(&[("web1/app/conf", b"v2")]);
-        deploy(
+        deploy_to(
             &driver_a,
-            &target,
-            &single_host_plan(Some(commit_v1.into()), commit_v2.into()),
+            &targets,
+            &make_plan(commit_v2.into(), &[("web1", Some(commit_v1.into()))]),
         )?;
 
         // Driver B commits v3 (diverges from A's v2) and tries to lock.
         // B's plan still thinks current is commit_v1, but target has commit_v2.
         let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
-        let plan = single_host_plan(Some(commit_v1.into()), commit_v3.into());
+        let plan = make_plan(
+            commit_v3.into(),
+            &[("web1", Some(commit_v1.into()))],
+        );
         let mut progress = test_progress(&["web1"]);
-        let mut lock_result = lock_hosts(
+        let result = run_deploy(
+            &driver_b.repo,
             &plan,
             |_| Ok(target.connect()),
             |_| panic!("install not expected"),
             &mut progress,
         );
 
-        // Lock should report stale: target has commit_v2, not commit_v1.
-        assert!(lock_result.locked.is_empty());
-        assert_eq!(lock_result.stale.len(), 1);
-        assert_eq!(lock_result.stale[0].1.actual_commit, Some(commit_v2.into()));
+        // Deploy should abort because the host is stale.
+        assert!(result.is_err());
 
-        // Driver B doesn't have commit_v2 locally.
-        assert!(
-            driver_b.repo.find_commit(commit_v2).is_err(),
-            "commit_v2 should not exist in driver B yet"
-        );
-
-        // Fetch objects over the stale connection.
-        fetch_stale_objects(&driver_b.repo, &mut lock_result.stale)?;
-
-        // B now has the objects and tracking ref.
+        // But the stale fetch should have brought commit_v2 into driver B.
+        assert!(driver_b.repo.find_commit(commit_v2).is_ok());
         let tracking_ref = driver_b
             .repo
             .find_reference("refs/remotes/web1/current")?
             .peel_to_commit()?;
         assert_eq!(tracking_ref.id(), commit_v2);
-        assert!(driver_b.repo.find_commit(commit_v2).is_ok());
+
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_aborts_if_one_host_is_stale() -> Result<()> {
+        let web1 = TestHost::new("web1");
+        let web2 = TestHost::new("web2");
+        let driver = TestRepo::new();
+
+        // Deploy v1 to both hosts.
+        let commit_v1 = driver.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let targets = BTreeMap::from([
+            (Hostname::from("web1"), &web1),
+            (Hostname::from("web2"), &web2),
+        ]);
+        deploy_to(
+            &driver,
+            &targets,
+            &make_plan(commit_v1.into(), &[("web1", None), ("web2", None)]),
+        )?;
+
+        // Another driver sneaks in and deploys v2 to web1 only.
+        let other = TestRepo::copy_from(&driver);
+        let commit_v2 = other.commit(&[("web1/app/conf", b"v2"), ("web2/app/conf", b"v1")]);
+        let web1_only = BTreeMap::from([(Hostname::from("web1"), &web1)]);
+        deploy_to(
+            &other,
+            &web1_only,
+            &make_plan(commit_v2.into(), &[("web1", Some(commit_v1.into()))]),
+        )?;
+
+        // Our driver tries to deploy v3 to both hosts. web1 is stale, web2 is fine.
+        let commit_v3 = driver.commit(&[("web1/app/conf", b"v3"), ("web2/app/conf", b"v3")]);
+        let plan = make_plan(
+            commit_v3.into(),
+            &[
+                ("web1", Some(commit_v1.into())),
+                ("web2", Some(commit_v1.into())),
+            ],
+        );
+        let mut progress = test_progress(&["web1", "web2"]);
+        let result = run_deploy(
+            &driver.repo,
+            &plan,
+            |host| Ok(targets[host].connect()),
+            |_| panic!("install not expected"),
+            &mut progress,
+        );
+
+        // Deploy should abort: web1 is stale.
+        assert!(result.is_err());
+
+        // web2 should NOT have been modified despite being lockable.
+        let web2_current = web2
+            .session
+            .repo
+            .find_reference("refs/heads/current")
+            .expect("web2 has a current ref")
+            .peel_to_commit()
+            .expect("ref points to a commit")
+            .id();
+        assert_eq!(web2_current, commit_v1, "web2 should still be at v1");
+
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_aborts_if_host_is_busy() -> Result<()> {
+        let target = TestHost::new("web1");
+        let driver = TestRepo::new();
+        let commit = driver.commit(&[("web1/app/conf", b"v1")]);
+
+        // Simulate another driver holding the lock.
+        let lock_path = target.session.repo.path().join("deptool.lock");
+        let lock_holder = std::fs::File::create(&lock_path).expect("lock file is created");
+        assert!(
+            crate::session::try_flock_exclusive(&lock_holder).expect("flock succeeds"),
+            "lock is acquired",
+        );
+
+        let plan = make_plan(commit.into(), &[("web1", None)]);
+        let mut progress = test_progress(&["web1"]);
+        let result = run_deploy(
+            &driver.repo,
+            &plan,
+            |_| Ok(target.connect()),
+            |_| panic!("install not expected"),
+            &mut progress,
+        );
+
+        assert!(result.is_err());
+
+        drop(lock_holder);
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_aborts_if_one_host_fails_to_connect() -> Result<()> {
+        let web1 = TestHost::new("web1");
+        let driver = TestRepo::new();
+        let commit = driver.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+
+        let plan = make_plan(
+            commit.into(),
+            &[("web1", None), ("web2", None)],
+        );
+        let mut progress = test_progress(&["web1", "web2"]);
+        let result = run_deploy(
+            &driver.repo,
+            &plan,
+            |host| match host.0.as_str() {
+                "web1" => Ok(web1.connect()),
+                _ => Err(Error::AgentNotInstalled),
+            },
+            |_| Err(Error::InvalidConfig("install failed".into())),
+            &mut progress,
+        );
+
+        // Deploy aborts because web2 failed.
+        assert!(result.is_err());
+
+        // web1 should NOT have been modified.
+        assert!(
+            web1.session.repo.find_reference("refs/heads/current").is_err(),
+            "web1 should not have been deployed to",
+        );
 
         Ok(())
     }
