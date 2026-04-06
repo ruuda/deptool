@@ -637,7 +637,7 @@ mod tests {
         let commit = driver.commit(&[("web1/app/conf", b"v1")]);
 
         // Simulate another driver holding the lock.
-        let lock_path = target.session.store.repo.path().join("deptool.lock");
+        let lock_path = target.session.store.get_lock_file_path();
         let lock_holder = std::fs::File::create(&lock_path).expect("lock file is created");
         assert!(
             crate::session::try_flock_exclusive(&lock_holder).expect("flock succeeds"),

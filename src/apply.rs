@@ -80,13 +80,13 @@ pub fn apply_host(
 ) -> Result<UnitChanges> {
     store.set_ref("refs/heads/target", commit_oid, store::RefUpdate::SetTarget)?;
 
-    let target_tree = store.repo.find_commit(commit_oid)?.tree()?;
+    let target_tree = store.get_commit_tree(commit_oid)?;
     let target_apps = store.get_host_apps(&target_tree, host)?;
 
     let (current_tree, current_apps) = match actual_current {
         None => (None, BTreeMap::new()),
         Some(oid) => {
-            let tree = store.repo.find_commit(oid)?.tree()?;
+            let tree = store.get_commit_tree(oid)?;
             let apps = store.get_host_apps(&tree, host)?;
             (Some(tree), apps)
         }

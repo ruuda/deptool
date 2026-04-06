@@ -89,7 +89,7 @@ impl HostSession {
         expected_current_commit: Option<crate::prim::Oid>,
         emit_message: &mut impl FnMut(Message),
     ) {
-        let lock_path = self.store.repo.path().join("deptool.lock");
+        let lock_path = self.store.get_lock_file_path();
         let file = match File::create(&lock_path) {
             Ok(f) => f,
             Err(err) => {
@@ -267,7 +267,7 @@ mod tests {
         let mut host = TestHost::new("web1");
 
         // Acquire the lock from another file descriptor.
-        let lock_path = host.session.store.repo.path().join("deptool.lock");
+        let lock_path = host.session.store.get_lock_file_path();
         let lock_holder = File::create(&lock_path).expect("lock file is created");
         assert!(
             try_flock_exclusive(&lock_holder).expect("flock succeeds"),

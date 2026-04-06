@@ -123,23 +123,6 @@ pub fn diff_apps(
     changes
 }
 
-/// Read the enabled units from an app tree's `systemd.json`.
-///
-/// Returns an empty set if the app has no `systemd.json`.
-pub fn app_enabled_units(
-    repo: &git2::Repository,
-    app_tree_oid: git2::Oid,
-) -> Result<BTreeSet<String>> {
-    let tree = repo.find_tree(app_tree_oid)?;
-    let entry = match tree.get_name("systemd.json") {
-        Some(entry) => entry,
-        None => return Ok(BTreeSet::new()),
-    };
-    let blob = repo.find_blob(entry.id())?;
-    let config: SystemdConfig = serde_json::from_slice(blob.content())?;
-    Ok(config.units_enabled.into_iter().collect())
-}
-
 /// Validate that every unit in `systemd.json` has a file in `systemd/`.
 fn validate_systemd_config(store: &Store, config_tree: &git2::Tree, host: &Hostname) -> Result<()> {
     let apps = store.get_host_apps(config_tree, host)?;
@@ -313,7 +296,7 @@ mod tests {
             ("web1/nginx/systemd.json", systemd_json),
         ]);
 
-        let tree = t.store.repo.find_commit(c1).unwrap().tree().unwrap();
+        let tree = t.store.get_commit_tree(c1).unwrap();
         let err = validate_systemd_config(&t.store, &tree, &"web1".into()).unwrap_err();
 
         let msg = err.to_string();

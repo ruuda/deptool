@@ -35,6 +35,16 @@ impl Store {
         Ok(Store { repo })
     }
 
+    /// The on-disk path to the bare repo directory.
+    pub fn path(&self) -> &Path {
+        self.repo.path()
+    }
+
+    /// Get the tree for a commit.
+    pub fn get_commit_tree(&self, commit_oid: git2::Oid) -> Result<git2::Tree<'_>> {
+        Ok(self.repo.find_commit(commit_oid)?.tree()?)
+    }
+
     /// Recursively build a Git tree from a directory on disk.
     pub fn build_tree(&self, dir: &Path) -> Result<git2::Oid> {
         build_tree_recursive(&self.repo, dir)
@@ -128,6 +138,28 @@ impl Store {
         std::io::Write::write_all(&mut writer, data)?;
         writer.commit()?;
         Ok(())
+    }
+
+    /// Path to the deploy lock file in the repo directory.
+    pub fn get_lock_file_path(&self) -> std::path::PathBuf {
+        self.path().join("deptool.lock")
+    }
+
+    /// Read the enabled units from an app tree's `systemd.json`.
+    ///
+    /// Returns an empty set if the app has no `systemd.json`.
+    pub fn app_enabled_units(
+        &self,
+        app_tree_oid: git2::Oid,
+    ) -> Result<std::collections::BTreeSet<String>> {
+        let tree = self.repo.find_tree(app_tree_oid)?;
+        let entry = match tree.get_name("systemd.json") {
+            Some(entry) => entry,
+            None => return Ok(std::collections::BTreeSet::new()),
+        };
+        let blob = self.repo.find_blob(entry.id())?;
+        let config: crate::plan::SystemdConfig = serde_json::from_slice(blob.content())?;
+        Ok(config.units_enabled.into_iter().collect())
     }
 
     /// Get the app tree oids for a host from a config tree.

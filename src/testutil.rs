@@ -87,7 +87,7 @@ impl TestRepo {
         fs::remove_dir_all(dir.path()).expect("temp dir is removed");
         std::process::Command::new("cp")
             .args(["-r"])
-            .arg(other.store.repo.path())
+            .arg(other.store.path())
             .arg(dir.path())
             .status()
             .expect("cp succeeds");
@@ -159,7 +159,7 @@ impl TestHost {
     pub fn with_commit(hostname: &str, files: &[(&str, &[u8])]) -> (Self, git2::Oid) {
         let host = Self::new(hostname);
         // Open the same repo as a Store to create the commit.
-        let store = Store::open(host.session.store.repo.path()).expect("repo is opened");
+        let store = Store::open(host.session.store.path()).expect("repo is opened");
         let oid = commit_files(&store, files).expect("commit succeeds");
         (host, oid)
     }
@@ -192,7 +192,7 @@ impl TestHost {
     /// new SSH connection to the same host. The apps and units directories
     /// are shared across connections, as they would be in production.
     pub fn connect(&self) -> Box<dyn Connection> {
-        let repo = Repository::open(self.session.store.repo.path()).expect("repo is opened");
+        let repo = Repository::open(self.session.store.path()).expect("repo is opened");
         let hostname = self.session.hostname.0.clone();
         let session = crate::session::HostSession::new_test(
             repo,

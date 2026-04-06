@@ -7,7 +7,7 @@ use std::process::Command;
 
 use crate::deploy::HostState;
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, UnitChanges, app_enabled_units, diff_enabled};
+use crate::plan::{AppDiff, Plan, UnitChanges, diff_enabled};
 use crate::prim::{Hostname, Oid};
 use crate::store::Store;
 
@@ -73,14 +73,14 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                     let units = diff_enabled(
                         &BTreeSet::new(),
-                        &app_enabled_units(&store.repo, git2::Oid::from(new_tree))?,
+                        &store.app_enabled_units(git2::Oid::from(new_tree))?,
                     );
                     write_unit_actions(out, &units, color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
                     let units = diff_enabled(
-                        &app_enabled_units(&store.repo, git2::Oid::from(old_tree))?,
+                        &store.app_enabled_units(git2::Oid::from(old_tree))?,
                         &BTreeSet::new(),
                     );
                     write_unit_actions(out, &units, color)?;
@@ -95,8 +95,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                     let units = diff_enabled(
-                        &app_enabled_units(&store.repo, git2::Oid::from(old_tree))?,
-                        &app_enabled_units(&store.repo, git2::Oid::from(new_tree))?,
+                        &store.app_enabled_units(git2::Oid::from(old_tree))?,
+                        &store.app_enabled_units(git2::Oid::from(new_tree))?,
                     );
                     write_unit_actions(out, &units, color)?;
                 }
@@ -162,7 +162,7 @@ fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result
     match commit {
         None => Ok(empty_tree_oid()),
         Some(oid) => {
-            let tree = store.repo.find_commit(git2::Oid::from(oid))?.tree()?;
+            let tree = store.get_commit_tree(git2::Oid::from(oid))?;
             match tree.get_name(&host.0) {
                 Some(tree) => Ok(tree.id()),
                 None => Ok(empty_tree_oid()),
