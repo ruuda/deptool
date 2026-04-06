@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use git2::{Oid, Repository};
+use git2::{Commit, Oid, Repository, Tree};
 
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
@@ -41,7 +41,7 @@ impl Store {
     }
 
     /// Get the tree for a commit.
-    pub fn get_commit_tree(&self, commit_oid: Oid) -> Result<git2::Tree<'_>> {
+    pub fn get_commit_tree(&self, commit_oid: Oid) -> Result<Tree<'_>> {
         Ok(self.repo.find_commit(commit_oid)?.tree()?)
     }
 
@@ -67,7 +67,7 @@ impl Store {
             .ok()
             .map(|r| r.peel_to_commit())
             .transpose()?;
-        let parents: Vec<&git2::Commit> = parent.iter().collect();
+        let parents: Vec<&Commit> = parent.iter().collect();
 
         Ok(self.repo.commit(
             Some("refs/heads/main"),
@@ -161,7 +161,7 @@ impl Store {
     /// Get the app tree oids for a host from a config tree.
     pub fn get_host_apps(
         &self,
-        config_tree: &git2::Tree,
+        config_tree: &Tree,
         host: &Hostname,
     ) -> Result<BTreeMap<String, Oid>> {
         match config_tree.get_name(&host.0) {
@@ -179,7 +179,7 @@ pub enum RefUpdate {
 }
 
 /// Get the tree entries (name -> oid) one level deep.
-pub fn tree_entries(tree: &git2::Tree) -> BTreeMap<String, Oid> {
+pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
     let mut entries = BTreeMap::new();
     for entry in tree.iter() {
         if let Some(name) = entry.name() {

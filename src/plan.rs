@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use git2::Oid;
+use git2::{Oid, Tree};
 use serde::{Deserialize, Serialize};
 
 #[derive(Deserialize)]
@@ -134,7 +134,7 @@ pub fn diff_apps(
 }
 
 /// Validate that every unit in `systemd.json` has a file in `systemd/`.
-fn validate_systemd_config(store: &Store, config_tree: &git2::Tree, host: &Hostname) -> Result<()> {
+fn validate_systemd_config(store: &Store, config_tree: &Tree, host: &Hostname) -> Result<()> {
     let apps = store.get_host_apps(config_tree, host)?;
     for (app, app_tree_oid) in &apps {
         let app_tree = store.repo.find_tree(*app_tree_oid)?;

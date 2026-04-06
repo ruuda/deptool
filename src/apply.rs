@@ -5,7 +5,7 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::Path;
 
-use git2::Oid;
+use git2::{Oid, Tree};
 
 use crate::error::Result;
 use crate::plan::{AppDiff, SystemdConfig, UnitChanges, diff_enabled};
@@ -176,7 +176,7 @@ fn reconcile_symlinks(
 /// to their absolute path under `apps_dir/<app>/current/systemd/`.
 fn collect_desired_units(
     store: &Store,
-    config_tree: &git2::Tree,
+    config_tree: &Tree,
     host: &Hostname,
     apps_dir: &Path,
 ) -> Result<BTreeMap<String, std::path::PathBuf>> {
@@ -208,7 +208,7 @@ fn collect_desired_units(
 /// If an app has no `systemd.json`, none of its units are enabled.
 fn collect_enabled_units(
     store: &Store,
-    config_tree: &git2::Tree,
+    config_tree: &Tree,
     host: &Hostname,
     filter_apps: &BTreeSet<&str>,
 ) -> Result<BTreeSet<String>> {

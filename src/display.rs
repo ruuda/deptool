@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
-use git2::Oid;
+use git2::{Delta, Oid, Repository};
 
 use crate::deploy::HostState;
 use crate::error::Result;
@@ -202,7 +202,7 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
 }
 
 /// Diff two app trees, returning (prefix_char, filename) pairs.
-fn diff_files(repo: &git2::Repository, old_oid: Oid, new_oid: Oid) -> Result<Vec<(char, String)>> {
+fn diff_files(repo: &Repository, old_oid: Oid, new_oid: Oid) -> Result<Vec<(char, String)>> {
     let old_tree = repo.find_tree(old_oid)?;
     let new_tree = repo.find_tree(new_oid)?;
     let diff = repo.diff_tree_to_tree(Some(&old_tree), Some(&new_tree), None)?;
@@ -211,8 +211,8 @@ fn diff_files(repo: &git2::Repository, old_oid: Oid, new_oid: Oid) -> Result<Vec
     diff.foreach(
         &mut |delta, _| {
             let prefix = match delta.status() {
-                git2::Delta::Added => '+',
-                git2::Delta::Deleted => '-',
+                Delta::Added => '+',
+                Delta::Deleted => '-',
                 _ => '~',
             };
             let path = delta
@@ -308,7 +308,7 @@ mod tests {
     use crate::prim::Hostname;
     use crate::testutil::TestRepo;
 
-    fn app_tree_oid(repo: &git2::Repository, commit_oid: Oid, host: &str, app: &str) -> Oid {
+    fn app_tree_oid(repo: &Repository, commit_oid: Oid, host: &str, app: &str) -> Oid {
         repo.find_commit(commit_oid)
             .unwrap()
             .tree()
