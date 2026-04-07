@@ -211,7 +211,11 @@ impl HostSession {
             Request::Apply { target_commit } => {
                 let current_commit = self.current_commit();
 
-                let operator = &self.lock.as_ref().expect("lock is held during apply").operator;
+                let operator = &self
+                    .lock
+                    .as_ref()
+                    .expect("lock is held during apply")
+                    .operator;
                 let result = apply_host(
                     &self.store,
                     target_commit,

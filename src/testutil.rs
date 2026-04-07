@@ -74,11 +74,8 @@ pub struct TestRepo {
 impl TestRepo {
     pub fn new() -> Self {
         let dir = TempDir::new("store");
-        let repo = Repository::init_bare(dir.path()).expect("repo is created");
-        TestRepo {
-            store: Store { repo },
-            _dir: dir,
-        }
+        let store = Store::open_or_init(dir.path()).expect("store is created");
+        TestRepo { store, _dir: dir }
     }
 
     /// Create a byte-for-byte copy of another TestRepo's git store.

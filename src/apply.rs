@@ -458,27 +458,51 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
+    /// Test harness for `apply_host` calls.
+    struct ApplyTest {
+        repo: TestRepo,
+        apps: TempDir,
+        units: TempDir,
+    }
+
+    impl ApplyTest {
+        fn new() -> Self {
+            Self {
+                repo: TestRepo::new(),
+                apps: TempDir::new("apps"),
+                units: TempDir::new("units"),
+            }
+        }
+
+        fn apply(
+            &self,
+            commit: git2::Oid,
+            current: Option<git2::Oid>,
+            on_app: impl FnMut(&str, &AppDiff),
+        ) -> Result<UnitChanges> {
+            let operator = "deckard@spinner";
+            apply_host(
+                &self.repo.store,
+                commit,
+                current,
+                &"web1".into(),
+                self.apps.path(),
+                self.units.path(),
+                operator,
+                on_app,
+            )
+        }
+    }
+
     #[test]
     fn apply_host_sets_target_ref() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
 
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let actual_current = None;
-        let on_app = |_: &str, _: &AppDiff| {};
-        apply_host(
-            &t.store,
-            c1,
-            actual_current,
-            &"web1".into(),
-            apps.path(),
-            units.path(),
-            "deckard@spinner",
-            on_app,
-        )?;
+        t.apply(c1, None, |_, _| {})?;
 
         let target = t
+            .repo
             .store
             .repo
             .find_reference("refs/heads/target")?
@@ -488,32 +512,44 @@ mod tests {
 
         // The `current` ref is *not* updated by apply_host, it's only updated
         // all the way at the end after other system mutations.
-        assert!(t.store.repo.find_reference("refs/heads/current").is_err());
+        assert!(
+            t.repo
+                .store
+                .repo
+                .find_reference("refs/heads/current")
+                .is_err()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn apply_host_writes_operator_to_reflog() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
+
+        t.apply(c1, None, |_, _| {})?;
+
+        let reflog = t.repo.store.repo.reflog("refs/heads/target")?;
+        let entry = reflog.get(0).expect("reflog has an entry");
+        let message = entry.message().expect("reflog message is valid utf-8");
+        assert!(
+            message.contains("deckard@spinner"),
+            "reflog message should contain operator: {message}",
+        );
 
         Ok(())
     }
 
     #[test]
     fn apply_host_reports_per_app_changes() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let actual_current = None;
         let mut applied = Vec::new();
-        apply_host(
-            &t.store,
-            c1,
-            actual_current,
-            &"web1".into(),
-            apps.path(),
-            units.path(),
-            "deckard@spinner",
-            |app, diff| {
-                applied.push((app.to_string(), diff.clone()));
-            },
-        )?;
+        t.apply(c1, None, |app, diff| {
+            applied.push((app.to_string(), diff.clone()));
+        })?;
 
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].0, "nginx");
@@ -523,32 +559,21 @@ mod tests {
 
     #[test]
     fn apply_host_only_enables_units_from_systemd_json() -> Result<()> {
-        let t = TestRepo::new();
-        let systemd_json = br#"{"units_enabled": ["nginx.service"]}"#;
-        let c1 = t.commit(&[
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
             ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
-            ("web1/nginx/systemd.json", systemd_json),
+            (
+                "web1/nginx/systemd.json",
+                br#"{"units_enabled": ["nginx.service"]}"#,
+            ),
         ]);
 
-        let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
-        let actual_current = None;
-        let on_app = |_: &str, _: &AppDiff| {};
-        let changes = apply_host(
-            &t.store,
-            c1,
-            actual_current,
-            &"web1".into(),
-            apps.path(),
-            units.path(),
-            "deckard@spinner",
-            on_app,
-        )?;
+        let changes = t.apply(c1, None, |_, _| {})?;
 
         // Both units are symlinked (available).
-        assert!(units.path().join("nginx.service").is_symlink());
-        assert!(units.path().join("nginx-reload.timer").is_symlink());
+        assert!(t.units.path().join("nginx.service").is_symlink());
+        assert!(t.units.path().join("nginx-reload.timer").is_symlink());
         // Only the enabled one gets an enable action.
         assert_eq!(changes.enable, vec!["nginx.service"]);
         assert!(changes.restart.is_empty());
