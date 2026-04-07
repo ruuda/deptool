@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use bpaf::Bpaf;
-use git2::Oid;
 
 use deploy::Connection;
 use error::{Error, Result};
@@ -16,16 +15,6 @@ use store::Store;
 
 #[derive(Debug, Clone, Bpaf)]
 enum AgentCmd {
-    /// Apply a single commit and exit.
-    #[bpaf(command)]
-    Apply {
-        /// Path to the bare Git store.
-        #[bpaf(positional("STORE"))]
-        store: PathBuf,
-        /// Commit hash to apply.
-        #[bpaf(positional("COMMIT"))]
-        commit: String,
-    },
     /// Start an interactive session over stdin/stdout.
     #[bpaf(command)]
     Session {
@@ -281,17 +270,6 @@ fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession
 
 fn run_agent(cmd: AgentCmd) -> Result<()> {
     match cmd {
-        AgentCmd::Apply { store, commit } => {
-            let store = Store::open(&store)?;
-            let config = AgentConfig::from_env();
-            let mut session = make_host_session(store, &config);
-            let request = protocol::Request::Apply {
-                target_commit: Oid::from_str(&commit)?,
-            };
-            session.handle_request(request, &mut |response| {
-                eprintln!("{response:?}");
-            });
-        }
         AgentCmd::Session { store } => {
             // Since we install the exact agent binary that the driver needs on
             // demand, versions can pile up on the target host (especially
