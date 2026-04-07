@@ -465,7 +465,7 @@ pub fn run_deploy(
         // Fetch objects from stale hosts so we have the data for the next plan.
         fetch_stale_objects(store, &mut lock_result.stale)?;
         let n = progress.num_failed();
-        return Err(Error::InvalidConfig(format!(
+        return Err(Error::DeployFailed(format!(
             "failed to lock {n} host(s), aborting",
         )));
     }
