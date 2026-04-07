@@ -127,6 +127,8 @@ pub enum Decision {
 /// `d` pages through the full file diff for each host sequentially, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
 pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
+    println!();
+
     let diverged = plan.hosts.values().filter(|h| !h.is_fast_forward).count();
     if diverged > 0 {
         let noun = if diverged == 1 { "host" } else { "hosts" };
@@ -140,7 +142,7 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
     let n = plan.hosts.len();
     let noun = if n == 1 { "host" } else { "hosts" };
     loop {
-        print!("\nApply to {n} {noun}? [y/N/d] ");
+        print!("Apply to {n} {noun}? [y/N/d] ");
         io::stdout().flush()?;
 
         let mut input = String::new();
