@@ -25,12 +25,13 @@
  - Keep testability in mind from the start. Functional approaches (pure core, IO at the edge) are often more feasible to test than imperative code.
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
- - For large tasks, run `git diff` at the end and review your own work.
+ - For large tasks, run `git diff` at the end and review your own work. It is very unlikely that you got a perfect version on your very first iteration, usually there are substantial things to change.
  - I will review your changes afterwards, so optimize for small reviewable diffs. Do not change comments or code without a good reason.
  - If it gets complex, typecheck at intermediate points with `cargo check --quiet`.
  - If the changes touch a test or code covered by tests, confirm with `cargo test --quiet`.
  - If the changes are not covered by a test, ask yourself, should they be? Not everything makes sense to test.
  - Run `cargo fmt --quiet` at the end on Rust code, `black --quiet` on Python code.
+ - After a task is complete (I will tell you when it is, after you address my comments), reflect on the conversation. Are there any generic learnings? Update CLAUDE.md or your memory to prevent future instances of you from making the same mistakes.
 
 ## Reviewing your own work
 
@@ -65,3 +66,4 @@
  - In assertions and `.expect()`, the message is the thing you expect to be true.
  - Doc comments should have a 1-line summary that fits in 80-ish columns, and then optionally a body separated from the summary by a blank line.
  - Use `.expect()` for logically impossible states and programming errors. Reserve `Result`/`Error` for expected runtime failures.
+ - Comments start with a capital and use regular punctuation. Use *stars* for emphasis, not ALL CAPS. If you must use em-dashes at all, write them as -- in comments (but not in doc comments).
