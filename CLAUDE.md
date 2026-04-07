@@ -1,30 +1,67 @@
-## General instructions
+## Interaction with me
 
  - Be brief.
- - Prefer more small steps over throwing walls of text at me.
- - Keep the diff small if possible to aid review.
- - Do not Git commit, I will do that once I'm satisfied with a change.
- - Always use `rcl` for json processing, it's better suiter for this than `jq`.
- - Run `cargo test --quiet` to avoid verbose output. Do not run `cargo fmt`.
- - Feel free to update this file when I give relevant instructions.
+ - Don't throw walls of text at me. Break things down in steps and ask me one thing at a time.
 
-## Current project priorities
+## Agent notes
 
- - We are rapidly prototying a tool that needs to work only for me, in my very specific situation. This is not a generic tool that needs to handle every edge case of everybody on the internet.
- - I am the only user and I aim to understand the codebase, so optimize for simple code over extensive error reporting.
- - We build incrementally. Start with the minimum viable thing, we'll extend it later. Do not prematurely generalize or complicate, we can't predict what parts will need to be changed later, just optimize for making things easy to change.
- - The readme is not law. If we discover flaws in the design while implementing, we can change the design.
- - Do pull in external dependencies without permission, which will only be granted if there is a good justification.
+ - Use quiet modes to avoid polluting your context window with irrelevant tool output. E.g. use `--quiet` on `cargo {test,check,fmt}`.
+ - By your nature you are overconfident in your knowledge. Don't trust, verify. Read man pages, check tool behavior where possible.
+ - However, tool calls are not a substitute for thinking. Form a hypothesis before verifying.
+ - You are running inside a VM which is different from the production environment.
+ - Avoid cryptic Bash tool calls, they are hard for me to review for permission checks.
+ - Always use `rcl` for json processing, it's better suited for this than `jq`.
 
-## Coding standards
+## Project details
 
- - Rust for the main "production" code, Python for utilities and test drivers etc. if needed.
- - Ensure Rust code is formatted with `cargo format` and Python code with `black`.
- - Ensure Rust code typechecks with `cargo check`, and Python with `mypy --strict`.
+ - This tool is for expert users (me) who can debug and understand the source. I will be watching the tool while it runs.
+ - That means that a crash is _relatively_ not as bad as in a long-running daemon.
+ - Therefore, optimize for code simplicity and readability over fancy tool output.
+ - It needs to work for me on my laptop and cluster. This is not a generic tool that needs to work for every possible user on the planet.
+ - We build incrementally with a short feedback loop. Make it work first, we'll make it fancy later. Do not prematurely complicate or generalize, make it easy to change later.
+
+## Working through a task
+
+ - Keep testability in mind from the start. Functional approaches (pure core, IO at the edge) are often more feasible to test than imperative code.
+ - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
+ - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
+ - For large tasks, run `git diff` at the end and review your own work.
+ - I will review your changes afterwards, so optimize for small reviewable diffs. Do not change comments or code without a good reason.
+ - If it gets complex, typecheck at intermediate points with `cargo check --quiet`.
+ - If the changes touch a test or code covered by tests, confirm with `cargo test --quiet`.
+ - If the changes are not covered by a test, ask yourself, should they be? Not everything makes sense to test.
+ - Run `cargo fmt --quiet` at the end on Rust code, `black --quiet` on Python code.
+
+## Reviewing your own work
+
+ - Is it correct?
+ - Can it be simpler or more elegant?
+ - Code is a liability, can we achieve the same with less code?
+ - Does new code duplicate something that already exists in the codebase?
+ - Is it obvious to a reader with little context? Can it be made more obvious?
+
+## Working with Git
+
+ - Git is available.
+ - Do not commit. I will do that at logical points on our behalf.
+ - Before embarking on a large task, record the current Git head, so you can later review what you did against that commit.
+ - For large tasks, check the intermediate status with `git diff --shortstat` or `git diff --numstat`.
+ - Negative diffstats are good. Codebase growth needs to be justified. Ask yourself whether the lines spent are well-spent.
+ - Don't game the line stats. Redability is more important than line count.
+
+## Code style
+
+ - Optimize for readability.
+ - Aim for self-documenting code, use comments when the purpose or workings of a piece of code is not obvious.
+ - Simpler is more readable than complex.
+ - Linear is more readable than branchy.
+ - Name things after what they are and do, not after their purpose.
+ - A reader who does not know the function args by heart can't tell what a call site like `frobnicate(true, None, 32)` does. Extract arguments into named variables when needed, prefer enums with descriptive names if possible.
+ - At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
+ - Prefer plain `match` over fancy method chains.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Property-based tests are better than mere examples.
- - Testing things with side effects is hard. Separating IO from pure parts usually makes things easier to test, and it makes the tests faster and mores table.
+ - Prefer global imports over excessive qualification for types.
  - In assertions and `.expect()`, the message is the thing you expect to be true.
- - Avoid the boolean parameter trap. At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
- - Rust doc comments should have a 1-line summary that fits in 80-ish columns, and then optionally a body separated from the summary by a blank line.
- - Use `.expect()` for logically impossible states and programming errors. Reserve `Result`/`Error` for genuine runtime failures the user needs to see.
+ - Doc comments should have a 1-line summary that fits in 80-ish columns, and then optionally a body separated from the summary by a blank line.
+ - Use `.expect()` for logically impossible states and programming errors. Reserve `Result`/`Error` for expected runtime failures.
