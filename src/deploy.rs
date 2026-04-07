@@ -335,15 +335,10 @@ pub fn apply_hosts(
         };
         conn.send_request(&request)?;
         conn.close();
-        let mut had_systemd_failure = false;
         while let Some(message) = conn.read_message()? {
             match &message {
                 Message::ApplyComplete { commit, .. } => {
-                    let state = match had_systemd_failure {
-                        true => HostState::Failed("systemd unit change failed".into()),
-                        false => HostState::Done,
-                    };
-                    progress.update(host, state);
+                    progress.update(host, HostState::Done);
                     store.set_ref(
                         &format!("refs/remotes/{host}/current"),
                         *commit,
@@ -351,7 +346,6 @@ pub fn apply_hosts(
                     )?;
                 }
                 Message::SystemdUnitChangeFailed { unit, operation } => {
-                    had_systemd_failure = true;
                     progress.log_message(host, &format!("{operation} {unit}: failed"));
                 }
                 Message::SystemdUnitStatus { output } => {

@@ -246,9 +246,11 @@ fn systemd_apply_changes(
     }
 
     let mut touched: Vec<&str> = Vec::new();
+    let mut had_failure = false;
     for unit in &changes.enable {
         touched.push(unit);
         if !systemctl_ok(&["enable", "--now", unit]) {
+            had_failure = true;
             emit(protocol::Message::SystemdUnitChangeFailed {
                 unit: unit.clone(),
                 operation: "enable".into(),
@@ -258,6 +260,7 @@ fn systemd_apply_changes(
     for unit in &changes.restart {
         touched.push(unit);
         if !systemctl_ok(&["restart", unit]) {
+            had_failure = true;
             emit(protocol::Message::SystemdUnitChangeFailed {
                 unit: unit.clone(),
                 operation: "restart".into(),
@@ -280,7 +283,13 @@ fn systemd_apply_changes(
         emit(protocol::Message::SystemdUnitStatus { output });
     }
 
-    Ok(())
+    if had_failure {
+        Err(error::Error::AgentError(
+            "one or more systemd unit changes failed".into(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn systemctl_ok(args: &[&str]) -> bool {

@@ -126,14 +126,10 @@ pub fn apply_host(
     let target_enabled = collect_enabled_units(store, &target_tree, host, &changed_apps)?;
     let unit_changes = diff_enabled(&prev_enabled, &target_enabled);
 
-    // TODO: This ref update happens before systemd enable/disable, so a
-    // failure there leaves the host in a state that doesn't match the ref.
-    // Move this after systemd operations, or make it a two-phase update.
-    store.set_ref(
-        "refs/heads/current",
-        commit_oid,
-        store::RefUpdate::SetCurrent,
-    )?;
+    // We don't update refs/heads/current here. There is more to do (enabling
+    // and disabling systemd units), and if that fails, we don't want the
+    // `current` ref to say that the deploy was done while it was in fact
+    // unfinished. It's better for it to be behind than ahead.
 
     Ok(unit_changes)
 }
@@ -458,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_host_sets_target_and_current_refs() -> Result<()> {
+    fn apply_host_sets_target_ref() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
 
@@ -476,20 +472,18 @@ mod tests {
             on_app,
         )?;
 
-        let current = t
-            .store
-            .repo
-            .find_reference("refs/heads/current")?
-            .peel_to_commit()?
-            .id();
         let target = t
             .store
             .repo
             .find_reference("refs/heads/target")?
             .peel_to_commit()?
             .id();
-        assert_eq!(current, c1);
         assert_eq!(target, c1);
+
+        // The `current` ref is *not* updated by apply_host, it's only updated
+        // all the way at the end after other system mutations.
+        assert!(t.store.repo.find_reference("refs/heads/current").is_err());
+
         Ok(())
     }
 

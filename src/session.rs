@@ -13,7 +13,7 @@ use crate::error::Result;
 use crate::plan::UnitChanges;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
-use crate::store::Store;
+use crate::store::{RefUpdate, Store};
 
 /// Configuration for a host-side agent session.
 ///
@@ -229,11 +229,15 @@ impl HostSession {
                 if !unit_changes.is_empty() {
                     if let Err(err) = (self.on_units_changed)(&unit_changes, emit_message) {
                         emit_message(Message::Error {
-                            message: format!("systemd restart failed: {err}"),
+                            message: format!("systemd unit change failed: {err}"),
                         });
                         return;
                     }
                 }
+
+                self.store
+                    .set_ref("refs/heads/current", target_commit, RefUpdate::SetCurrent)
+                    .expect("updating current ref succeeds while we hold the lock");
 
                 emit_message(Message::ApplyComplete {
                     commit: target_commit,
@@ -249,7 +253,6 @@ impl HostSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::RefUpdate;
     use crate::testutil::TestHost;
 
     #[test]

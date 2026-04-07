@@ -13,6 +13,7 @@ pub enum Error {
     ConnectionFailed(String),
     Diverged(crate::prim::Hostname),
     DeployFailed(String),
+    AgentError(String),
     SetupChecksumMismatch {
         expected_hash: String,
         actual_hash: String,
@@ -59,6 +60,7 @@ impl fmt::Display for Error {
             ),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
             Error::DeployFailed(msg) => write!(f, "{msg}"),
+            Error::AgentError(msg) => write!(f, "{msg}"),
             Error::SetupChecksumMismatch {
                 expected_hash,
                 actual_hash,
