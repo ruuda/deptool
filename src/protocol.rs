@@ -42,6 +42,15 @@ pub enum Message {
         actual_commit: Option<Oid>,
     },
     LockBusy,
+    /// A systemd enable/restart/disable operation failed.
+    SystemdUnitChangeFailed {
+        unit: String,
+        operation: String,
+    },
+    /// Output of `systemctl status` for systemd units that were just changed.
+    SystemdUnitStatus {
+        output: String,
+    },
     AppliedApp {
         app: String,
         diff: crate::plan::AppDiff,

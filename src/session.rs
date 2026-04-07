@@ -8,6 +8,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
+use crate::apply::apply_host;
+use crate::error::Result;
+use crate::plan::UnitChanges;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::Store;
@@ -68,7 +71,7 @@ pub struct HostSession {
     pub hostname: Hostname,
     apps_dir: PathBuf,
     unit_dir: PathBuf,
-    on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
+    on_units_changed: Box<dyn Fn(&UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>,
     /// Held for the session lifetime to prevent concurrent deploys.
     lock_file: Option<File>,
 }
@@ -79,7 +82,7 @@ impl HostSession {
         hostname: Hostname,
         apps_dir: PathBuf,
         unit_dir: PathBuf,
-        on_units_changed: Box<dyn Fn(&crate::plan::UnitChanges) -> crate::error::Result<()>>,
+        on_units_changed: Box<dyn Fn(&UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>,
     ) -> Self {
         HostSession {
             store,
@@ -99,7 +102,7 @@ impl HostSession {
         apps_dir: &std::path::Path,
         unit_dir: &std::path::Path,
     ) -> Self {
-        let on_units_changed = Box::new(|_: &_| Ok(()));
+        let on_units_changed = Box::new(|_: &_, _: &mut dyn FnMut(Message)| Ok(()));
         HostSession::new(
             Store { repo },
             hostname.into(),
@@ -198,7 +201,7 @@ impl HostSession {
             Request::Apply { target_commit } => {
                 let current_commit = self.current_commit();
 
-                let result = crate::apply::apply_host(
+                let result = apply_host(
                     &self.store,
                     target_commit,
                     current_commit,
@@ -224,7 +227,7 @@ impl HostSession {
                 };
 
                 if !unit_changes.is_empty() {
-                    if let Err(err) = (self.on_units_changed)(&unit_changes) {
+                    if let Err(err) = (self.on_units_changed)(&unit_changes, emit_message) {
                         emit_message(Message::Error {
                             message: format!("systemd restart failed: {err}"),
                         });

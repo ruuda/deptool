@@ -56,24 +56,31 @@ impl std::fmt::Display for HostState {
     }
 }
 
-/// Tracks per-host deploy state, calling `on_change` after each update.
+/// Receives deploy events for display or logging.
+pub trait DeployObserver {
+    fn state_changed(&mut self, states: &BTreeMap<Hostname, HostState>);
+    fn log_message(&mut self, states: &BTreeMap<Hostname, HostState>, host: &Hostname, text: &str);
+}
+
+/// Tracks per-host deploy state, notifying an observer on changes.
 pub struct DeployProgress {
     states: BTreeMap<Hostname, HostState>,
-    on_change: Box<dyn FnMut(&BTreeMap<Hostname, HostState>)>,
+    observer: Box<dyn DeployObserver>,
 }
 
 impl DeployProgress {
-    pub fn new(
-        hosts: Vec<Hostname>,
-        on_change: Box<dyn FnMut(&BTreeMap<Hostname, HostState>)>,
-    ) -> Self {
+    pub fn new(hosts: Vec<Hostname>, observer: Box<dyn DeployObserver>) -> Self {
         let states = hosts.into_iter().map(|h| (h, HostState::Pending)).collect();
-        Self { states, on_change }
+        Self { states, observer }
     }
 
     pub fn update(&mut self, host: &Hostname, state: HostState) {
         *self.states.get_mut(host).expect("host is in the plan") = state;
-        (self.on_change)(&self.states);
+        self.observer.state_changed(&self.states);
+    }
+
+    pub fn log_message(&mut self, host: &Hostname, text: &str) {
+        self.observer.log_message(&self.states, host, text);
     }
 
     pub fn has_failures(&self) -> bool {
@@ -320,7 +327,6 @@ pub fn apply_hosts(
     plan: &Plan,
     connections: &mut [(Hostname, Box<dyn Connection>)],
     progress: &mut DeployProgress,
-    mut on_message: impl FnMut(&Hostname, Message),
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
         progress.update(host, HostState::Applying);
@@ -329,16 +335,30 @@ pub fn apply_hosts(
         };
         conn.send_request(&request)?;
         conn.close();
+        let mut had_systemd_failure = false;
         while let Some(message) = conn.read_message()? {
-            if let Message::ApplyComplete { ref commit, .. } = message {
-                progress.update(host, HostState::Done);
-                store.set_ref(
-                    &format!("refs/remotes/{host}/current"),
-                    *commit,
-                    RefUpdate::ApplyComplete,
-                )?;
+            match &message {
+                Message::ApplyComplete { commit, .. } => {
+                    let state = match had_systemd_failure {
+                        true => HostState::Failed("systemd unit change failed".into()),
+                        false => HostState::Done,
+                    };
+                    progress.update(host, state);
+                    store.set_ref(
+                        &format!("refs/remotes/{host}/current"),
+                        *commit,
+                        RefUpdate::ApplyComplete,
+                    )?;
+                }
+                Message::SystemdUnitChangeFailed { unit, operation } => {
+                    had_systemd_failure = true;
+                    progress.log_message(host, &format!("{operation} {unit}: failed"));
+                }
+                Message::SystemdUnitStatus { output } => {
+                    progress.log_message(host, output.trim_end());
+                }
+                _ => {}
             }
-            on_message(host, message);
         }
     }
     Ok(())
@@ -451,7 +471,7 @@ pub fn run_deploy(
     }
 
     push_packs(store, plan, &mut lock_result.locked, progress)?;
-    apply_hosts(store, plan, &mut lock_result.locked, progress, |_, _| {})?;
+    apply_hosts(store, plan, &mut lock_result.locked, progress)?;
     Ok(())
 }
 
@@ -461,9 +481,15 @@ mod tests {
     use crate::plan::HostPlan;
     use crate::testutil::{TestHost, TestRepo};
 
+    struct NoopObserver;
+    impl DeployObserver for NoopObserver {
+        fn state_changed(&mut self, _: &BTreeMap<Hostname, HostState>) {}
+        fn log_message(&mut self, _: &BTreeMap<Hostname, HostState>, _: &Hostname, _: &str) {}
+    }
+
     fn test_progress(hosts: &[&str]) -> DeployProgress {
         let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
-        DeployProgress::new(hosts, Box::new(|_| {}))
+        DeployProgress::new(hosts, Box::new(NoopObserver))
     }
 
     /// Run a deploy through run_deploy using in-memory connections.

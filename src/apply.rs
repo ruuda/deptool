@@ -126,6 +126,9 @@ pub fn apply_host(
     let target_enabled = collect_enabled_units(store, &target_tree, host, &changed_apps)?;
     let unit_changes = diff_enabled(&prev_enabled, &target_enabled);
 
+    // TODO: This ref update happens before systemd enable/disable, so a
+    // failure there leaves the host in a state that doesn't match the ref.
+    // Move this after systemd operations, or make it a two-phase update.
     store.set_ref(
         "refs/heads/current",
         commit_oid,

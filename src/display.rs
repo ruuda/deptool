@@ -7,7 +7,7 @@ use std::process::Command;
 
 use git2::{Delta, Oid, Repository};
 
-use crate::deploy::HostState;
+use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, UnitChanges, diff_enabled};
 use crate::prim::Hostname;
@@ -251,6 +251,16 @@ impl StatusPrinter {
             .expect("stdout is writable");
     }
 
+    fn erase_status_block(&mut self, out: &mut impl Write, n: usize) -> Result<()> {
+        if self.rendered {
+            for _ in 0..n {
+                write!(out, "\x1b[1A\x1b[2K")?;
+            }
+            self.rendered = false;
+        }
+        Ok(())
+    }
+
     fn render(
         &mut self,
         out: &mut impl Write,
@@ -287,6 +297,21 @@ impl StatusPrinter {
         }
     }
 
+    fn render_log_message(
+        &mut self,
+        out: &mut impl Write,
+        states: &BTreeMap<Hostname, HostState>,
+        host: &Hostname,
+        text: &str,
+    ) -> Result<()> {
+        self.erase_status_block(out, states.len())?;
+        write!(out, "{host}: {text}")?;
+        if !text.ends_with('\n') {
+            writeln!(out)?;
+        }
+        self.render(out, states)
+    }
+
     /// Render to a buffer, for testing.
     #[cfg(test)]
     fn render_to_string(&mut self, states: &BTreeMap<Hostname, HostState>) -> String {
@@ -294,6 +319,17 @@ impl StatusPrinter {
         self.render(&mut buf, states)
             .expect("writing to Vec never fails");
         String::from_utf8(buf).expect("output is utf-8")
+    }
+}
+
+impl DeployObserver for StatusPrinter {
+    fn state_changed(&mut self, states: &BTreeMap<Hostname, HostState>) {
+        self.print(states);
+    }
+
+    fn log_message(&mut self, states: &BTreeMap<Hostname, HostState>, host: &Hostname, text: &str) {
+        self.render_log_message(&mut io::stdout(), states, host, text)
+            .expect("stdout is writable");
     }
 }
 
@@ -584,6 +620,36 @@ web1 (diverged)
 \x1b[2K  backend:  connecting
 \x1b[2K  frontend: locked
 ",
+        );
+    }
+
+    #[test]
+    fn log_message_erases_status_block_and_re_renders() {
+        let mut printer = StatusPrinter::new(UseColor::No);
+        let states = BTreeMap::from([
+            (Hostname::from("web1"), HostState::Applying),
+            (Hostname::from("web2"), HostState::Done),
+        ]);
+        printer.render_to_string(&states);
+
+        let mut buf = Vec::new();
+        printer
+            .render_log_message(
+                &mut buf,
+                &states,
+                &Hostname::from("web1"),
+                "app.service\n  Active: active\n",
+            )
+            .expect("render succeeds");
+        let output = String::from_utf8(buf).expect("output is utf-8");
+
+        assert_eq!(
+            output,
+            "\
+\x1b[1A\x1b[2K\x1b[1A\x1b[2K\
+web1: app.service\n  Active: active\n\
+\x1b[2K  web1: applying\n\
+\x1b[2K  web2: done\n",
         );
     }
 }

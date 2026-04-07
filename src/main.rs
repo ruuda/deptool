@@ -193,9 +193,8 @@ fn run_deploy(
         |host: &Hostname| -> Result<()> { setup::install_binary(host, &remote_bin_path, &binary) };
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
-    let mut printer = display::StatusPrinter::new(color);
-    let mut progress =
-        deploy::DeployProgress::new(hosts, Box::new(move |states| printer.print(states)));
+    let printer = display::StatusPrinter::new(color);
+    let mut progress = deploy::DeployProgress::new(hosts, Box::new(printer));
 
     deploy::run_deploy(&repo, &plan, connect, install, &mut progress)
 }
@@ -233,7 +232,10 @@ fn run() -> Result<()> {
 
 use session::AgentConfig;
 
-fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
+fn systemd_apply_changes(
+    changes: &plan::UnitChanges,
+    emit: &mut dyn FnMut(protocol::Message),
+) -> error::Result<()> {
     std::process::Command::new("systemctl")
         .arg("daemon-reload")
         .status()?;
@@ -242,20 +244,50 @@ fn systemd_apply_changes(changes: &plan::UnitChanges) -> error::Result<()> {
             .args(["disable", "--now", unit])
             .status()?;
     }
+
+    let mut touched: Vec<&str> = Vec::new();
     for unit in &changes.enable {
-        std::process::Command::new("systemctl")
-            .args(["enable", "--now", unit])
-            .status()?;
+        touched.push(unit);
+        if !systemctl_ok(&["enable", "--now", unit]) {
+            emit(protocol::Message::SystemdUnitChangeFailed {
+                unit: unit.clone(),
+                operation: "enable".into(),
+            });
+        }
     }
     for unit in &changes.restart {
-        std::process::Command::new("systemctl")
-            .args(["restart", unit])
-            .status()?;
+        touched.push(unit);
+        if !systemctl_ok(&["restart", unit]) {
+            emit(protocol::Message::SystemdUnitChangeFailed {
+                unit: unit.clone(),
+                operation: "restart".into(),
+            });
+        }
     }
-    // TODO: Capture `systemctl status <unit>` output and report it
-    // back to the operator, so they can see startup logs or failure
-    // reasons without having to SSH in.
+
+    if !touched.is_empty() {
+        // Let services initialize before capturing status, so the
+        // output includes meaningful state rather than just "activating".
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let output = match std::process::Command::new("systemctl")
+            .arg("status")
+            .args(&touched)
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Err(err) => format!("failed to run systemctl status: {err}"),
+        };
+        emit(protocol::Message::SystemdUnitStatus { output });
+    }
+
     Ok(())
+}
+
+fn systemctl_ok(args: &[&str]) -> bool {
+    std::process::Command::new("systemctl")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession {
