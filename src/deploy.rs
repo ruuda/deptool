@@ -26,7 +26,7 @@ pub enum HostState {
     Applying,
     Done,
     Stale,
-    LockBusy,
+    LockBusy(Option<String>),
     Failed(String),
 }
 
@@ -34,7 +34,7 @@ impl HostState {
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
-            HostState::Stale | HostState::LockBusy | HostState::Failed(_)
+            HostState::Stale | HostState::LockBusy(_) | HostState::Failed(_)
         )
     }
 }
@@ -50,7 +50,8 @@ impl std::fmt::Display for HostState {
             HostState::Applying => f.write_str("applying"),
             HostState::Done => f.write_str("done"),
             HostState::Stale => f.write_str("stale"),
-            HostState::LockBusy => f.write_str("locked by another deploy"),
+            HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
+            HostState::LockBusy(None) => f.write_str("locked by another deploy"),
             HostState::Failed(reason) => write!(f, "failed: {reason}"),
         }
     }
@@ -308,8 +309,8 @@ pub fn lock_hosts(
                     },
                 ));
             }
-            Ok(Some(Message::LockBusy)) => {
-                progress.update(host, HostState::LockBusy);
+            Ok(Some(Message::LockBusy { held_by })) => {
+                progress.update(host, HostState::LockBusy(held_by));
             }
             other => {
                 progress.update(
@@ -674,7 +675,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert_eq!(*progress.state("web1"), HostState::LockBusy);
+        assert!(matches!(progress.state("web1"), HostState::LockBusy(_)));
 
         drop(lock_holder);
         Ok(())

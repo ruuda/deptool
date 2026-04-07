@@ -43,7 +43,10 @@ pub enum Message {
         #[serde(with = "crate::prim::ser::oid_option")]
         actual_commit: Option<Oid>,
     },
-    LockBusy,
+    LockBusy {
+        /// Who currently holds the lock, if known.
+        held_by: Option<String>,
+    },
     /// A systemd enable/restart/disable operation failed.
     SystemdUnitChangeFailed {
         unit: String,

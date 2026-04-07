@@ -132,7 +132,13 @@ impl HostSession {
         emit_message: &mut impl FnMut(Message),
     ) {
         let lock_path = self.store.get_lock_file_path();
-        let file = match File::create(&lock_path) {
+        let mut file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+        {
             Ok(f) => f,
             Err(err) => {
                 emit_message(Message::Error {
@@ -142,11 +148,18 @@ impl HostSession {
             }
         };
 
+        use std::io::{Read, Seek, Write};
+
         match try_flock_exclusive(&file) {
             Ok(false) => {
-                // TODO: Read operator identity from the lockfile so we can
-                // report *who* holds the lock in the LockBusy message.
-                emit_message(Message::LockBusy);
+                let mut held_by = String::new();
+                file.read_to_string(&mut held_by).ok();
+                let held_by = if held_by.is_empty() {
+                    None
+                } else {
+                    Some(held_by)
+                };
+                emit_message(Message::LockBusy { held_by });
                 return;
             }
             Err(err) => {
@@ -157,6 +170,13 @@ impl HostSession {
             }
             Ok(true) => {}
         }
+
+        // Write operator identity so concurrent deployers can see who
+        // holds the lock. Not atomic, so a racing reader could see a
+        // partial write, but this is best-effort operator feedback.
+        file.set_len(0).expect("truncating lockfile succeeds");
+        file.rewind().expect("seeking lockfile succeeds");
+        let _ = write!(&file, "{operator}");
 
         let actual_current_commit = self.current_commit();
         if actual_current_commit != expected_current_commit {
@@ -318,22 +338,29 @@ mod tests {
     }
 
     #[test]
-    fn lock_reports_busy_when_already_held() {
+    fn lock_reports_busy_with_holder_identity() {
         let mut host = TestHost::new("web1");
 
-        // Acquire the lock from another file descriptor.
+        // Simulate another deployer holding the lock.
         let lock_path = host.session.store.get_lock_file_path();
         let lock_holder = File::create(&lock_path).expect("lock file is created");
         assert!(
             try_flock_exclusive(&lock_holder).expect("flock succeeds"),
             "lock is acquired",
         );
+        use std::io::Write;
+        write!(&lock_holder, "roy@nexus").expect("write succeeds");
 
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
             operator: "deckard@spinner".into(),
         });
-        assert_eq!(responses, vec![Message::LockBusy]);
+        assert_eq!(
+            responses,
+            vec![Message::LockBusy {
+                held_by: Some("roy@nexus".into()),
+            }],
+        );
 
         drop(lock_holder);
     }
