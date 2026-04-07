@@ -239,6 +239,7 @@ pub struct LockResult {
 /// deploys.
 pub fn lock_hosts(
     plan: &Plan,
+    operator: &str,
     mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
     mut install: impl FnMut(&Hostname) -> Result<()>,
     progress: &mut DeployProgress,
@@ -281,6 +282,7 @@ pub fn lock_hosts(
 
         let lock_request = Request::Lock {
             expected_current_commit: host_plan.expected_current.clone(),
+            operator: operator.to_string(),
         };
         if let Err(err) = conn.send_request(&lock_request) {
             progress.update(host, HostState::Failed(err.to_string()));
@@ -449,11 +451,12 @@ pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -
 pub fn run_deploy(
     store: &Store,
     plan: &Plan,
+    operator: &str,
     connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
     install: impl FnMut(&Hostname) -> Result<()>,
     progress: &mut DeployProgress,
 ) -> Result<()> {
-    let mut lock_result = lock_hosts(plan, connect, install, progress);
+    let mut lock_result = lock_hosts(plan, operator, connect, install, progress);
 
     if progress.has_failures() {
         // Fetch objects from stale hosts so we have the data for the next plan.
@@ -493,6 +496,7 @@ mod tests {
         run_deploy(
             &driver.store,
             plan,
+            "deckard@spinner",
             |host| {
                 let target = targets
                     .iter()
@@ -569,6 +573,7 @@ mod tests {
         let result = run_deploy(
             &driver_b.store,
             &plan,
+            "deckard@spinner",
             |_| Ok(target.connect()),
             |_| panic!("install not expected"),
             &mut progress,
@@ -619,6 +624,7 @@ mod tests {
         let result = run_deploy(
             &driver.store,
             &plan,
+            "deckard@spinner",
             |host| match host.0.as_str() {
                 "web1" => Ok(web1.connect()),
                 "web2" => Ok(web2.connect()),
@@ -661,6 +667,7 @@ mod tests {
         let result = run_deploy(
             &driver.store,
             &plan,
+            "deckard@spinner",
             |_| Ok(target.connect()),
             |_| panic!("install not expected"),
             &mut progress,
@@ -685,6 +692,7 @@ mod tests {
         let result = run_deploy(
             &driver.store,
             &plan,
+            "deckard@spinner",
             |host| match host.0.as_str() {
                 "web1" => Ok(web1.connect()),
                 other => Err(Error::ConnectionFailed(format!(

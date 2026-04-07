@@ -310,11 +310,12 @@ mod tests {
 
         // Reset main back to c1 so the next commit branches from c1,
         // not from c2. This simulates our local repo diverging.
-        // SetCurrent is semantically wrong here (it's meant for the host-side
-        // current ref, not for resetting main), but there's no RefUpdate
-        // variant for this — it only affects the reflog message.
+        // There is no correct RefUpdate for this ref update because we
+        // construct this situation artificially in the tests. It's not
+        // worth adding a RefUpdate that is only used in tests, so we'll
+        // abuse FetchStale here.
         t.store
-            .set_ref("refs/heads/main", c1, crate::store::RefUpdate::SetCurrent)?;
+            .set_ref("refs/heads/main", c1, crate::store::RefUpdate::FetchStale)?;
         t.commit(&[("web1/nginx/conf", b"v3")]);
 
         // The new commit descends from c1, but the host has c2. Not a fast-forward.

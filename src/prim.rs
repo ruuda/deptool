@@ -64,3 +64,11 @@ impl fmt::Display for Hostname {
         f.write_str(&self.0)
     }
 }
+
+/// Read the local machine's hostname from `/etc/hostname`.
+pub fn read_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .unwrap_or_else(|_| "unknown".into())
+        .trim()
+        .to_string()
+}

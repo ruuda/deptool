@@ -192,11 +192,15 @@ fn run_deploy(
     let install =
         |host: &Hostname| -> Result<()> { setup::install_binary(host, &remote_bin_path, &binary) };
 
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let hostname = prim::read_hostname();
+    let operator = format!("{user}@{hostname}");
+
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let printer = display::StatusPrinter::new(color);
     let mut progress = deploy::DeployProgress::new(hosts, Box::new(printer));
 
-    deploy::run_deploy(&repo, &plan, connect, install, &mut progress)
+    deploy::run_deploy(&repo, &plan, &operator, connect, install, &mut progress)
 }
 
 fn run() -> Result<()> {
@@ -239,14 +243,18 @@ fn systemd_apply_changes(
     std::process::Command::new("systemctl")
         .arg("daemon-reload")
         .status()?;
-    for unit in &changes.disable {
-        std::process::Command::new("systemctl")
-            .args(["disable", "--now", unit])
-            .status()?;
-    }
-
     let mut touched: Vec<&str> = Vec::new();
     let mut had_failure = false;
+    for unit in &changes.disable {
+        touched.push(unit);
+        if !systemctl_ok(&["disable", "--now", unit]) {
+            had_failure = true;
+            emit(protocol::Message::SystemdUnitChangeFailed {
+                unit: unit.clone(),
+                operation: "disable".into(),
+            });
+        }
+    }
     for unit in &changes.enable {
         touched.push(unit);
         if !systemctl_ok(&["enable", "--now", unit]) {

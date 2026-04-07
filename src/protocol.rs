@@ -11,6 +11,8 @@ pub enum Request {
     Lock {
         #[serde(with = "crate::prim::ser::oid_option")]
         expected_current_commit: Option<Oid>,
+        /// Who initiated the deploy (e.g. "deckard@spinner").
+        operator: String,
     },
     /// Receive a base64-encoded packfile into the store.
     ReceivePack { pack_data: String },

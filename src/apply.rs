@@ -78,9 +78,14 @@ pub fn apply_host(
     host: &Hostname,
     apps_dir: &Path,
     unit_dir: &Path,
+    operator: &str,
     mut on_app: impl FnMut(&str, &AppDiff),
 ) -> Result<UnitChanges> {
-    store.set_ref("refs/heads/target", commit_oid, store::RefUpdate::SetTarget)?;
+    store.set_ref(
+        "refs/heads/target",
+        commit_oid,
+        store::RefUpdate::SetTarget { operator },
+    )?;
 
     let target_tree = store.get_commit_tree(commit_oid)?;
     let target_apps = store.get_host_apps(&target_tree, host)?;
@@ -469,6 +474,7 @@ mod tests {
             &"web1".into(),
             apps.path(),
             units.path(),
+            "deckard@spinner",
             on_app,
         )?;
 
@@ -503,6 +509,7 @@ mod tests {
             &"web1".into(),
             apps.path(),
             units.path(),
+            "deckard@spinner",
             |app, diff| {
                 applied.push((app.to_string(), diff.clone()));
             },
@@ -535,6 +542,7 @@ mod tests {
             &"web1".into(),
             apps.path(),
             units.path(),
+            "deckard@spinner",
             on_app,
         )?;
 

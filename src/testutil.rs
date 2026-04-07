@@ -122,7 +122,7 @@ impl TestRepo {
             .set_ref(
                 &format!("refs/remotes/{host}/current"),
                 commit_oid,
-                RefUpdate::SetCurrent,
+                RefUpdate::ApplyComplete,
             )
             .expect("ref is set");
     }
@@ -162,6 +162,20 @@ impl TestHost {
         let store = Store::open(host.session.store.path()).expect("repo is opened");
         let oid = commit_files(&store, files).expect("commit succeeds");
         (host, oid)
+    }
+
+    /// Set the host-local `refs/heads/current` ref.
+    pub fn set_current(&self, commit_oid: Oid) {
+        self.session
+            .store
+            .set_ref(
+                "refs/heads/current",
+                commit_oid,
+                RefUpdate::SetCurrent {
+                    operator: "deckard@spinner",
+                },
+            )
+            .expect("ref is set");
     }
 
     /// The host-local `refs/heads/current` commit, if any.

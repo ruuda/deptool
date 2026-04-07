@@ -100,13 +100,17 @@ impl Store {
 
     pub fn set_ref(&self, refname: &str, oid: Oid, reason: RefUpdate) -> Result<()> {
         let reflog_msg = match reason {
-            RefUpdate::SetTarget => "apply: begin deployment, set target",
-            RefUpdate::SetCurrent => "apply: conclude deployment, set current",
-            RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref",
-            RefUpdate::FetchStale => "deploy: fetched stale commit from host",
+            RefUpdate::SetTarget { operator } => {
+                format!("deploy by {operator}: set target")
+            }
+            RefUpdate::SetCurrent { operator } => {
+                format!("deploy by {operator}: set current")
+            }
+            RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
+            RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
         };
         let force = true;
-        self.repo.reference(refname, oid, force, reflog_msg)?;
+        self.repo.reference(refname, oid, force, &reflog_msg)?;
         Ok(())
     }
 
@@ -171,9 +175,9 @@ impl Store {
     }
 }
 
-pub enum RefUpdate {
-    SetTarget,
-    SetCurrent,
+pub enum RefUpdate<'a> {
+    SetTarget { operator: &'a str },
+    SetCurrent { operator: &'a str },
     ApplyComplete,
     FetchStale,
 }

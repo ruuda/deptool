@@ -28,12 +28,8 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     pub fn from_env() -> Self {
-        let hostname = std::env::var("DEPTOOL_HOSTNAME").unwrap_or_else(|_| {
-            std::fs::read_to_string("/etc/hostname")
-                .unwrap_or("(unknown hostname)".into())
-                .trim()
-                .to_string()
-        });
+        let hostname =
+            std::env::var("DEPTOOL_HOSTNAME").unwrap_or_else(|_| crate::prim::read_hostname());
         let apps_dir = PathBuf::from(
             std::env::var("DEPTOOL_APPS_DIR").unwrap_or("/var/lib/deptool/apps".into()),
         );
@@ -72,8 +68,16 @@ pub struct HostSession {
     apps_dir: PathBuf,
     unit_dir: PathBuf,
     on_units_changed: Box<dyn Fn(&UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>,
-    /// Held for the session lifetime to prevent concurrent deploys.
-    lock_file: Option<File>,
+    /// Acquired during lock, held for the session lifetime.
+    lock: Option<DeployLock>,
+}
+
+struct DeployLock {
+    /// The flock is released when the file is dropped, so we hold it
+    /// for the session lifetime to prevent concurrent deploys.
+    _file: File,
+    /// Who initiated the deploy (e.g. "deckard@spinner").
+    operator: String,
 }
 
 impl HostSession {
@@ -90,7 +94,7 @@ impl HostSession {
             apps_dir,
             unit_dir,
             on_units_changed,
-            lock_file: None,
+            lock: None,
         }
     }
 
@@ -124,6 +128,7 @@ impl HostSession {
     fn handle_lock(
         &mut self,
         expected_current_commit: Option<Oid>,
+        operator: String,
         emit_message: &mut impl FnMut(Message),
     ) {
         let lock_path = self.store.get_lock_file_path();
@@ -139,6 +144,8 @@ impl HostSession {
 
         match try_flock_exclusive(&file) {
             Ok(false) => {
+                // TODO: Read operator identity from the lockfile so we can
+                // report *who* holds the lock in the LockBusy message.
                 emit_message(Message::LockBusy);
                 return;
             }
@@ -159,8 +166,10 @@ impl HostSession {
                 actual_commit: actual_current_commit,
             });
         } else {
-            // Hold the lock for the session lifetime.
-            self.lock_file = Some(file);
+            self.lock = Some(DeployLock {
+                _file: file,
+                operator,
+            });
             emit_message(Message::Locked);
         }
     }
@@ -179,7 +188,8 @@ impl HostSession {
         match request {
             Request::Lock {
                 expected_current_commit,
-            } => self.handle_lock(expected_current_commit, emit_message),
+                operator,
+            } => self.handle_lock(expected_current_commit, operator, emit_message),
             Request::ReceivePack { ref pack_data } => {
                 self.handle_receive_pack(pack_data, emit_message)
             }
@@ -201,6 +211,7 @@ impl HostSession {
             Request::Apply { target_commit } => {
                 let current_commit = self.current_commit();
 
+                let operator = &self.lock.as_ref().expect("lock is held during apply").operator;
                 let result = apply_host(
                     &self.store,
                     target_commit,
@@ -208,6 +219,7 @@ impl HostSession {
                     &self.hostname,
                     &self.apps_dir,
                     &self.unit_dir,
+                    operator,
                     |app, diff| {
                         emit_message(Message::AppliedApp {
                             app: app.to_string(),
@@ -236,7 +248,11 @@ impl HostSession {
                 }
 
                 self.store
-                    .set_ref("refs/heads/current", target_commit, RefUpdate::SetCurrent)
+                    .set_ref(
+                        "refs/heads/current",
+                        target_commit,
+                        RefUpdate::SetCurrent { operator },
+                    )
                     .expect("updating current ref succeeds while we hold the lock");
 
                 emit_message(Message::ApplyComplete {
@@ -260,6 +276,7 @@ mod tests {
         let mut host = TestHost::new("web1");
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
+            operator: "deckard@spinner".into(),
         });
         assert_eq!(responses, vec![Message::Locked]);
     }
@@ -267,12 +284,10 @@ mod tests {
     #[test]
     fn lock_succeeds_when_current_ref_matches_expected() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
-        host.session
-            .store
-            .set_ref("refs/heads/current", oid, RefUpdate::SetCurrent)
-            .expect("ref is set");
+        host.set_current(oid);
         let responses = host.interact(Request::Lock {
             expected_current_commit: Some(oid.into()),
+            operator: "deckard@spinner".into(),
         });
         assert_eq!(responses, vec![Message::Locked]);
     }
@@ -280,12 +295,10 @@ mod tests {
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
-        host.session
-            .store
-            .set_ref("refs/heads/current", oid, RefUpdate::SetCurrent)
-            .expect("ref is set");
+        host.set_current(oid);
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
+            operator: "deckard@spinner".into(),
         });
         assert_eq!(responses.len(), 1);
         match &responses[0] {
@@ -314,6 +327,7 @@ mod tests {
 
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
+            operator: "deckard@spinner".into(),
         });
         assert_eq!(responses, vec![Message::LockBusy]);
 
