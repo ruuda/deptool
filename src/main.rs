@@ -245,16 +245,22 @@ fn systemd_apply_changes(
 ) -> error::Result<()> {
     let mut touched: Vec<&str> = Vec::new();
     let mut had_failure = false;
-
-    for unit in &changes.disable {
-        touched.push(unit);
-        if !systemctl_ok(&["disable", "--now", unit]) {
+    let mut run_systemctl = |op: &str, unit: &str| {
+        if !systemctl_ok(&[op, unit]) {
             had_failure = true;
             emit(protocol::Message::SystemdUnitChangeFailed {
-                unit: unit.clone(),
-                operation: "disable".into(),
+                unit: unit.to_string(),
+                operation: op.to_string(),
             });
         }
+    };
+
+    // Split disable/enable from stop/start: `--now` swallows start/stop
+    // failures, reporting success as long as the enablement change worked.
+    for unit in &changes.disable {
+        touched.push(unit);
+        run_systemctl("stop", unit);
+        run_systemctl("disable", unit);
     }
 
     // Reconcile unit symlinks, then reload so systemd picks them up.
@@ -267,23 +273,12 @@ fn systemd_apply_changes(
 
     for unit in &changes.enable {
         touched.push(unit);
-        if !systemctl_ok(&["enable", "--now", unit]) {
-            had_failure = true;
-            emit(protocol::Message::SystemdUnitChangeFailed {
-                unit: unit.clone(),
-                operation: "enable".into(),
-            });
-        }
+        run_systemctl("enable", unit);
+        run_systemctl("start", unit);
     }
     for unit in &changes.restart {
         touched.push(unit);
-        if !systemctl_ok(&["restart", unit]) {
-            had_failure = true;
-            emit(protocol::Message::SystemdUnitChangeFailed {
-                unit: unit.clone(),
-                operation: "restart".into(),
-            });
-        }
+        run_systemctl("restart", unit);
     }
 
     if !touched.is_empty() {
