@@ -305,6 +305,8 @@ fn systemd_apply_changes(
 fn systemctl_ok(args: &[&str]) -> bool {
     std::process::Command::new("systemctl")
         .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
 }
