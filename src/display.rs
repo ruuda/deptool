@@ -255,7 +255,8 @@ impl StatusPrinter {
 
     fn erase_status_block(&mut self, out: &mut impl Write, n: usize) -> Result<()> {
         if self.rendered {
-            for _ in 0..n {
+            // We print one blank line before the status.
+            for _ in 0..n + 1 {
                 write!(out, "\x1b[1A\x1b[2K")?;
             }
             self.rendered = false;
@@ -268,10 +269,14 @@ impl StatusPrinter {
         out: &mut impl Write,
         states: &BTreeMap<Hostname, HostState>,
     ) -> Result<()> {
-        let n = states.len();
         if self.rendered {
             // Move cursor up to overwrite previous output.
+            let n = states.len();
             write!(out, "\x1b[{n}A")?;
+        } else {
+            // Ensure a blank line before the statuses to separate it visually
+            // from other log output.
+            writeln!(out)?;
         }
         let name_width = states.keys().map(|h| h.0.len()).max().unwrap_or(0);
         for (host, state) in states {
@@ -307,7 +312,8 @@ impl StatusPrinter {
         text: &str,
     ) -> Result<()> {
         self.erase_status_block(out, states.len())?;
-        write!(out, "{host}: {text}")?;
+        let header = self.color.bold(&format!("{host}:"));
+        write!(out, "\n{header}\n{text}")?;
         if !text.ends_with('\n') {
             writeln!(out)?;
         }
@@ -565,7 +571,7 @@ web1 (diverged)
         let mut printer = StatusPrinter::new(UseColor::No);
         assert_eq!(
             printer.render_to_string(&states),
-            "\
+            "
 \x1b[2K  web1: connecting
 \x1b[2K  web2: connecting
 ",
@@ -602,7 +608,7 @@ web1 (diverged)
         let mut printer = StatusPrinter::new(UseColor::Yes);
         assert_eq!(
             printer.render_to_string(&states),
-            "\
+            "
 \x1b[2K  web1: \x1b[32mdone\x1b[0m
 \x1b[2K  web2: \x1b[31mstale\x1b[0m
 ",
@@ -618,7 +624,7 @@ web1 (diverged)
         let mut printer = StatusPrinter::new(UseColor::No);
         assert_eq!(
             printer.render_to_string(&states),
-            "\
+            "
 \x1b[2K  backend:  connecting
 \x1b[2K  frontend: locked
 ",
@@ -640,7 +646,7 @@ web1 (diverged)
                 &mut buf,
                 &states,
                 &Hostname::from("web1"),
-                "app.service\n  Active: active\n",
+                "app.service activated",
             )
             .expect("render succeeds");
         let output = String::from_utf8(buf).expect("output is utf-8");
@@ -648,8 +654,10 @@ web1 (diverged)
         assert_eq!(
             output,
             "\
-\x1b[1A\x1b[2K\x1b[1A\x1b[2K\
-web1: app.service\n  Active: active\n\
+\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K
+web1:
+app.service activated
+
 \x1b[2K  web1: applying\n\
 \x1b[2K  web2: done\n",
         );
