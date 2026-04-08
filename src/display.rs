@@ -9,7 +9,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, UnitChanges, diff_enabled};
+use crate::plan::{AppDiff, Plan, SymlinkChanges, UnitChanges, diff_enabled, diff_symlinks};
 use crate::prim::Hostname;
 use crate::store::Store;
 
@@ -87,7 +87,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     let enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&BTreeSet::new(), &enabled);
                     write_unit_actions(out, &units, &link, &BTreeSet::new(), color)?;
-                    write_symlink_actions(out, &manifest.symlinks, &BTreeMap::new(), color)?;
+                    let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
+                    write_symlink_actions(out, &symlinks, color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
@@ -96,7 +97,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     let enabled = store.enabled_units(*old_tree)?;
                     let units = diff_enabled(&enabled, &BTreeSet::new());
                     write_unit_actions(out, &units, &BTreeSet::new(), &unlink, color)?;
-                    write_symlink_actions(out, &BTreeMap::new(), &manifest.symlinks, color)?;
+                    let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
+                    write_symlink_actions(out, &symlinks, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "  {} {app}", color.yellow("~"))?;
@@ -113,12 +115,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     let new_enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&old_enabled, &new_enabled);
                     write_unit_actions(out, &units, &link, &unlink, color)?;
-                    write_symlink_actions(
-                        out,
-                        &new_manifest.symlinks,
-                        &old_manifest.symlinks,
-                        color,
-                    )?;
+                    let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
+                    write_symlink_actions(out, &symlinks, color)?;
                 }
             }
         }
@@ -233,22 +231,22 @@ fn write_unit_actions(
     Ok(())
 }
 
-/// Print symlink actions: new symlinks in green, removed in red.
+/// Print pre-computed symlink actions: removals first, then additions.
+///
+/// Changes are shown as unlink + link.
 fn write_symlink_actions(
     out: &mut impl Write,
-    desired: &BTreeMap<String, String>,
-    previous: &BTreeMap<String, String>,
+    changes: &SymlinkChanges<String>,
     color: UseColor,
 ) -> Result<()> {
-    for target in previous.keys() {
-        if !desired.contains_key(target) {
-            writeln!(out, "      {} {target}", color.red("unlink"))?;
-        }
+    for link in &changes.remove {
+        writeln!(out, "      {} {link}", color.red("unlink"))?;
     }
-    for target in desired.keys() {
-        if !previous.contains_key(target) {
-            writeln!(out, "      {} {target}", color.green("symlink"))?;
-        }
+    for (link, _) in &changes.change {
+        writeln!(out, "      {} {link}", color.red("unlink"))?;
+    }
+    for (link, source) in changes.change.iter().chain(&changes.create) {
+        writeln!(out, "      {} {link} -> {source}", color.green("link"))?;
     }
     Ok(())
 }
@@ -716,7 +714,7 @@ web1
   + nginx
       + manifest.json
       + nginx.conf
-      symlink /etc/nginx/nginx.conf
+      link /etc/nginx/nginx.conf -> nginx.conf
 ",
         );
         Ok(())

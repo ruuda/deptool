@@ -2,7 +2,6 @@
 
 use deptool::*;
 
-use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -239,19 +238,17 @@ use session::AgentConfig;
 
 fn post_apply(
     desired_units: &apply::DesiredUnits,
-    changes: &plan::UnitChanges,
-    desired_symlinks: &BTreeMap<PathBuf, PathBuf>,
-    previous_symlinks: &BTreeMap<PathBuf, PathBuf>,
+    changes: &plan::Changes,
     emit: &mut dyn FnMut(protocol::Message),
     apps_dir: &Path,
     unit_dir: &Path,
 ) -> error::Result<()> {
     // Reconcile manifest symlinks (e.g. config files in /etc).
-    apply::reconcile_manifest_symlinks(desired_symlinks, previous_symlinks)?;
+    apply::reconcile_manifest_symlinks(apps_dir, &changes.symlinks)?;
 
     let mut touched: Vec<&str> = Vec::new();
 
-    for unit in &changes.disable {
+    for unit in &changes.units.disable {
         touched.push(unit);
         systemctl_ok(&["disable", "--now", unit]);
     }
@@ -264,11 +261,11 @@ fn post_apply(
     apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
     systemctl_ok(&["daemon-reload"]);
 
-    for unit in &changes.enable {
+    for unit in &changes.units.enable {
         touched.push(unit);
         systemctl_ok(&["enable", "--now", unit]);
     }
-    for unit in &changes.restart {
+    for unit in &changes.units.restart {
         touched.push(unit);
         systemctl_ok(&["restart", unit]);
     }
@@ -283,7 +280,7 @@ fn post_apply(
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let mut is_active_cmd = vec!["is-active"];
-    for unit in changes.enable.iter().chain(&changes.restart) {
+    for unit in changes.units.enable.iter().chain(&changes.units.restart) {
         is_active_cmd.push(unit);
     }
     let all_active = is_active_cmd.len() == 1 || systemctl_ok(&is_active_cmd);
@@ -326,19 +323,9 @@ fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        Box::new(
-            move |desired_units, unit_changes, desired_symlinks, previous_symlinks, emit| {
-                post_apply(
-                    desired_units,
-                    unit_changes,
-                    desired_symlinks,
-                    previous_symlinks,
-                    emit,
-                    &apps_dir,
-                    &unit_dir,
-                )
-            },
-        ),
+        Box::new(move |desired_units, changes, emit| {
+            post_apply(desired_units, changes, emit, &apps_dir, &unit_dir)
+        }),
     )
 }
 

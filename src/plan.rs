@@ -1,7 +1,7 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::{Oid, Tree};
 use serde::{Deserialize, Serialize};
@@ -88,6 +88,57 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitC
         }
     }
     changes
+}
+
+/// Manifest symlink actions, derived from comparing two commits' manifests.
+#[derive(Debug)]
+pub struct SymlinkChanges<T> {
+    /// New symlinks to create: (link_path, source_path).
+    pub create: Vec<(T, T)>,
+    /// Symlinks to remove.
+    pub remove: Vec<T>,
+    /// Symlinks whose source changed: (link_path, new_source_path).
+    pub change: Vec<(T, T)>,
+}
+
+impl<T> SymlinkChanges<T> {
+    pub fn is_empty(&self) -> bool {
+        self.create.is_empty() && self.remove.is_empty() && self.change.is_empty()
+    }
+}
+
+/// Compute symlink actions by comparing two symlink maps.
+pub fn diff_symlinks<T: Clone + Ord>(
+    previous: &BTreeMap<T, T>,
+    target: &BTreeMap<T, T>,
+) -> SymlinkChanges<T> {
+    let mut changes = SymlinkChanges {
+        create: Vec::new(),
+        remove: Vec::new(),
+        change: Vec::new(),
+    };
+    for (link, source) in target {
+        match previous.get(link) {
+            None => changes.create.push((link.clone(), source.clone())),
+            Some(prev_source) if prev_source != source => {
+                changes.change.push((link.clone(), source.clone()))
+            }
+            Some(_) => {}
+        }
+    }
+    for link in previous.keys() {
+        if !target.contains_key(link) {
+            changes.remove.push(link.clone());
+        }
+    }
+    changes
+}
+
+/// All deployment changes for a host, computed from the git state.
+#[derive(Debug)]
+pub struct Changes {
+    pub units: UnitChanges,
+    pub symlinks: SymlinkChanges<PathBuf>,
 }
 
 /// Diff two sets of app tree oids for a single host.

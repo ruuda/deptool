@@ -215,9 +215,9 @@ impl Store {
         Ok(manifest.systemd.units_enabled.into_iter().collect())
     }
 
-    /// Collect desired manifest symlinks for a host.
+    /// Collect manifest symlinks for a host, resolved to absolute paths.
     ///
-    /// Maps each absolute target path to the absolute source path under
+    /// Maps each absolute link path to the absolute source path under
     /// `apps_dir/<app>/current/`.
     pub fn desired_symlinks(
         &self,
@@ -230,9 +230,9 @@ impl Store {
         let mut result = BTreeMap::new();
         for (app, app_tree_oid) in &apps {
             let manifest = self.read_manifest(*app_tree_oid)?;
-            for (target, source) in &manifest.symlinks {
+            for (link, source) in &manifest.symlinks {
                 let source_path = apps_dir.join(app).join("current").join(source);
-                result.insert(target.into(), source_path);
+                result.insert(link.into(), source_path);
             }
         }
         Ok(result)

@@ -1,6 +1,5 @@
 //! Host-side session logic: handles requests and applies changes.
 
-use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -11,7 +10,7 @@ use git2::Oid;
 
 use crate::apply::{DesiredUnits, apply_host};
 use crate::error::Result;
-use crate::plan::UnitChanges;
+use crate::plan::Changes;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -64,15 +63,7 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 /// Callback for post-checkout mutations (symlinks, systemd lifecycle).
-type OnPostApply = Box<
-    dyn Fn(
-        &DesiredUnits,
-        &UnitChanges,
-        &BTreeMap<PathBuf, PathBuf>,
-        &BTreeMap<PathBuf, PathBuf>,
-        &mut dyn FnMut(Message),
-    ) -> Result<()>,
->;
+type OnPostApply = Box<dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> Result<()>>;
 
 pub struct HostSession {
     pub store: Store,
@@ -110,7 +101,7 @@ impl HostSession {
     /// Create a session for testing that does not touch systemd or symlinks.
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
-        let on_post_apply: OnPostApply = Box::new(|_, _, _, _, _| Ok(()));
+        let on_post_apply: OnPostApply = Box::new(|_, _, _| Ok(()));
         HostSession::new(
             Store { repo },
             hostname.into(),
@@ -254,7 +245,7 @@ impl HostSession {
                     },
                 );
 
-                let unit_changes = match result {
+                let changes = match result {
                     Ok(changes) => changes,
                     Err(err) => {
                         emit_message(Message::Error {
@@ -269,25 +260,7 @@ impl HostSession {
                     .desired_units(target_commit, &self.hostname, &self.apps_dir)
                     .expect("desired_units succeeds for a just-applied commit");
 
-                let desired_symlinks = self
-                    .store
-                    .desired_symlinks(target_commit, &self.hostname, &self.apps_dir)
-                    .expect("desired_symlinks succeeds for a just-applied commit");
-                let previous_symlinks = match current_commit {
-                    Some(oid) => self
-                        .store
-                        .desired_symlinks(oid, &self.hostname, &self.apps_dir)
-                        .expect("desired_symlinks succeeds for the current commit"),
-                    None => BTreeMap::new(),
-                };
-
-                if let Err(err) = (self.on_post_apply)(
-                    &desired_units,
-                    &unit_changes,
-                    &desired_symlinks,
-                    &previous_symlinks,
-                    emit_message,
-                ) {
+                if let Err(err) = (self.on_post_apply)(&desired_units, &changes, emit_message) {
                     emit_message(Message::Error {
                         message: format!("post-apply failed: {err}"),
                     });
@@ -304,9 +277,9 @@ impl HostSession {
 
                 emit_message(Message::ApplyComplete {
                     commit: target_commit,
-                    enabled_units: unit_changes.enable,
-                    restarted_units: unit_changes.restart,
-                    disabled_units: unit_changes.disable,
+                    enabled_units: changes.units.enable,
+                    restarted_units: changes.units.restart,
+                    disabled_units: changes.units.disable,
                 });
             }
         }

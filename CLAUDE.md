@@ -59,6 +59,7 @@
  - Name things after what they are and do, not after their purpose.
  - A reader who does not know the function args by heart can't tell what a call site like `frobnicate(true, None, 32)` does. Extract arguments into named variables when needed, prefer enums with descriptive names if possible.
  - At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
+ - Order function arguments from least-varying to most-varying. Configuration and context arguments (like a directory path) go before data arguments (like the specific changes to apply).
  - Prefer plain `match` over fancy method chains.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Property-based tests are better than mere examples.

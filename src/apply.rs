@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use git2::{Oid, Tree};
 
 use crate::error::Result;
-use crate::plan::{AppDiff, UnitChanges, diff_enabled};
+use crate::plan::{AppDiff, Changes, SymlinkChanges, diff_enabled, diff_symlinks};
 use crate::prim::Hostname;
 use crate::store::{self, Store};
 
@@ -72,9 +72,9 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// Apply a deployment to a host's filesystem.
 ///
 /// Sets the target ref, diffs current vs target apps, checks out or removes
-/// each changed app, and computes the desired unit symlinks and lifecycle
-/// actions. Does *not* reconcile symlinks or touch systemd -- the caller
-/// does that in the systemd phase. Calls `on_app` for each changed app.
+/// each changed app, and computes the unit lifecycle and symlink actions.
+/// Does *not* reconcile symlinks or touch systemd -- the caller does that
+/// in the post-apply phase. Calls `on_app` for each changed app.
 pub fn apply_host(
     store: &Store,
     commit_oid: Oid,
@@ -83,7 +83,7 @@ pub fn apply_host(
     apps_dir: &Path,
     operator: &str,
     mut on_app: impl FnMut(&str, &AppDiff),
-) -> Result<UnitChanges> {
+) -> Result<Changes> {
     store.set_ref(
         "refs/heads/target",
         commit_oid,
@@ -126,14 +126,21 @@ pub fn apply_host(
         Some(tree) => collect_enabled_units(store, tree, host, &changed_apps)?,
     };
     let target_enabled = collect_enabled_units(store, &target_tree, host, &changed_apps)?;
-    let unit_changes = diff_enabled(&prev_enabled, &target_enabled);
+    let units = diff_enabled(&prev_enabled, &target_enabled);
+
+    let target_symlinks = store.desired_symlinks(commit_oid, host, apps_dir)?;
+    let prev_symlinks = match actual_current {
+        Some(oid) => store.desired_symlinks(oid, host, apps_dir)?,
+        None => BTreeMap::new(),
+    };
+    let symlinks = diff_symlinks(&prev_symlinks, &target_symlinks);
 
     // We don't update refs/heads/current here. There is more to do (enabling
     // and disabling systemd units), and if that fails, we don't want the
     // `current` ref to say that the deploy was done while it was in fact
     // unfinished. It's better for it to be behind than ahead.
 
-    Ok(unit_changes)
+    Ok(Changes { units, symlinks })
 }
 
 /// Reconcile unit symlinks: make unit_dir match desired.
@@ -173,39 +180,51 @@ pub fn reconcile_symlinks(
 
 /// Reconcile manifest symlinks on the host filesystem.
 ///
-/// Creates or updates symlinks in `desired`, removes those only in `previous`.
-/// Returns the lists of created and removed target paths.
+/// Before removing or overwriting a symlink, verifies it points into
+/// `apps_dir` to avoid touching symlinks not created by Deptool.
+///
+/// The checks and mutations are not atomic (TOCTOU), but we hold the
+/// deploy lock and assume the target filesystem is not changing
+/// concurrently.
 pub fn reconcile_manifest_symlinks(
-    desired: &BTreeMap<PathBuf, PathBuf>,
-    previous: &BTreeMap<PathBuf, PathBuf>,
-) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
-    let mut created = Vec::new();
-    let mut removed = Vec::new();
-
-    for target in previous.keys() {
-        if !desired.contains_key(target) {
-            if target.symlink_metadata().is_ok() {
-                fs::remove_file(target)?;
-                removed.push(target.clone());
-            }
+    apps_dir: &Path,
+    changes: &SymlinkChanges<PathBuf>,
+) -> Result<()> {
+    for target in &changes.remove {
+        if target.symlink_metadata().is_ok() {
+            verify_managed(target, apps_dir)?;
+            fs::remove_file(target)?;
         }
     }
 
-    for (target, source) in desired {
-        let needs_update = match fs::read_link(target) {
-            Ok(actual) => actual != *source,
-            Err(_) => true,
-        };
-        if needs_update {
-            if target.symlink_metadata().is_ok() {
-                fs::remove_file(target)?;
-            }
-            unix_fs::symlink(source, target)?;
-            created.push(target.clone());
+    for (target, source) in &changes.change {
+        if target.symlink_metadata().is_ok() {
+            verify_managed(target, apps_dir)?;
+            fs::remove_file(target)?;
         }
+        unix_fs::symlink(source, target)?;
     }
 
-    Ok((created, removed))
+    for (target, source) in &changes.create {
+        unix_fs::symlink(source, target)?;
+    }
+
+    Ok(())
+}
+
+/// Verify a symlink points into `apps_dir` before we remove or overwrite it.
+fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
+    match fs::read_link(link) {
+        Ok(actual) if actual.starts_with(apps_dir) => Ok(()),
+        Ok(actual) => Err(crate::error::Error::InvalidConfig(format!(
+            "refusing to touch {}: points to {}, not into {}",
+            link.display(),
+            actual.display(),
+            apps_dir.display(),
+        ))),
+        // Dangling or missing -- nothing to protect.
+        Err(_) => Ok(()),
+    }
 }
 
 /// Collect enabled unit names from manifests, filtered to given apps.
@@ -472,7 +491,7 @@ mod tests {
             commit: git2::Oid,
             current: Option<git2::Oid>,
             on_app: impl FnMut(&str, &AppDiff),
-        ) -> Result<UnitChanges> {
+        ) -> Result<Changes> {
             let host = &"web1".into();
             let operator = "deckard@spinner";
             let changes = apply_host(
@@ -575,73 +594,92 @@ mod tests {
         assert!(t.units.path().join("nginx.service").is_symlink());
         assert!(t.units.path().join("nginx-reload.timer").is_symlink());
         // Only the enabled one gets an enable action.
-        assert_eq!(changes.enable, vec!["nginx.service"]);
-        assert!(changes.restart.is_empty());
-        assert!(changes.disable.is_empty());
+        assert_eq!(changes.units.enable, vec!["nginx.service"]);
+        assert!(changes.units.restart.is_empty());
+        assert!(changes.units.disable.is_empty());
         Ok(())
     }
 
     #[test]
     fn manifest_symlinks_creates_new_symlink() -> Result<()> {
         let dir = TempDir::new("symlinks");
+        let apps = TempDir::new("apps");
         let target = dir.path().join("foo.conf");
-        let source = PathBuf::from("/var/lib/deptool/apps/nginx/current/foo.conf");
+        let source = apps.path().join("nginx/current/foo.conf");
 
-        let desired = BTreeMap::from([(target.clone(), source.clone())]);
-        let (created, removed) = reconcile_manifest_symlinks(&desired, &BTreeMap::new())?;
+        let changes = SymlinkChanges {
+            create: vec![(target.clone(), source.clone())],
+            remove: Vec::new(),
+            change: Vec::new(),
+        };
+        reconcile_manifest_symlinks(apps.path(), &changes)?;
 
-        assert_eq!(created, vec![target.clone()]);
-        assert!(removed.is_empty());
         assert_eq!(fs::read_link(&target)?, source);
         Ok(())
     }
 
     #[test]
-    fn manifest_symlinks_removes_stale_symlink() -> Result<()> {
+    fn manifest_symlinks_removes_managed_but_refuses_unmanaged() -> Result<()> {
         let dir = TempDir::new("symlinks");
-        let target = dir.path().join("foo.conf");
-        let source = PathBuf::from("/somewhere");
-        unix_fs::symlink(&source, &target)?;
+        let apps = TempDir::new("apps");
+        let managed = dir.path().join("managed.conf");
+        let unmanaged = dir.path().join("unmanaged.conf");
+        unix_fs::symlink(apps.path().join("nginx/current/x"), &managed)?;
+        unix_fs::symlink("/usr/share/something", &unmanaged)?;
 
-        let previous = BTreeMap::from([(target.clone(), source)]);
-        let (created, removed) = reconcile_manifest_symlinks(&BTreeMap::new(), &previous)?;
+        // Managed symlink is removed.
+        let changes = SymlinkChanges {
+            create: Vec::new(),
+            remove: vec![managed.clone()],
+            change: Vec::new(),
+        };
+        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        assert!(managed.symlink_metadata().is_err());
 
-        assert!(created.is_empty());
-        assert_eq!(removed, vec![target.clone()]);
-        assert!(target.symlink_metadata().is_err());
+        // Unmanaged symlink is refused.
+        let changes = SymlinkChanges {
+            create: Vec::new(),
+            remove: vec![unmanaged],
+            change: Vec::new(),
+        };
+        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to touch"),
+            "error explains the refusal: {err}",
+        );
         Ok(())
     }
 
     #[test]
-    fn manifest_symlinks_updates_changed_source() -> Result<()> {
+    fn manifest_symlinks_changes_managed_but_refuses_unmanaged() -> Result<()> {
         let dir = TempDir::new("symlinks");
-        let target = dir.path().join("foo.conf");
-        let old_source = PathBuf::from("/old");
-        let new_source = PathBuf::from("/new");
-        unix_fs::symlink(&old_source, &target)?;
+        let apps = TempDir::new("apps");
+        let managed = dir.path().join("managed.conf");
+        let unmanaged = dir.path().join("unmanaged.conf");
+        let new_source = apps.path().join("nginx/current/new.conf");
+        unix_fs::symlink(apps.path().join("nginx/current/old.conf"), &managed)?;
+        unix_fs::symlink("/usr/share/something", &unmanaged)?;
 
-        let previous = BTreeMap::from([(target.clone(), old_source)]);
-        let desired = BTreeMap::from([(target.clone(), new_source.clone())]);
-        let (created, removed) = reconcile_manifest_symlinks(&desired, &previous)?;
+        // Managed symlink is updated.
+        let changes = SymlinkChanges {
+            create: Vec::new(),
+            remove: Vec::new(),
+            change: vec![(managed.clone(), new_source.clone())],
+        };
+        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        assert_eq!(fs::read_link(&managed)?, new_source);
 
-        assert_eq!(created, vec![target.clone()]);
-        assert!(removed.is_empty());
-        assert_eq!(fs::read_link(&target)?, new_source);
-        Ok(())
-    }
-
-    #[test]
-    fn manifest_symlinks_skips_already_correct() -> Result<()> {
-        let dir = TempDir::new("symlinks");
-        let target = dir.path().join("foo.conf");
-        let source = PathBuf::from("/correct");
-        unix_fs::symlink(&source, &target)?;
-
-        let desired = BTreeMap::from([(target.clone(), source)]);
-        let (created, removed) = reconcile_manifest_symlinks(&desired, &desired)?;
-
-        assert!(created.is_empty());
-        assert!(removed.is_empty());
+        // Unmanaged symlink is refused.
+        let changes = SymlinkChanges {
+            create: Vec::new(),
+            remove: Vec::new(),
+            change: vec![(unmanaged, new_source)],
+        };
+        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        assert!(
+            err.to_string().contains("refusing to touch"),
+            "error explains the refusal: {err}",
+        );
         Ok(())
     }
 }
