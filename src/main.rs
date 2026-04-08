@@ -259,6 +259,9 @@ fn post_apply(
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
     apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
+    // TODO: The integration test runs this code path as a regular user,
+    // which triggers a polkit prompt for daemon-reload. Guard this behind
+    // a check or make the test skip the systemd phase.
     systemctl_ok(&["daemon-reload"]);
 
     for unit in &changes.units.enable {
