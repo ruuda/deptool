@@ -290,9 +290,12 @@ fn systemd_apply_changes(
         // Let services initialize before capturing status, so the
         // output includes meaningful state rather than just "activating".
         std::thread::sleep(std::time::Duration::from_millis(100));
+        // Force color: systemctl won't color because stdout is a pipe,
+        // but the output is forwarded to the operator's terminal.
         let output = match std::process::Command::new("systemctl")
             .arg("status")
             .args(&touched)
+            .env("SYSTEMD_COLORS", "true")
             .output()
         {
             Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
