@@ -271,8 +271,10 @@ fn systemd_apply_changes(
         return Ok(());
     }
 
-    // Let services initialize before checking state.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // Let services initialize before checking state. Previously we usd 100ms,
+    // but that was not enough for a binary inside a verity-protected EROFS to
+    // fully start and then fail on a potato cloud VM, let's give it 300ms.
+    std::thread::sleep(std::time::Duration::from_millis(300));
 
     let mut is_active_cmd = vec!["is-active"];
     for unit in changes.enable.iter().chain(&changes.restart) {
