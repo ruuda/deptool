@@ -171,6 +171,43 @@ pub fn reconcile_symlinks(
     Ok(changed)
 }
 
+/// Reconcile manifest symlinks on the host filesystem.
+///
+/// Creates or updates symlinks in `desired`, removes those only in `previous`.
+/// Returns the lists of created and removed target paths.
+pub fn reconcile_manifest_symlinks(
+    desired: &BTreeMap<PathBuf, PathBuf>,
+    previous: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+    let mut created = Vec::new();
+    let mut removed = Vec::new();
+
+    for target in previous.keys() {
+        if !desired.contains_key(target) {
+            if target.symlink_metadata().is_ok() {
+                fs::remove_file(target)?;
+                removed.push(target.clone());
+            }
+        }
+    }
+
+    for (target, source) in desired {
+        let needs_update = match fs::read_link(target) {
+            Ok(actual) => actual != *source,
+            Err(_) => true,
+        };
+        if needs_update {
+            if target.symlink_metadata().is_ok() {
+                fs::remove_file(target)?;
+            }
+            unix_fs::symlink(source, target)?;
+            created.push(target.clone());
+        }
+    }
+
+    Ok((created, removed))
+}
+
 /// Collect enabled unit names from manifests, filtered to given apps.
 fn collect_enabled_units(
     store: &Store,
@@ -541,6 +578,70 @@ mod tests {
         assert_eq!(changes.enable, vec!["nginx.service"]);
         assert!(changes.restart.is_empty());
         assert!(changes.disable.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_creates_new_symlink() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let target = dir.path().join("foo.conf");
+        let source = PathBuf::from("/var/lib/deptool/apps/nginx/current/foo.conf");
+
+        let desired = BTreeMap::from([(target.clone(), source.clone())]);
+        let (created, removed) = reconcile_manifest_symlinks(&desired, &BTreeMap::new())?;
+
+        assert_eq!(created, vec![target.clone()]);
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_link(&target)?, source);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_removes_stale_symlink() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let target = dir.path().join("foo.conf");
+        let source = PathBuf::from("/somewhere");
+        unix_fs::symlink(&source, &target)?;
+
+        let previous = BTreeMap::from([(target.clone(), source)]);
+        let (created, removed) = reconcile_manifest_symlinks(&BTreeMap::new(), &previous)?;
+
+        assert!(created.is_empty());
+        assert_eq!(removed, vec![target.clone()]);
+        assert!(target.symlink_metadata().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_updates_changed_source() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let target = dir.path().join("foo.conf");
+        let old_source = PathBuf::from("/old");
+        let new_source = PathBuf::from("/new");
+        unix_fs::symlink(&old_source, &target)?;
+
+        let previous = BTreeMap::from([(target.clone(), old_source)]);
+        let desired = BTreeMap::from([(target.clone(), new_source.clone())]);
+        let (created, removed) = reconcile_manifest_symlinks(&desired, &previous)?;
+
+        assert_eq!(created, vec![target.clone()]);
+        assert!(removed.is_empty());
+        assert_eq!(fs::read_link(&target)?, new_source);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_skips_already_correct() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let target = dir.path().join("foo.conf");
+        let source = PathBuf::from("/correct");
+        unix_fs::symlink(&source, &target)?;
+
+        let desired = BTreeMap::from([(target.clone(), source)]);
+        let (created, removed) = reconcile_manifest_symlinks(&desired, &desired)?;
+
+        assert!(created.is_empty());
+        assert!(removed.is_empty());
         Ok(())
     }
 }

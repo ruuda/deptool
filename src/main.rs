@@ -2,8 +2,9 @@
 
 use deptool::*;
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use bpaf::Bpaf;
@@ -236,13 +237,18 @@ fn run() -> Result<()> {
 
 use session::AgentConfig;
 
-fn systemd_apply_changes(
+fn post_apply(
     desired_units: &apply::DesiredUnits,
     changes: &plan::UnitChanges,
+    desired_symlinks: &BTreeMap<PathBuf, PathBuf>,
+    previous_symlinks: &BTreeMap<PathBuf, PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
-    apps_dir: &std::path::Path,
-    unit_dir: &std::path::Path,
+    apps_dir: &Path,
+    unit_dir: &Path,
 ) -> error::Result<()> {
+    // Reconcile manifest symlinks (e.g. config files in /etc).
+    apply::reconcile_manifest_symlinks(desired_symlinks, previous_symlinks)?;
+
     let mut touched: Vec<&str> = Vec::new();
 
     for unit in &changes.disable {
@@ -320,9 +326,19 @@ fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        Box::new(move |desired, changes, emit| {
-            systemd_apply_changes(desired, changes, emit, &apps_dir, &unit_dir)
-        }),
+        Box::new(
+            move |desired_units, unit_changes, desired_symlinks, previous_symlinks, emit| {
+                post_apply(
+                    desired_units,
+                    unit_changes,
+                    desired_symlinks,
+                    previous_symlinks,
+                    emit,
+                    &apps_dir,
+                    &unit_dir,
+                )
+            },
+        ),
     )
 }
 

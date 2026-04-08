@@ -82,23 +82,29 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
+                    let manifest = store.read_manifest(*new_tree)?;
                     let link = store.app_units(*new_tree)?;
                     let enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&BTreeSet::new(), &enabled);
                     write_unit_actions(out, &units, &link, &BTreeSet::new(), color)?;
+                    write_symlink_actions(out, &manifest.symlinks, &BTreeMap::new(), color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
+                    let manifest = store.read_manifest(*old_tree)?;
                     let unlink = store.app_units(*old_tree)?;
                     let enabled = store.enabled_units(*old_tree)?;
                     let units = diff_enabled(&enabled, &BTreeSet::new());
                     write_unit_actions(out, &units, &BTreeSet::new(), &unlink, color)?;
+                    write_symlink_actions(out, &BTreeMap::new(), &manifest.symlinks, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "  {} {app}", color.yellow("~"))?;
                     for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
+                    let old_manifest = store.read_manifest(*old_tree)?;
+                    let new_manifest = store.read_manifest(*new_tree)?;
                     let old_all = store.app_units(*old_tree)?;
                     let new_all = store.app_units(*new_tree)?;
                     let link: BTreeSet<_> = new_all.difference(&old_all).cloned().collect();
@@ -107,6 +113,12 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     let new_enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&old_enabled, &new_enabled);
                     write_unit_actions(out, &units, &link, &unlink, color)?;
+                    write_symlink_actions(
+                        out,
+                        &new_manifest.symlinks,
+                        &old_manifest.symlinks,
+                        color,
+                    )?;
                 }
             }
         }
@@ -217,6 +229,26 @@ fn write_unit_actions(
     }
     for unit in &units.restart {
         writeln!(out, "      {} {unit}", color.yellow("restart"))?;
+    }
+    Ok(())
+}
+
+/// Print symlink actions: new symlinks in green, removed in red.
+fn write_symlink_actions(
+    out: &mut impl Write,
+    desired: &BTreeMap<String, String>,
+    previous: &BTreeMap<String, String>,
+    color: UseColor,
+) -> Result<()> {
+    for target in previous.keys() {
+        if !desired.contains_key(target) {
+            writeln!(out, "      {} {target}", color.red("unlink"))?;
+        }
+    }
+    for target in desired.keys() {
+        if !previous.contains_key(target) {
+            writeln!(out, "      {} {target}", color.green("symlink"))?;
+        }
     }
     Ok(())
 }
@@ -652,6 +684,70 @@ web1
 web1 (diverged)
   + nginx
       + nginx.conf
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_with_symlinks_shows_symlink_action() -> Result<()> {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/nginx/nginx.conf": "nginx.conf"}}"#;
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}"),
+            ("web1/nginx/manifest.json", manifest),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    expected_current: None,
+                    is_fast_forward: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  + nginx
+      + manifest.json
+      + nginx.conf
+      symlink /etc/nginx/nginx.conf
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removed_app_with_symlinks_shows_unlink_action() -> Result<()> {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/nginx/nginx.conf": "nginx.conf"}}"#;
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}"),
+            ("web1/nginx/manifest.json", manifest),
+        ]);
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
+                    expected_current: Some(c1),
+                    is_fast_forward: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  - nginx
+      unlink /etc/nginx/nginx.conf
 ",
         );
         Ok(())

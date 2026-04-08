@@ -1,8 +1,8 @@
 //! Git store operations: commit, checkout, and ref management.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::{Commit, Oid, Repository, Tree};
 
@@ -16,6 +16,10 @@ use crate::prim::Hostname;
 pub struct Manifest {
     #[serde(default)]
     pub systemd: SystemdConfig,
+    /// Symlinks to create on the host: absolute target path → relative source
+    /// path within the app tree.
+    #[serde(default)]
+    pub symlinks: BTreeMap<String, String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -156,7 +160,7 @@ impl Store {
     }
 
     /// Path to the deploy lock file in the repo directory.
-    pub fn get_lock_file_path(&self) -> std::path::PathBuf {
+    pub fn get_lock_file_path(&self) -> PathBuf {
         self.path().join("deptool.lock")
     }
 
@@ -168,11 +172,11 @@ impl Store {
         &self,
         commit_oid: Oid,
         host: &Hostname,
-        apps_dir: &std::path::Path,
+        apps_dir: &Path,
     ) -> Result<crate::apply::DesiredUnits> {
         let tree = self.get_commit_tree(commit_oid)?;
         let apps = self.get_host_apps(&tree, host)?;
-        let mut units = std::collections::BTreeMap::new();
+        let mut units = BTreeMap::new();
         for (app, app_tree_oid) in &apps {
             for name in self.app_units(*app_tree_oid)? {
                 let target = apps_dir
@@ -189,14 +193,14 @@ impl Store {
     /// List all unit files in an app tree's `systemd/` directory.
     ///
     /// Returns an empty set if the app has no `systemd/` subtree.
-    pub fn app_units(&self, app_tree_oid: Oid) -> Result<std::collections::BTreeSet<String>> {
+    pub fn app_units(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
         let systemd_entry = match tree.get_name("systemd") {
             Some(entry) => entry,
-            None => return Ok(std::collections::BTreeSet::new()),
+            None => return Ok(BTreeSet::new()),
         };
         let systemd_tree = self.repo.find_tree(systemd_entry.id())?;
-        let mut units = std::collections::BTreeSet::new();
+        let mut units = BTreeSet::new();
         for entry in systemd_tree.iter() {
             if let Some(name) = entry.name() {
                 units.insert(name.to_string());
@@ -206,9 +210,32 @@ impl Store {
     }
 
     /// Read the enabled units from an app's manifest as a set.
-    pub fn enabled_units(&self, app_tree_oid: Oid) -> Result<std::collections::BTreeSet<String>> {
+    pub fn enabled_units(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
         let manifest = self.read_manifest(app_tree_oid)?;
         Ok(manifest.systemd.units_enabled.into_iter().collect())
+    }
+
+    /// Collect desired manifest symlinks for a host.
+    ///
+    /// Maps each absolute target path to the absolute source path under
+    /// `apps_dir/<app>/current/`.
+    pub fn desired_symlinks(
+        &self,
+        commit_oid: Oid,
+        host: &Hostname,
+        apps_dir: &Path,
+    ) -> Result<BTreeMap<PathBuf, PathBuf>> {
+        let tree = self.get_commit_tree(commit_oid)?;
+        let apps = self.get_host_apps(&tree, host)?;
+        let mut result = BTreeMap::new();
+        for (app, app_tree_oid) in &apps {
+            let manifest = self.read_manifest(*app_tree_oid)?;
+            for (target, source) in &manifest.symlinks {
+                let source_path = apps_dir.join(app).join("current").join(source);
+                result.insert(target.into(), source_path);
+            }
+        }
+        Ok(result)
     }
 
     /// Read the manifest from an app tree's `manifest.json`.

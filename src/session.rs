@@ -1,5 +1,6 @@
 //! Host-side session logic: handles requests and applies changes.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -62,15 +63,22 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
     }
 }
 
-/// Callback for the systemd phase (disable, reconcile, enable, restart).
-type OnUnitsChanged =
-    Box<dyn Fn(&DesiredUnits, &UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>;
+/// Callback for post-checkout mutations (symlinks, systemd lifecycle).
+type OnPostApply = Box<
+    dyn Fn(
+        &DesiredUnits,
+        &UnitChanges,
+        &BTreeMap<PathBuf, PathBuf>,
+        &BTreeMap<PathBuf, PathBuf>,
+        &mut dyn FnMut(Message),
+    ) -> Result<()>,
+>;
 
 pub struct HostSession {
     pub store: Store,
     pub hostname: Hostname,
     apps_dir: PathBuf,
-    on_units_changed: OnUnitsChanged,
+    on_post_apply: OnPostApply,
     /// Acquired during lock, held for the session lifetime.
     lock: Option<DeployLock>,
 }
@@ -88,26 +96,26 @@ impl HostSession {
         store: Store,
         hostname: Hostname,
         apps_dir: PathBuf,
-        on_units_changed: OnUnitsChanged,
+        on_post_apply: OnPostApply,
     ) -> Self {
         HostSession {
             store,
             hostname,
             apps_dir,
-            on_units_changed,
+            on_post_apply,
             lock: None,
         }
     }
 
-    /// Create a session for testing that does not touch systemd.
+    /// Create a session for testing that does not touch systemd or symlinks.
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
-        let on_units_changed: OnUnitsChanged = Box::new(|_, _, _| Ok(()));
+        let on_post_apply: OnPostApply = Box::new(|_, _, _, _, _| Ok(()));
         HostSession::new(
             Store { repo },
             hostname.into(),
             apps_dir.to_path_buf(),
-            on_units_changed,
+            on_post_apply,
         )
     }
 
@@ -261,11 +269,27 @@ impl HostSession {
                     .desired_units(target_commit, &self.hostname, &self.apps_dir)
                     .expect("desired_units succeeds for a just-applied commit");
 
-                if let Err(err) =
-                    (self.on_units_changed)(&desired_units, &unit_changes, emit_message)
-                {
+                let desired_symlinks = self
+                    .store
+                    .desired_symlinks(target_commit, &self.hostname, &self.apps_dir)
+                    .expect("desired_symlinks succeeds for a just-applied commit");
+                let previous_symlinks = match current_commit {
+                    Some(oid) => self
+                        .store
+                        .desired_symlinks(oid, &self.hostname, &self.apps_dir)
+                        .expect("desired_symlinks succeeds for the current commit"),
+                    None => BTreeMap::new(),
+                };
+
+                if let Err(err) = (self.on_post_apply)(
+                    &desired_units,
+                    &unit_changes,
+                    &desired_symlinks,
+                    &previous_symlinks,
+                    emit_message,
+                ) {
                     emit_message(Message::Error {
-                        message: format!("systemd unit change failed: {err}"),
+                        message: format!("post-apply failed: {err}"),
                     });
                     return;
                 }
