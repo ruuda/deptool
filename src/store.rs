@@ -6,8 +6,23 @@ use std::path::Path;
 
 use git2::{Commit, Oid, Repository, Tree};
 
+use serde::Deserialize;
+
 use crate::error::{Error, Result};
 use crate::prim::Hostname;
+
+/// Per-app manifest declaring runtime state that deptool should manage.
+#[derive(Default, Deserialize)]
+pub struct Manifest {
+    #[serde(default)]
+    pub systemd: SystemdConfig,
+}
+
+#[derive(Default, Deserialize)]
+pub struct SystemdConfig {
+    #[serde(default)]
+    pub units_enabled: Vec<String>,
+}
 
 /// A bare Git repository used as the config store.
 pub struct Store {
@@ -190,21 +205,23 @@ impl Store {
         Ok(units)
     }
 
-    /// Read the enabled units from an app tree's `systemd.json`.
+    /// Read the enabled units from an app's manifest as a set.
+    pub fn enabled_units(&self, app_tree_oid: Oid) -> Result<std::collections::BTreeSet<String>> {
+        let manifest = self.read_manifest(app_tree_oid)?;
+        Ok(manifest.systemd.units_enabled.into_iter().collect())
+    }
+
+    /// Read the manifest from an app tree's `manifest.json`.
     ///
-    /// Returns an empty set if the app has no `systemd.json`.
-    pub fn app_enabled_units(
-        &self,
-        app_tree_oid: Oid,
-    ) -> Result<std::collections::BTreeSet<String>> {
+    /// Returns a default manifest if the app has no `manifest.json`.
+    pub fn read_manifest(&self, app_tree_oid: Oid) -> Result<Manifest> {
         let tree = self.repo.find_tree(app_tree_oid)?;
-        let entry = match tree.get_name("systemd.json") {
+        let entry = match tree.get_name("manifest.json") {
             Some(entry) => entry,
-            None => return Ok(std::collections::BTreeSet::new()),
+            None => return Ok(Manifest::default()),
         };
         let blob = self.repo.find_blob(entry.id())?;
-        let config: crate::plan::SystemdConfig = serde_json::from_slice(blob.content())?;
-        Ok(config.units_enabled.into_iter().collect())
+        Ok(serde_json::from_slice(blob.content())?)
     }
 
     /// Get the app tree oids for a host from a config tree.

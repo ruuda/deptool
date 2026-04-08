@@ -83,14 +83,14 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                     let link = store.app_units(*new_tree)?;
-                    let enabled = store.app_enabled_units(*new_tree)?;
+                    let enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&BTreeSet::new(), &enabled);
                     write_unit_actions(out, &units, &link, &BTreeSet::new(), color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
                     let unlink = store.app_units(*old_tree)?;
-                    let enabled = store.app_enabled_units(*old_tree)?;
+                    let enabled = store.enabled_units(*old_tree)?;
                     let units = diff_enabled(&enabled, &BTreeSet::new());
                     write_unit_actions(out, &units, &BTreeSet::new(), &unlink, color)?;
                 }
@@ -103,8 +103,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     let new_all = store.app_units(*new_tree)?;
                     let link: BTreeSet<_> = new_all.difference(&old_all).cloned().collect();
                     let unlink: BTreeSet<_> = old_all.difference(&new_all).cloned().collect();
-                    let old_enabled = store.app_enabled_units(*old_tree)?;
-                    let new_enabled = store.app_enabled_units(*new_tree)?;
+                    let old_enabled = store.enabled_units(*old_tree)?;
+                    let new_enabled = store.enabled_units(*new_tree)?;
                     let units = diff_enabled(&old_enabled, &new_enabled);
                     write_unit_actions(out, &units, &link, &unlink, color)?;
                 }
@@ -419,8 +419,8 @@ web1
         let c1 = t.commit(&[
             ("web1/nginx/nginx.conf", b"server {}\n"),
             (
-                "web1/nginx/systemd.json",
-                br#"{"units_enabled":["nginx.service"]}"#,
+                "web1/nginx/manifest.json",
+                br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
             ),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
@@ -440,8 +440,8 @@ web1
             "\
 web1
   + nginx
+      + manifest.json
       + nginx.conf
-      + systemd.json
       enable nginx.service
 ",
         );
@@ -456,8 +456,8 @@ web1
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
             ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
             (
-                "web1/nginx/systemd.json",
-                br#"{"units_enabled":["nginx.service"]}"#,
+                "web1/nginx/manifest.json",
+                br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
             ),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
@@ -477,8 +477,8 @@ web1
             "\
 web1
   + nginx
+      + manifest.json
       + nginx.conf
-      + systemd.json
       + systemd/nginx-reload.timer
       + systemd/nginx.service
       link nginx-reload.timer
@@ -496,8 +496,8 @@ web1
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
             ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
             (
-                "web1/nginx/systemd.json",
-                br#"{"units_enabled":["nginx.service"]}"#,
+                "web1/nginx/manifest.json",
+                br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
             ),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
@@ -531,8 +531,8 @@ web1
         let c1 = t.commit(&[
             ("web1/nginx/nginx.conf", b"server {}\n"),
             (
-                "web1/nginx/systemd.json",
-                br#"{"units_enabled":["nginx.service"]}"#,
+                "web1/nginx/manifest.json",
+                br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
             ),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
@@ -593,14 +593,14 @@ web1
     #[test]
     fn updated_app_with_unchanged_unit_shows_restart_action() -> Result<()> {
         let t = TestRepo::new();
-        let systemd_json = br#"{"units_enabled":["nginx.service"]}"#;
+        let manifest = br#"{"systemd":{"units_enabled":["nginx.service"]}}"#;
         let c1 = t.commit(&[
             ("web1/nginx/nginx.conf", b"v1"),
-            ("web1/nginx/systemd.json", systemd_json),
+            ("web1/nginx/manifest.json", manifest),
         ]);
         let c2 = t.commit(&[
             ("web1/nginx/nginx.conf", b"v2"),
-            ("web1/nginx/systemd.json", systemd_json),
+            ("web1/nginx/manifest.json", manifest),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");

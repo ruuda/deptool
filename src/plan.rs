@@ -5,11 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use git2::{Oid, Tree};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize)]
-pub struct SystemdConfig {
-    pub units_enabled: Vec<String>,
-}
-
 use crate::error::Result;
 use crate::prim::Hostname;
 use crate::store::Store;
@@ -133,27 +128,26 @@ pub fn diff_apps(
     changes
 }
 
-/// Validate that every unit in `systemd.json` has a file in `systemd/`.
-fn validate_systemd_config(store: &Store, config_tree: &Tree, host: &Hostname) -> Result<()> {
+/// Validate that every unit in a manifest's systemd section has a file in
+/// `systemd/`.
+fn validate_manifest(store: &Store, config_tree: &Tree, host: &Hostname) -> Result<()> {
     let apps = store.get_host_apps(config_tree, host)?;
     for (app, app_tree_oid) in &apps {
-        let app_tree = store.repo.find_tree(*app_tree_oid)?;
-        let config_entry = match app_tree.get_name("systemd.json") {
-            Some(entry) => entry,
-            None => continue,
-        };
-        let blob = store.repo.find_blob(config_entry.id())?;
-        let config: SystemdConfig = serde_json::from_slice(blob.content())?;
+        let manifest = store.read_manifest(*app_tree_oid)?;
+        if manifest.systemd.units_enabled.is_empty() {
+            continue;
+        }
 
+        let app_tree = store.repo.find_tree(*app_tree_oid)?;
         let systemd_tree = match app_tree.get_name("systemd") {
             Some(e) => store.repo.find_tree(e.id())?,
             None => {
                 return Err(crate::error::Error::InvalidConfig(format!(
-                    "app {app} has systemd.json but no systemd/ directory",
+                    "app {app} enables units but has no systemd/ directory",
                 )));
             }
         };
-        for unit in &config.units_enabled {
+        for unit in &manifest.systemd.units_enabled {
             if systemd_tree.get_name(unit).is_none() {
                 return Err(crate::error::Error::InvalidConfig(format!(
                     "app {app} enables {unit} but systemd/{unit} does not exist",
@@ -184,7 +178,7 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        validate_systemd_config(store, &main_tree, &host)?;
+        validate_manifest(store, &main_tree, &host)?;
         let target_apps = store.get_host_apps(&main_tree, &host)?;
 
         let (expected_current, current_apps) = match store
@@ -327,14 +321,14 @@ mod tests {
     #[test]
     fn validate_rejects_enabled_unit_without_file() {
         let t = TestRepo::new();
-        let systemd_json = br#"{"units_enabled": ["ghost.service"]}"#;
+        let manifest = br#"{"systemd": {"units_enabled": ["ghost.service"]}}"#;
         let c1 = t.commit(&[
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
-            ("web1/nginx/systemd.json", systemd_json),
+            ("web1/nginx/manifest.json", manifest),
         ]);
 
         let tree = t.store.get_commit_tree(c1).unwrap();
-        let err = validate_systemd_config(&t.store, &tree, &"web1".into()).unwrap_err();
+        let err = validate_manifest(&t.store, &tree, &"web1".into()).unwrap_err();
 
         let msg = err.to_string();
         assert!(

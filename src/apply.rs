@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use git2::{Oid, Tree};
 
 use crate::error::Result;
-use crate::plan::{AppDiff, SystemdConfig, UnitChanges, diff_enabled};
+use crate::plan::{AppDiff, UnitChanges, diff_enabled};
 use crate::prim::Hostname;
 use crate::store::{self, Store};
 
@@ -171,9 +171,7 @@ pub fn reconcile_symlinks(
     Ok(changed)
 }
 
-/// Collect enabled unit names from `systemd.json`, filtered to given apps.
-///
-/// If an app has no `systemd.json`, none of its units are enabled.
+/// Collect enabled unit names from manifests, filtered to given apps.
 fn collect_enabled_units(
     store: &Store,
     config_tree: &Tree,
@@ -186,14 +184,8 @@ fn collect_enabled_units(
         if !filter_apps.contains(app.as_str()) {
             continue;
         }
-        let app_tree = store.repo.find_tree(*app_tree_oid)?;
-        let entry = match app_tree.get_name("systemd.json") {
-            Some(entry) => entry,
-            None => continue,
-        };
-        let blob = store.repo.find_blob(entry.id())?;
-        let config: SystemdConfig = serde_json::from_slice(blob.content())?;
-        enabled.extend(config.units_enabled);
+        let manifest = store.read_manifest(*app_tree_oid)?;
+        enabled.extend(manifest.systemd.units_enabled);
     }
     Ok(enabled)
 }
@@ -535,8 +527,8 @@ mod tests {
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
             ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
             (
-                "web1/nginx/systemd.json",
-                br#"{"units_enabled": ["nginx.service"]}"#,
+                "web1/nginx/manifest.json",
+                br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#,
             ),
         ]);
 
