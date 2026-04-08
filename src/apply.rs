@@ -202,21 +202,32 @@ pub fn reconcile_manifest_symlinks(
             verify_managed(target, apps_dir)?;
             fs::remove_file(target)?;
         }
-        unix_fs::symlink(source, target)?;
+        create_symlink(source, target)?;
     }
 
     for (target, source) in &changes.create {
-        unix_fs::symlink(source, target)?;
+        create_symlink(source, target)?;
     }
 
     Ok(())
+}
+
+/// Create a symlink, wrapping errors with the target path for diagnostics.
+fn create_symlink(source: &Path, link: &Path) -> Result<()> {
+    unix_fs::symlink(source, link).map_err(|err| {
+        crate::error::Error::AgentError(format!(
+            "cannot create symlink at {}: {err}; \
+             if a file already exists there, remove it manually and retry",
+            link.display(),
+        ))
+    })
 }
 
 /// Verify a symlink points into `apps_dir` before we remove or overwrite it.
 fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     match fs::read_link(link) {
         Ok(actual) if actual.starts_with(apps_dir) => Ok(()),
-        Ok(actual) => Err(crate::error::Error::InvalidConfig(format!(
+        Ok(actual) => Err(crate::error::Error::AgentError(format!(
             "refusing to touch {}: points to {}, not into {}",
             link.display(),
             actual.display(),
