@@ -47,11 +47,6 @@ pub enum Message {
         /// Who currently holds the lock, if known.
         held_by: Option<String>,
     },
-    /// A systemd enable/restart/disable operation failed.
-    SystemdUnitChangeFailed {
-        unit: String,
-        operation: String,
-    },
     /// Output of `systemctl status` for systemd units that were just changed.
     SystemdUnitStatus {
         output: String,

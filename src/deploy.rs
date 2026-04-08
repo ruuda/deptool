@@ -348,9 +348,6 @@ pub fn apply_hosts(
                         RefUpdate::ApplyComplete,
                     )?;
                 }
-                Message::SystemdUnitChangeFailed { unit, operation } => {
-                    progress.log_message(host, &format!("{operation} {unit}: failed"));
-                }
                 Message::SystemdUnitStatus { output } => {
                     progress.log_message(host, output.trim_end());
                 }

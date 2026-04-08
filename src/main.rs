@@ -244,23 +244,10 @@ fn systemd_apply_changes(
     unit_dir: &std::path::Path,
 ) -> error::Result<()> {
     let mut touched: Vec<&str> = Vec::new();
-    let mut had_failure = false;
-    let mut run_systemctl = |op: &str, unit: &str| {
-        if !systemctl_ok(&[op, unit]) {
-            had_failure = true;
-            emit(protocol::Message::SystemdUnitChangeFailed {
-                unit: unit.to_string(),
-                operation: op.to_string(),
-            });
-        }
-    };
 
-    // Split disable/enable from stop/start: `--now` swallows start/stop
-    // failures, reporting success as long as the enablement change worked.
     for unit in &changes.disable {
         touched.push(unit);
-        run_systemctl("stop", unit);
-        run_systemctl("disable", unit);
+        systemctl_ok(&["disable", "--now", unit]);
     }
 
     // Reconcile unit symlinks, then reload so systemd picks them up.
@@ -273,38 +260,45 @@ fn systemd_apply_changes(
 
     for unit in &changes.enable {
         touched.push(unit);
-        run_systemctl("enable", unit);
-        run_systemctl("start", unit);
+        systemctl_ok(&["enable", "--now", unit]);
     }
     for unit in &changes.restart {
         touched.push(unit);
-        run_systemctl("restart", unit);
+        systemctl_ok(&["restart", unit]);
     }
 
-    if !touched.is_empty() {
-        // Let services initialize before capturing status, so the
-        // output includes meaningful state rather than just "activating".
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        // Force color: systemctl won't color because stdout is a pipe,
-        // but the output is forwarded to the operator's terminal.
-        let output = match std::process::Command::new("systemctl")
-            .arg("status")
-            .args(&touched)
-            .env("SYSTEMD_COLORS", "true")
-            .output()
-        {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-            Err(err) => format!("failed to run systemctl status: {err}"),
-        };
-        emit(protocol::Message::SystemdUnitStatus { output });
+    if touched.is_empty() {
+        return Ok(());
     }
 
-    if had_failure {
-        Err(error::Error::AgentError(
-            "one or more systemd unit changes failed".into(),
-        ))
-    } else {
+    // Let services initialize before checking state.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    let mut is_active_cmd = vec!["is-active"];
+    for unit in changes.enable.iter().chain(&changes.restart) {
+        is_active_cmd.push(unit);
+    }
+    let all_active = is_active_cmd.len() == 1 || systemctl_ok(&is_active_cmd);
+
+    // Force color: systemctl won't color because stdout is a pipe,
+    // but the output is forwarded to the operator's terminal.
+    let output = match std::process::Command::new("systemctl")
+        .arg("status")
+        .args(&touched)
+        .env("SYSTEMD_COLORS", "true")
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(err) => format!("failed to run systemctl status: {err}"),
+    };
+    emit(protocol::Message::SystemdUnitStatus { output });
+
+    if all_active {
         Ok(())
+    } else {
+        Err(error::Error::AgentError(
+            "one or more units failed to become active".into(),
+        ))
     }
 }
 
