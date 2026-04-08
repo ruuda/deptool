@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
-use crate::apply::apply_host;
+use crate::apply::{DesiredUnits, apply_host};
 use crate::error::Result;
 use crate::plan::UnitChanges;
 use crate::prim::Hostname;
@@ -62,12 +62,15 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
     }
 }
 
+/// Callback for the systemd phase (disable, reconcile, enable, restart).
+type OnUnitsChanged =
+    Box<dyn Fn(&DesiredUnits, &UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>;
+
 pub struct HostSession {
     pub store: Store,
     pub hostname: Hostname,
     apps_dir: PathBuf,
-    unit_dir: PathBuf,
-    on_units_changed: Box<dyn Fn(&UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>,
+    on_units_changed: OnUnitsChanged,
     /// Acquired during lock, held for the session lifetime.
     lock: Option<DeployLock>,
 }
@@ -85,14 +88,12 @@ impl HostSession {
         store: Store,
         hostname: Hostname,
         apps_dir: PathBuf,
-        unit_dir: PathBuf,
-        on_units_changed: Box<dyn Fn(&UnitChanges, &mut dyn FnMut(Message)) -> Result<()>>,
+        on_units_changed: OnUnitsChanged,
     ) -> Self {
         HostSession {
             store,
             hostname,
             apps_dir,
-            unit_dir,
             on_units_changed,
             lock: None,
         }
@@ -100,18 +101,12 @@ impl HostSession {
 
     /// Create a session for testing that does not touch systemd.
     #[doc(hidden)]
-    pub fn new_test(
-        repo: git2::Repository,
-        hostname: &str,
-        apps_dir: &std::path::Path,
-        unit_dir: &std::path::Path,
-    ) -> Self {
-        let on_units_changed = Box::new(|_: &_, _: &mut dyn FnMut(Message)| Ok(()));
+    pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
+        let on_units_changed: OnUnitsChanged = Box::new(|_, _, _| Ok(()));
         HostSession::new(
             Store { repo },
             hostname.into(),
             apps_dir.to_path_buf(),
-            unit_dir.to_path_buf(),
             on_units_changed,
         )
     }
@@ -242,7 +237,6 @@ impl HostSession {
                     current_commit,
                     &self.hostname,
                     &self.apps_dir,
-                    &self.unit_dir,
                     operator,
                     |app, diff| {
                         emit_message(Message::AppliedApp {
@@ -262,13 +256,18 @@ impl HostSession {
                     }
                 };
 
-                if !unit_changes.is_empty() {
-                    if let Err(err) = (self.on_units_changed)(&unit_changes, emit_message) {
-                        emit_message(Message::Error {
-                            message: format!("systemd unit change failed: {err}"),
-                        });
-                        return;
-                    }
+                let desired_units = self
+                    .store
+                    .desired_units(target_commit, &self.hostname, &self.apps_dir)
+                    .expect("desired_units succeeds for a just-applied commit");
+
+                if let Err(err) =
+                    (self.on_units_changed)(&desired_units, &unit_changes, emit_message)
+                {
+                    emit_message(Message::Error {
+                        message: format!("systemd unit change failed: {err}"),
+                    });
+                    return;
                 }
 
                 self.store

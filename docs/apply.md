@@ -14,9 +14,10 @@ checkouts are small (just config files) and are kept indefinitely.
 A typical app directory:
 
     /var/lib/deptool/apps/nginx/current/
-    ├── nginx.service
     ├── nginx.conf
-    └── mime.types
+    ├── mime.types
+    └── systemd/
+        └── nginx.service
 
 Everything the app needs — config files, systemd units, environment files —
 lives in one flat (or shallow) directory. A human operator can `ls` and
@@ -32,18 +33,21 @@ When the plan indicates an app has changed (Add or Update):
     avoids trusting a potentially incomplete checkout.
  2. Atomically swap the `current` symlink: create a temp symlink, then
     `rename(2)` it over `current`.
- 3. Reconcile systemd unit symlinks (see below).
- 4. `systemctl daemon-reload` + `systemctl restart <unit>`.
+ 3. Systemd phase (see below).
 
 For apps that did not change: do nothing. No checkout, no restart.
 Files keep their original mtime/ctime, which aids debugging.
 
 ## Systemd units
 
-Systemd expects unit files in `/etc/systemd/system/`. Deptool manages this
-with symlinks:
+Deptool makes unit files available to systemd by symlinking them into
+`/etc/systemd/system/`:
 
-    /etc/systemd/system/nginx.service -> /var/lib/deptool/apps/nginx/current/nginx.service
+    /etc/systemd/system/nginx.service -> /var/lib/deptool/apps/nginx/current/systemd/nginx.service
+
+All units under an app's `systemd/` directory are linked, whether or not
+they are enabled. Enabling a unit (`systemctl enable`) creates additional
+symlinks (in `.wants/`/`.requires/` directories) to activate it on boot.
 
 Unit files reference config through the `current` symlink path:
 
@@ -60,20 +64,20 @@ whether they point into `/var/lib/deptool/`. This makes the operation
 convergent: it does not matter what state the system was in before. Crashed
 mid-deploy, manually tampered with, fresh boot — the result is the same.
 
-After all per-app checkouts and symlink swaps are done, deptool reconciles
-unit symlinks once for the entire host:
+After all per-app checkouts and symlink swaps are done, the systemd phase
+runs in this order:
 
- 1. Scan `/etc/systemd/system/` for symlinks pointing into
-    `/var/lib/deptool/`. This is the set of currently installed units.
- 2. Collect all unit files across all deployed apps (everything under
-    `/var/lib/deptool/apps/*/current/`). This is the desired set.
- 3. Create symlinks for units in the desired set but not installed.
-    Remove symlinks for units installed but not in the desired set.
-
-This single pass handles added, updated, and removed apps uniformly.
-After reconciliation, `systemctl daemon-reload`. Then restart the units
-for apps that changed. Deptool always restarts, never just reloads —
-restart is simpler, safer, and subsumes reload.
+ 1. `systemctl disable --now` for units that should no longer be enabled.
+ 2. Reconcile unit symlinks: scan `/etc/systemd/system/` for symlinks
+    pointing into `/var/lib/deptool/` (the actual set), collect all unit
+    files across all deployed apps (the desired set), and create or remove
+    symlinks to make actual match desired. This runs after disable because
+    systemd treats our symlinks as "linked units" and `systemctl disable`
+    removes the link itself, not just the enablement symlinks. Reconciling
+    here restores them.
+ 3. `systemctl daemon-reload` to pick up the reconciled state.
+ 4. `systemctl enable --now` for units that should be newly enabled.
+ 5. `systemctl restart` for units whose app changed while staying enabled.
 
 ## Reboot resilience
 

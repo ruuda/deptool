@@ -145,6 +145,51 @@ impl Store {
         self.path().join("deptool.lock")
     }
 
+    /// Collect desired unit symlinks for a host.
+    ///
+    /// Maps each unit filename to the absolute symlink target path under
+    /// `apps_dir/<app>/current/systemd/`.
+    pub fn desired_units(
+        &self,
+        commit_oid: Oid,
+        host: &Hostname,
+        apps_dir: &std::path::Path,
+    ) -> Result<crate::apply::DesiredUnits> {
+        let tree = self.get_commit_tree(commit_oid)?;
+        let apps = self.get_host_apps(&tree, host)?;
+        let mut units = std::collections::BTreeMap::new();
+        for (app, app_tree_oid) in &apps {
+            for name in self.app_units(*app_tree_oid)? {
+                let target = apps_dir
+                    .join(app)
+                    .join("current")
+                    .join("systemd")
+                    .join(&name);
+                units.insert(name, target);
+            }
+        }
+        Ok(units)
+    }
+
+    /// List all unit files in an app tree's `systemd/` directory.
+    ///
+    /// Returns an empty set if the app has no `systemd/` subtree.
+    pub fn app_units(&self, app_tree_oid: Oid) -> Result<std::collections::BTreeSet<String>> {
+        let tree = self.repo.find_tree(app_tree_oid)?;
+        let systemd_entry = match tree.get_name("systemd") {
+            Some(entry) => entry,
+            None => return Ok(std::collections::BTreeSet::new()),
+        };
+        let systemd_tree = self.repo.find_tree(systemd_entry.id())?;
+        let mut units = std::collections::BTreeSet::new();
+        for entry in systemd_tree.iter() {
+            if let Some(name) = entry.name() {
+                units.insert(name.to_string());
+            }
+        }
+        Ok(units)
+    }
+
     /// Read the enabled units from an app tree's `systemd.json`.
     ///
     /// Returns an empty set if the app has no `systemd.json`.

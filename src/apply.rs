@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::os::unix::fs as unix_fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use git2::{Oid, Tree};
 
@@ -11,6 +11,9 @@ use crate::error::Result;
 use crate::plan::{AppDiff, SystemdConfig, UnitChanges, diff_enabled};
 use crate::prim::Hostname;
 use crate::store::{self, Store};
+
+/// Map from unit filename to the absolute symlink target path.
+pub type DesiredUnits = BTreeMap<String, PathBuf>;
 
 const OID_PREFIX_LEN: usize = 10;
 
@@ -69,15 +72,15 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// Apply a deployment to a host's filesystem.
 ///
 /// Sets the target ref, diffs current vs target apps, checks out or removes
-/// each changed app, reconciles unit symlinks, and sets the current ref.
-/// Calls `on_app` for each changed app.
+/// each changed app, and computes the desired unit symlinks and lifecycle
+/// actions. Does *not* reconcile symlinks or touch systemd -- the caller
+/// does that in the systemd phase. Calls `on_app` for each changed app.
 pub fn apply_host(
     store: &Store,
     commit_oid: Oid,
     actual_current: Option<Oid>,
     host: &Hostname,
     apps_dir: &Path,
-    unit_dir: &Path,
     operator: &str,
     mut on_app: impl FnMut(&str, &AppDiff),
 ) -> Result<UnitChanges> {
@@ -113,12 +116,6 @@ pub fn apply_host(
         on_app(app, change);
     }
 
-    // Make all units from the target tree available to systemd by
-    // symlinking them into the unit dir. This is independent of whether
-    // they are enabled or not.
-    let desired_units = collect_desired_units(store, &target_tree, host, apps_dir)?;
-    reconcile_symlinks(&desired_units, apps_dir, unit_dir)?;
-
     // Compute unit lifecycle actions. We collect enabled units only from
     // changed apps: unchanged apps need no action. This means a unit in
     // both prev and target was enabled across a change, so we need to restart
@@ -142,8 +139,8 @@ pub fn apply_host(
 /// Reconcile unit symlinks: make unit_dir match desired.
 ///
 /// Returns the set of unit names whose symlinks were added or changed.
-fn reconcile_symlinks(
-    desired: &BTreeMap<String, std::path::PathBuf>,
+pub fn reconcile_symlinks(
+    desired: &DesiredUnits,
     apps_dir: &Path,
     unit_dir: &Path,
 ) -> Result<BTreeSet<String>> {
@@ -172,39 +169,6 @@ fn reconcile_symlinks(
     }
 
     Ok(changed)
-}
-
-/// Collect desired unit files by walking the Git tree.
-///
-/// For each app, checks for a `systemd/` subtree and maps unit filenames
-/// to their absolute path under `apps_dir/<app>/current/systemd/`.
-fn collect_desired_units(
-    store: &Store,
-    config_tree: &Tree,
-    host: &Hostname,
-    apps_dir: &Path,
-) -> Result<BTreeMap<String, std::path::PathBuf>> {
-    let apps = store.get_host_apps(config_tree, host)?;
-    let mut units = BTreeMap::new();
-    for (app, app_tree_oid) in &apps {
-        let app_tree = store.repo.find_tree(*app_tree_oid)?;
-        let systemd_entry = match app_tree.get_name("systemd") {
-            Some(entry) => entry,
-            None => continue,
-        };
-        let systemd_tree = store.repo.find_tree(systemd_entry.id())?;
-        for entry in systemd_tree.iter() {
-            if let Some(name) = entry.name() {
-                let target = apps_dir
-                    .join(app)
-                    .join("current")
-                    .join("systemd")
-                    .join(name);
-                units.insert(name.to_string(), target);
-            }
-        }
-    }
-    Ok(units)
 }
 
 /// Collect enabled unit names from `systemd.json`, filtered to given apps.
@@ -480,17 +444,24 @@ mod tests {
             current: Option<git2::Oid>,
             on_app: impl FnMut(&str, &AppDiff),
         ) -> Result<UnitChanges> {
+            let host = &"web1".into();
             let operator = "deckard@spinner";
-            apply_host(
+            let changes = apply_host(
                 &self.repo.store,
                 commit,
                 current,
-                &"web1".into(),
+                host,
                 self.apps.path(),
-                self.units.path(),
                 operator,
                 on_app,
-            )
+            )?;
+            // Reconcile here so tests that check unit symlinks still work.
+            let desired = self
+                .repo
+                .store
+                .desired_units(commit, host, self.apps.path())?;
+            reconcile_symlinks(&desired, self.apps.path(), self.units.path())?;
+            Ok(changes)
         }
     }
 

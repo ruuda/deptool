@@ -1,7 +1,7 @@
 // Shared modules, re-exported for integration tests.
 // The binary entry point is in main.rs.
 
-mod apply;
+pub mod apply;
 pub mod deploy;
 pub mod display;
 pub mod error;

@@ -125,7 +125,7 @@ impl TestRepo {
     }
 }
 
-/// A host-side test environment: a bare repo with apps and units directories.
+/// A host-side test environment: a bare repo with an apps directory.
 ///
 /// Wraps a `HostSession` and provides helpers for sending requests and
 /// collecting responses.
@@ -133,7 +133,6 @@ pub struct TestHost {
     pub session: crate::session::HostSession,
     _store: TempDir,
     apps: TempDir,
-    units: TempDir,
 }
 
 impl TestHost {
@@ -141,15 +140,12 @@ impl TestHost {
     pub fn new(hostname: &str) -> Self {
         let store = TempDir::new("store");
         let apps = TempDir::new("apps");
-        let units = TempDir::new("units");
         let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let session =
-            crate::session::HostSession::new_test(repo, hostname, apps.path(), units.path());
+        let session = crate::session::HostSession::new_test(repo, hostname, apps.path());
         TestHost {
             session,
             _store: store,
             apps,
-            units,
         }
     }
 
@@ -200,17 +196,12 @@ impl TestHost {
     /// Create a fresh in-memory connection to this host.
     ///
     /// Each call opens the same underlying repo with a new session, like a
-    /// new SSH connection to the same host. The apps and units directories
-    /// are shared across connections, as they would be in production.
+    /// new SSH connection to the same host. The apps directory is shared
+    /// across connections, as it would be in production.
     pub fn connect(&self) -> Box<dyn Connection> {
         let repo = Repository::open(self.session.store.path()).expect("repo is opened");
         let hostname = self.session.hostname.0.clone();
-        let session = crate::session::HostSession::new_test(
-            repo,
-            &hostname,
-            self.apps.path(),
-            self.units.path(),
-        );
+        let session = crate::session::HostSession::new_test(repo, &hostname, self.apps.path());
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             hostname,

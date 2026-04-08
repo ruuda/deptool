@@ -237,14 +237,15 @@ fn run() -> Result<()> {
 use session::AgentConfig;
 
 fn systemd_apply_changes(
+    desired_units: &apply::DesiredUnits,
     changes: &plan::UnitChanges,
     emit: &mut dyn FnMut(protocol::Message),
+    apps_dir: &std::path::Path,
+    unit_dir: &std::path::Path,
 ) -> error::Result<()> {
-    std::process::Command::new("systemctl")
-        .arg("daemon-reload")
-        .status()?;
     let mut touched: Vec<&str> = Vec::new();
     let mut had_failure = false;
+
     for unit in &changes.disable {
         touched.push(unit);
         if !systemctl_ok(&["disable", "--now", unit]) {
@@ -255,6 +256,15 @@ fn systemd_apply_changes(
             });
         }
     }
+
+    // Reconcile unit symlinks, then reload so systemd picks them up.
+    // This runs after disable because systemd treats our symlinks as
+    // "linked units" and `systemctl disable` removes the link itself,
+    // not just the enablement symlinks. Reconciling here restores them
+    // and also picks up any new units from the deploy.
+    apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
+    systemctl_ok(&["daemon-reload"]);
+
     for unit in &changes.enable {
         touched.push(unit);
         if !systemctl_ok(&["enable", "--now", unit]) {
@@ -308,12 +318,15 @@ fn systemctl_ok(args: &[&str]) -> bool {
 }
 
 fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession {
+    let apps_dir = config.apps_dir.clone();
+    let unit_dir = config.unit_dir.clone();
     session::HostSession::new(
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        config.unit_dir.clone(),
-        Box::new(systemd_apply_changes),
+        Box::new(move |desired, changes, emit| {
+            systemd_apply_changes(desired, changes, emit, &apps_dir, &unit_dir)
+        }),
     )
 }
 

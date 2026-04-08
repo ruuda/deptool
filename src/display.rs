@@ -82,26 +82,31 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
-                    let units =
-                        diff_enabled(&BTreeSet::new(), &store.app_enabled_units(*new_tree)?);
-                    write_unit_actions(out, &units, color)?;
+                    let link = store.app_units(*new_tree)?;
+                    let enabled = store.app_enabled_units(*new_tree)?;
+                    let units = diff_enabled(&BTreeSet::new(), &enabled);
+                    write_unit_actions(out, &units, &link, &BTreeSet::new(), color)?;
                 }
                 AppDiff::Remove { old_tree } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
-                    let units =
-                        diff_enabled(&store.app_enabled_units(*old_tree)?, &BTreeSet::new());
-                    write_unit_actions(out, &units, color)?;
+                    let unlink = store.app_units(*old_tree)?;
+                    let enabled = store.app_enabled_units(*old_tree)?;
+                    let units = diff_enabled(&enabled, &BTreeSet::new());
+                    write_unit_actions(out, &units, &BTreeSet::new(), &unlink, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "  {} {app}", color.yellow("~"))?;
                     for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
-                    let units = diff_enabled(
-                        &store.app_enabled_units(*old_tree)?,
-                        &store.app_enabled_units(*new_tree)?,
-                    );
-                    write_unit_actions(out, &units, color)?;
+                    let old_all = store.app_units(*old_tree)?;
+                    let new_all = store.app_units(*new_tree)?;
+                    let link: BTreeSet<_> = new_all.difference(&old_all).cloned().collect();
+                    let unlink: BTreeSet<_> = old_all.difference(&new_all).cloned().collect();
+                    let old_enabled = store.app_enabled_units(*old_tree)?;
+                    let new_enabled = store.app_enabled_units(*new_tree)?;
+                    let units = diff_enabled(&old_enabled, &new_enabled);
+                    write_unit_actions(out, &units, &link, &unlink, color)?;
                 }
             }
         }
@@ -190,15 +195,28 @@ fn empty_tree_oid() -> Oid {
     Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
-fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
+/// Print unit actions in execution order: disable, unlink, link, enable, restart.
+fn write_unit_actions(
+    out: &mut impl Write,
+    units: &UnitChanges,
+    link: &BTreeSet<String>,
+    unlink: &BTreeSet<String>,
+    color: UseColor,
+) -> Result<()> {
+    for unit in &units.disable {
+        writeln!(out, "      {} {unit}", color.red("disable"))?;
+    }
+    for unit in unlink {
+        writeln!(out, "      {} {unit}", color.red("unlink"))?;
+    }
+    for unit in link {
+        writeln!(out, "      {} {unit}", color.green("link"))?;
+    }
     for unit in &units.enable {
         writeln!(out, "      {} {unit}", color.green("enable"))?;
     }
     for unit in &units.restart {
         writeln!(out, "      {} {unit}", color.yellow("restart"))?;
-    }
-    for unit in &units.disable {
-        writeln!(out, "      {} {unit}", color.red("disable"))?;
     }
     Ok(())
 }
@@ -425,6 +443,83 @@ web1
       + nginx.conf
       + systemd.json
       enable nginx.service
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_shows_link_for_non_enabled_units() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}\n"),
+            ("web1/nginx/systemd/nginx.service", b"[Service]"),
+            ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
+            (
+                "web1/nginx/systemd.json",
+                br#"{"units_enabled":["nginx.service"]}"#,
+            ),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    expected_current: None,
+                    is_fast_forward: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  + nginx
+      + nginx.conf
+      + systemd.json
+      + systemd/nginx-reload.timer
+      + systemd/nginx.service
+      link nginx-reload.timer
+      link nginx.service
+      enable nginx.service
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removed_app_shows_unlink_for_non_enabled_units() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/nginx/systemd/nginx.service", b"[Service]"),
+            ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
+            (
+                "web1/nginx/systemd.json",
+                br#"{"units_enabled":["nginx.service"]}"#,
+            ),
+        ]);
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
+                    expected_current: Some(c1),
+                    is_fast_forward: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  - nginx
+      disable nginx.service
+      unlink nginx-reload.timer
+      unlink nginx.service
 ",
         );
         Ok(())
