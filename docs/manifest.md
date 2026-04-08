@@ -6,30 +6,41 @@ a Deptool app is just a collection of files deployed atomically.
 
 Putting files on target hosts is not sufficient though, Deptool also needs to
 manage some daemon and runtime state, like enabling and starting systemd units.
-This is specified through a _manifest_ that is tracked in the [store](store.md).
+This is specified through a _manifest_ (`manifest.json`) that is tracked in the
+[store](store.md).
 
-TODO: Currently we have `systemd.json` that lists `units_enabled`. Probably we
-should change this to `manifest.json`, which then has
+## Format
 
 ```json
 {
   "systemd": {
     "units_enabled": ["a.service", "b.timer"]
-  }
-}
-```
-
-Then later we can add other features to this manifest. For example, we could
-have a section
-
-```json
-{
+  },
   "symlinks": {
     "/etc/frobnicator.conf": "frobnicator.conf"
   }
 }
 ```
 
-where the keys are paths on the target host's root filesystem, and the values
-are relative paths inside the app's checkout. That's for a future version
-though, right now we do not need this.
+All sections are optional and default to empty.
+
+### systemd
+
+Lists which units from the app's `systemd/` directory should be enabled. All
+units in `systemd/` are symlinked into the unit directory, but only those listed
+here receive `systemctl enable --now`.
+
+### symlinks
+
+Maps absolute paths on the target host to relative paths inside the app's
+checkout. Deptool creates symlinks at the specified paths, pointing through
+`<app>/current/` so they survive reboots and always resolve to the active
+version.
+
+## Incremental adoption
+
+Deptool is designed for incremental adoption. When a symlink target already
+exists as a regular file on the host, Deptool compares its contents against
+the source file. If they are identical, the file is replaced with a symlink.
+If they differ, the deploy fails with an actionable error message, so the
+operator can resolve the conflict manually.

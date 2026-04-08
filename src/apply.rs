@@ -212,15 +212,57 @@ pub fn reconcile_manifest_symlinks(
     Ok(())
 }
 
-/// Create a symlink, wrapping errors with the target path for diagnostics.
+/// Create a symlink at `link` pointing to `source`.
+///
+/// If a file already exists at `link` with identical contents to `source`,
+/// it is replaced with the symlink. This supports incremental adoption:
+/// config files already present on the host can be moved under Deptool
+/// management without manual intervention.
 fn create_symlink(source: &Path, link: &Path) -> Result<()> {
-    unix_fs::symlink(source, link).map_err(|err| {
-        crate::error::Error::AgentError(format!(
-            "cannot create symlink at {}: {err}; \
-             if a file already exists there, remove it manually and retry",
+    match unix_fs::symlink(source, link) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            if files_match(source, link)? {
+                fs::remove_file(link)?;
+                unix_fs::symlink(source, link)?;
+                Ok(())
+            } else {
+                Err(crate::error::Error::AgentError(format!(
+                    "cannot create symlink at {}: \
+                     a file with different contents already exists; \
+                     remove it manually and retry",
+                    link.display(),
+                )))
+            }
+        }
+        Err(err) => Err(crate::error::Error::AgentError(format!(
+            "cannot create symlink at {}: {err}",
             link.display(),
-        ))
-    })
+        ))),
+    }
+}
+
+/// Check whether two files have identical contents, without reading them
+/// entirely into memory.
+fn files_match(a: &Path, b: &Path) -> Result<bool> {
+    use std::io::{BufReader, Read};
+    if fs::metadata(a)?.len() != fs::metadata(b)?.len() {
+        return Ok(false);
+    }
+    let mut a = BufReader::new(fs::File::open(a)?);
+    let mut b = BufReader::new(fs::File::open(b)?);
+    let mut buf_a = [0u8; 8192];
+    let mut buf_b = [0u8; 8192];
+    loop {
+        let n = a.read(&mut buf_a)?;
+        b.read_exact(&mut buf_b[..n])?;
+        if buf_a[..n] != buf_b[..n] {
+            return Ok(false);
+        }
+        if n == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 /// Verify a symlink points into `apps_dir` before we remove or overwrite it.
@@ -612,20 +654,43 @@ mod tests {
     }
 
     #[test]
-    fn manifest_symlinks_creates_new_symlink() -> Result<()> {
+    fn manifest_symlinks_creates_and_adopts_matching_file() -> Result<()> {
         let dir = TempDir::new("symlinks");
         let apps = TempDir::new("apps");
-        let target = dir.path().join("foo.conf");
+        let link = dir.path().join("foo.conf");
         let source = apps.path().join("nginx/current/foo.conf");
+        fs::create_dir_all(source.parent().expect("source has a parent"))?;
+        fs::write(&source, b"config data")?;
 
+        // Fresh creation works.
         let changes = SymlinkChanges {
-            create: vec![(target.clone(), source.clone())],
+            create: vec![(link.clone(), source.clone())],
             remove: Vec::new(),
             change: Vec::new(),
         };
         reconcile_manifest_symlinks(apps.path(), &changes)?;
+        assert_eq!(fs::read_link(&link)?, source);
 
-        assert_eq!(fs::read_link(&target)?, source);
+        // Clean up for the next case.
+        fs::remove_file(&link)?;
+
+        // A regular file with identical contents is adopted.
+        fs::write(&link, b"config data")?;
+        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        assert!(link.is_symlink());
+        assert_eq!(fs::read_link(&link)?, source);
+
+        // Clean up for the next case.
+        fs::remove_file(&link)?;
+
+        // A regular file with different contents is refused.
+        fs::write(&link, b"different data")?;
+        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        assert!(
+            err.to_string().contains("different contents"),
+            "error mentions the conflict: {err}",
+        );
+
         Ok(())
     }
 
