@@ -351,11 +351,20 @@ pub fn apply_hosts(
                 Message::SystemdUnitStatus { output } => {
                     progress.log_message(host, output.trim_end());
                 }
+                Message::Error { message } => {
+                    progress.update(host, HostState::Failed(message.clone()));
+                }
                 _ => {}
             }
         }
     }
-    Ok(())
+
+    match progress.num_failed() {
+        0 => Ok(()),
+        n => Err(Error::DeployFailed(format!(
+            "encountered errors on {n} host(s)"
+        ))),
+    }
 }
 
 /// Send packfiles to all locked hosts over their session connections.
@@ -712,6 +721,34 @@ mod tests {
             "web1 should not have been deployed to"
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn apply_reports_failure_when_agent_errors() -> Result<()> {
+        let driver = TestRepo::new();
+        let commit = driver.commit(&[("web1/app/conf", b"v1")]);
+        let plan = make_plan(commit, &[("web1", None)]);
+
+        // Lock the host but don't push the pack, so apply will fail
+        // because the commit doesn't exist in the agent's store.
+        let target = TestHost::new("web1");
+        let mut conn = target.connect();
+        conn.send_request(&Request::Lock {
+            expected_current_commit: None,
+            operator: "deckard@spinner".into(),
+        })?;
+        assert_eq!(conn.read_message()?, Some(Message::Locked));
+
+        let mut progress = test_progress(&["web1"]);
+        let mut connections = vec![(Hostname::from("web1"), conn)];
+        let result = apply_hosts(&driver.store, &plan, &mut connections, &mut progress);
+
+        assert!(result.is_err(), "deploy should fail");
+        assert!(
+            matches!(progress.state("web1"), HostState::Failed(_)),
+            "host should be in failed state",
+        );
         Ok(())
     }
 }
