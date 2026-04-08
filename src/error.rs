@@ -4,21 +4,34 @@ use std::fmt;
 
 #[derive(Debug)]
 pub enum Error {
+    /// Filesystem I/O failure.
     Io(std::io::Error),
+    /// Git operation failure (libgit2).
     Git(git2::Error),
+    /// JSON parse or serialization failure.
     Json(serde_json::Error),
+    /// A file name in the store is not valid UTF-8.
     NonUtf8FileName,
+    /// A configuration value is structurally invalid (store content or CLI args).
     InvalidConfig(String),
+    /// The agent binary is not present on the target host.
     AgentNotInstalled,
+    /// SSH or other transport-level connection failure.
     ConnectionFailed(String),
+    /// The deploy is not a fast-forward from the host's current state.
     Diverged(crate::prim::Hostname),
+    /// One or more hosts failed during a deploy.
     DeployFailed(String),
+    /// A runtime failure on the target host during the apply phase.
     AgentError(String),
+    /// The installed agent binary doesn't match the expected checksum.
     SetupChecksumMismatch {
         expected_hash: String,
         actual_hash: String,
     },
+    /// Unexpected response during binary installation handshake.
     SetupProtocolError(String),
+    /// Unexpected or malformed message from the agent session.
     ProtocolError(String),
 }
 
