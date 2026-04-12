@@ -367,25 +367,36 @@ pub fn apply_hosts(
     }
 }
 
-/// Send packfiles to all locked hosts over their session connections.
+/// Pre-compute deduplicated packfiles for all hosts in the plan.
 ///
-/// Packs are built per-host, containing only objects the host doesn't
-/// already have, based on the plan's `expected_current` for that host. We only
-/// execute this if we acquired a lock on the host, and we can only take the
-/// lock if our expected commit is up to date, so `expected_current` is a valid
-/// base for the packfile.
+/// Multiple hosts with the same `expected_current` need the same pack, so
+/// we build each unique pack once and base64-encode it for sending.
+pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, String>> {
+    let mut packs = BTreeMap::new();
+    for host_plan in plan.hosts.values() {
+        let key = host_plan.expected_current;
+        if !packs.contains_key(&key) {
+            let bytes = store.create_pack(plan.commit, key)?;
+            packs.insert(key, BASE64.encode(&bytes));
+        }
+    }
+    Ok(packs)
+}
+
+/// Send pre-computed packfiles to all locked hosts.
 pub fn push_packs(
-    store: &Store,
     plan: &Plan,
+    packs: &BTreeMap<Option<Oid>, String>,
     connections: &mut [(Hostname, Box<dyn Connection>)],
     progress: &mut DeployProgress,
 ) -> Result<()> {
     for (host, conn) in connections.iter_mut() {
         progress.update(host, HostState::Pushing);
-        let have_commit = plan.hosts[host].expected_current;
-        let pack_bytes = store.create_pack(plan.commit, have_commit)?;
-        let encoded = BASE64.encode(&pack_bytes);
-        conn.send_request(&Request::ReceivePack { pack_data: encoded })?;
+        let key = plan.hosts[host].expected_current;
+        let encoded = &packs[&key];
+        conn.send_request(&Request::ReceivePack {
+            pack_data: encoded.clone(),
+        })?;
         match conn.read_message()? {
             Some(Message::PackReceived) => {}
             Some(Message::Error { message }) => {
@@ -474,7 +485,8 @@ pub fn run_deploy(
         )));
     }
 
-    push_packs(store, plan, &mut lock_result.locked, progress)?;
+    let packs = build_packs(store, plan)?;
+    push_packs(plan, &packs, &mut lock_result.locked, progress)?;
     apply_hosts(store, plan, &mut lock_result.locked, progress)?;
     Ok(())
 }
