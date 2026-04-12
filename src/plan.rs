@@ -1,9 +1,9 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use git2::{Oid, Tree};
+use git2::Oid;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -180,48 +180,6 @@ pub fn diff_apps(
     changes
 }
 
-/// Validate that every unit in a manifest's systemd section has a file in
-/// `systemd/`.
-fn validate_manifest(store: &Store, config_tree: &Tree, host: &Hostname) -> Result<()> {
-    let apps = store.get_host_apps(config_tree, host)?;
-    for (app, app_tree_oid) in &apps {
-        let manifest = store.read_manifest(*app_tree_oid)?;
-        let app_tree = store.repo.find_tree(*app_tree_oid)?;
-
-        if !manifest.systemd.units_enabled.is_empty() {
-            let systemd_tree = match app_tree.get_name("systemd") {
-                Some(e) => store.repo.find_tree(e.id())?,
-                None => {
-                    return Err(crate::error::Error::InvalidConfig(format!(
-                        "app {app} enables units but has no systemd/ directory",
-                    )));
-                }
-            };
-            for unit in &manifest.systemd.units_enabled {
-                if systemd_tree.get_name(unit).is_none() {
-                    return Err(crate::error::Error::InvalidConfig(format!(
-                        "app {app} enables {unit} but systemd/{unit} does not exist",
-                    )));
-                }
-            }
-        }
-
-        for (target, source) in &manifest.symlinks {
-            if !target.starts_with('/') {
-                return Err(crate::error::Error::InvalidConfig(format!(
-                    "app {app} symlink target {target} is not an absolute path",
-                )));
-            }
-            if app_tree.get_path(Path::new(source)).is_err() {
-                return Err(crate::error::Error::InvalidConfig(format!(
-                    "app {app} symlink source {source} does not exist in the app tree",
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Build a deployment plan by comparing main against each host's current ref.
 ///
 /// TODO: Currently this is based only on the repository state, which means we
@@ -237,12 +195,13 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
     let commit = main_commit.id();
     let main_tree = main_commit.tree()?;
 
+    store.validate(main_tree.id())?;
+
     let mut hosts = BTreeMap::new();
 
     for entry in main_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        validate_manifest(store, &main_tree, &host)?;
         let target_apps = store.get_host_apps(&main_tree, &host)?;
 
         let (expected_current, current_apps) = match store
@@ -380,73 +339,5 @@ mod tests {
         let plan = make_plan(&t.store)?;
         assert!(!plan.hosts[&"web1".into()].is_fast_forward);
         Ok(())
-    }
-
-    #[test]
-    fn validate_rejects_enabled_unit_without_file() {
-        let t = TestRepo::new();
-        let manifest = br#"{"systemd": {"units_enabled": ["ghost.service"]}}"#;
-        let c1 = t.commit(&[
-            ("web1/nginx/systemd/nginx.service", b"[Service]"),
-            ("web1/nginx/manifest.json", manifest),
-        ]);
-
-        let tree = t.store.get_commit_tree(c1).unwrap();
-        let err = validate_manifest(&t.store, &tree, &"web1".into()).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("ghost.service"),
-            "error mentions the unit: {msg}"
-        );
-        assert!(msg.contains("nginx"), "error mentions the app: {msg}");
-    }
-
-    #[test]
-    fn validate_rejects_symlink_with_relative_target() {
-        let t = TestRepo::new();
-        let manifest = br#"{"symlinks": {"etc/foo.conf": "foo.conf"}}"#;
-        let c1 = t.commit(&[
-            ("web1/nginx/foo.conf", b"config"),
-            ("web1/nginx/manifest.json", manifest),
-        ]);
-
-        let tree = t.store.get_commit_tree(c1).unwrap();
-        let err = validate_manifest(&t.store, &tree, &"web1".into()).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("not an absolute path"),
-            "error mentions absolute path: {msg}"
-        );
-    }
-
-    #[test]
-    fn validate_rejects_symlink_with_missing_source() {
-        let t = TestRepo::new();
-        let manifest = br#"{"symlinks": {"/etc/foo.conf": "missing.conf"}}"#;
-        let c1 = t.commit(&[("web1/nginx/manifest.json", manifest)]);
-
-        let tree = t.store.get_commit_tree(c1).unwrap();
-        let err = validate_manifest(&t.store, &tree, &"web1".into()).unwrap_err();
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("missing.conf"),
-            "error mentions the source: {msg}"
-        );
-    }
-
-    #[test]
-    fn validate_accepts_valid_symlinks() -> Result<()> {
-        let t = TestRepo::new();
-        let manifest = br#"{"symlinks": {"/etc/foo.conf": "foo.conf"}}"#;
-        let c1 = t.commit(&[
-            ("web1/nginx/foo.conf", b"config"),
-            ("web1/nginx/manifest.json", manifest),
-        ]);
-
-        let tree = t.store.get_commit_tree(c1)?;
-        validate_manifest(&t.store, &tree, &"web1".into())
     }
 }

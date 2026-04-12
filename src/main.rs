@@ -210,6 +210,7 @@ fn run() -> Result<()> {
         Cmd::Commit { store, dir } => {
             let store = Store::open_or_init(&store)?;
             let tree_oid = store.build_tree(&dir)?;
+            store.validate(tree_oid)?;
             let commit_oid = store.commit_tree(tree_oid)?;
             println!("{commit_oid}");
         }

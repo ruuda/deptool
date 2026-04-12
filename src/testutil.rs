@@ -100,6 +100,15 @@ impl TestRepo {
         commit_files(&self.store, files).expect("commit succeeds")
     }
 
+    /// Get the tree OID for a commit.
+    pub fn get_commit_tree_oid(&self, commit_oid: Oid) -> Oid {
+        self.store
+            .repo
+            .find_commit(commit_oid)
+            .expect("commit exists")
+            .tree_id()
+    }
+
     /// Read the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
     pub fn get_host_tracking_ref(&self, host: &str) -> Option<Oid> {
         self.store

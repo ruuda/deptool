@@ -72,3 +72,28 @@ fn commit_and_deploy_locally() {
         "server {}",
     );
 }
+
+#[test]
+fn commit_rejects_invalid_config() {
+    let store = TempDir::new("store");
+    let config = TempDir::new("config");
+    let app_dir = config.path().join("deckard/nginx");
+    fs::create_dir_all(&app_dir).unwrap();
+    // Enable a unit that doesn't exist on disk.
+    fs::write(
+        app_dir.join("manifest.json"),
+        r#"{"systemd": {"units_enabled": ["nginx.service"]}}"#,
+    )
+    .unwrap();
+
+    let output = Command::new(DEPTOOL)
+        .args(["commit", "--store"])
+        .arg(store.path())
+        .arg(config.path())
+        .output()
+        .expect("deptool commit runs");
+    assert!(
+        !output.status.success(),
+        "commit should reject invalid config"
+    );
+}

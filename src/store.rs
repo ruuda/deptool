@@ -238,6 +238,57 @@ impl Store {
         Ok(result)
     }
 
+    /// Validate all hosts in a config tree.
+    pub fn validate(&self, tree_oid: Oid) -> Result<()> {
+        let tree = self.repo.find_tree(tree_oid)?;
+        for entry in tree.iter() {
+            let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
+            self.validate_app_manifests(&tree, &host)?;
+        }
+        Ok(())
+    }
+
+    /// Validate manifests for all apps on a single host.
+    fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
+        let apps = self.get_host_apps(config_tree, host)?;
+        for (app, app_tree_oid) in &apps {
+            let manifest = self.read_manifest(*app_tree_oid)?;
+            let app_tree = self.repo.find_tree(*app_tree_oid)?;
+
+            if !manifest.systemd.units_enabled.is_empty() {
+                let systemd_tree = match app_tree.get_name("systemd") {
+                    Some(e) => self.repo.find_tree(e.id())?,
+                    None => {
+                        return Err(Error::InvalidConfig(format!(
+                            "app {app} enables units but has no systemd/ directory",
+                        )));
+                    }
+                };
+                for unit in &manifest.systemd.units_enabled {
+                    if systemd_tree.get_name(unit).is_none() {
+                        return Err(Error::InvalidConfig(format!(
+                            "app {app} enables {unit} but systemd/{unit} does not exist",
+                        )));
+                    }
+                }
+            }
+
+            for (target, source) in &manifest.symlinks {
+                if !target.starts_with('/') {
+                    return Err(Error::InvalidConfig(format!(
+                        "app {app} symlink target {target} is not an absolute path",
+                    )));
+                }
+                if app_tree.get_path(Path::new(source)).is_err() {
+                    return Err(Error::InvalidConfig(format!(
+                        "app {app} symlink source {source} does not exist in the app tree",
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Read the manifest from an app tree's `manifest.json`.
     ///
     /// Returns a default manifest if the app has no `manifest.json`.
@@ -311,7 +362,7 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::Result;
+    use crate::error::{Error, Result};
     use crate::testutil::TestRepo;
 
     #[test]
@@ -324,5 +375,77 @@ mod tests {
         assert_eq!(commit.parent_count(), 1);
         assert_eq!(commit.parent_id(0)?, c1);
         Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_enabled_unit_without_systemd_dir() {
+        let t = TestRepo::new();
+        let manifest = br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#;
+        let oid = t.commit(&[("host/nginx/manifest.json", manifest)]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let Error::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("nginx") && msg.contains("systemd"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_enabled_unit_with_missing_file() {
+        let t = TestRepo::new();
+        let manifest = br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#;
+        let oid = t.commit(&[
+            ("host/nginx/manifest.json", manifest),
+            ("host/nginx/systemd/other.service", b"[Unit]"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let Error::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("nginx.service"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_relative_symlink_target() {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"etc/nginx.conf": "nginx.conf"}}"#;
+        let oid = t.commit(&[
+            ("host/nginx/manifest.json", manifest),
+            ("host/nginx/nginx.conf", b"server {}"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let Error::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("not an absolute path"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_symlink_with_missing_source() {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/nginx.conf": "missing.conf"}}"#;
+        let oid = t.commit(&[("host/nginx/manifest.json", manifest)]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let Error::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("missing.conf"), "{msg}");
+    }
+
+    #[test]
+    fn validate_accepts_valid_config() -> Result<()> {
+        let t = TestRepo::new();
+        let manifest =
+            br#"{"systemd": {"units_enabled": ["nginx.service"]}, "symlinks": {"/etc/nginx.conf": "nginx.conf"}}"#;
+        let oid = t.commit(&[
+            ("host/nginx/manifest.json", manifest),
+            ("host/nginx/systemd/nginx.service", b"[Unit]"),
+            ("host/nginx/nginx.conf", b"server {}"),
+        ]);
+
+        t.store.validate(t.get_commit_tree_oid(oid))
     }
 }
