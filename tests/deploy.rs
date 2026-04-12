@@ -74,6 +74,38 @@ fn commit_and_deploy_locally() {
 }
 
 #[test]
+fn commit_skips_when_tree_unchanged() {
+    let store = TempDir::new("store");
+    let config = TempDir::new("config");
+    let host_dir = config.path().join("deckard/nginx");
+    fs::create_dir_all(&host_dir).unwrap();
+    fs::write(host_dir.join("nginx.conf"), "server {}").unwrap();
+
+    // First commit creates the ref.
+    let first = Command::new(DEPTOOL)
+        .args(["commit", "--store"])
+        .arg(store.path())
+        .arg(config.path())
+        .output()
+        .expect("deptool commit runs");
+    assert!(first.status.success());
+
+    // Second commit with the same tree should not create a new commit.
+    let second = Command::new(DEPTOOL)
+        .args(["commit", "--store"])
+        .arg(store.path())
+        .arg(config.path())
+        .output()
+        .expect("deptool commit runs");
+    assert!(second.status.success());
+    let stdout = String::from_utf8_lossy(&second.stdout);
+    assert!(
+        stdout.contains("No changes"),
+        "expected no-changes message: {stdout}"
+    );
+}
+
+#[test]
 fn commit_rejects_invalid_config() {
     let store = TempDir::new("store");
     let config = TempDir::new("config");

@@ -310,8 +310,6 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
         t.set_host_tracking_ref("web1", c1);
 
-        t.commit(&[("web1/nginx/conf", b"a")]);
-
         let plan = make_plan(&t.store)?;
         assert!(plan.hosts.is_empty());
         Ok(())

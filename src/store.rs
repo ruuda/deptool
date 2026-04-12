@@ -86,6 +86,11 @@ impl Store {
             .ok()
             .map(|r| r.peel_to_commit())
             .transpose()?;
+
+        if parent.as_ref().is_some_and(|c| c.tree_id() == tree_oid) {
+            return Err(Error::NoChanges);
+        }
+
         let parents: Vec<&Commit> = parent.iter().collect();
 
         Ok(self.repo.commit(
@@ -375,6 +380,16 @@ mod tests {
         assert_eq!(commit.parent_count(), 1);
         assert_eq!(commit.parent_id(0)?, c1);
         Ok(())
+    }
+
+    #[test]
+    fn commit_tree_rejects_unchanged_tree() {
+        let t = TestRepo::new();
+        let oid = t.commit(&[("web1/app/config", b"v1")]);
+        let tree_oid = t.get_commit_tree_oid(oid);
+
+        let err = t.store.commit_tree(tree_oid).unwrap_err();
+        assert!(matches!(err, Error::NoChanges));
     }
 
     #[test]

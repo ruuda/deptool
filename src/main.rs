@@ -211,8 +211,11 @@ fn run() -> Result<()> {
             let store = Store::open_or_init(&store)?;
             let tree_oid = store.build_tree(&dir)?;
             store.validate(tree_oid)?;
-            let commit_oid = store.commit_tree(tree_oid)?;
-            println!("{commit_oid}");
+            match store.commit_tree(tree_oid) {
+                Ok(commit_oid) => println!("{commit_oid}"),
+                Err(error::Error::NoChanges) => println!("No changes."),
+                Err(e) => return Err(e),
+            }
         }
         Cmd::Deploy {
             store,

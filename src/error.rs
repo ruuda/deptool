@@ -14,6 +14,8 @@ pub enum Error {
     NonUtf8FileName,
     /// A configuration value is structurally invalid (store content or CLI args).
     InvalidConfig(String),
+    /// The tree to be committed is identical to the current head.
+    NoChanges,
     /// The agent binary is not present on the target host.
     AgentNotInstalled,
     /// SSH or other transport-level connection failure.
@@ -72,6 +74,7 @@ impl fmt::Display for Error {
                  Pull the latest state, or run with --force-push to override."
             ),
             Error::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
+            Error::NoChanges => write!(f, "no changes"),
             Error::DeployFailed(msg) => write!(f, "{msg}"),
             Error::AgentError(msg) => write!(f, "{msg}"),
             Error::SetupChecksumMismatch {
