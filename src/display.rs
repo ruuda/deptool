@@ -286,6 +286,13 @@ fn diff_files(repo: &Repository, old_oid: Oid, new_oid: Oid) -> Result<Vec<(char
 pub struct StatusPrinter {
     color: UseColor,
     rendered: bool,
+    /// Width of the widest line in the previous render.
+    ///
+    /// We pad lines with spaces to this width instead of using erase escapes
+    /// like `\x1b[K`. Erase escapes fill up to the terminal width with
+    /// spaces, and when the terminal is later resized narrower, those
+    /// trailing spaces cause the status block to wrap and misrender.
+    prev_width: usize,
 }
 
 impl StatusPrinter {
@@ -293,6 +300,7 @@ impl StatusPrinter {
         Self {
             color,
             rendered: false,
+            prev_width: 0,
         }
     }
 
@@ -305,8 +313,10 @@ impl StatusPrinter {
         if self.rendered {
             // We print one blank line before the status.
             for _ in 0..n + 1 {
-                write!(out, "\x1b[1A\x1b[2K")?;
+                write!(out, "\x1b[1A\r{:w$}", "", w = self.prev_width)?;
+                write!(out, "\r")?;
             }
+            self.prev_width = 0;
             self.rendered = false;
         }
         Ok(())
@@ -327,16 +337,22 @@ impl StatusPrinter {
             writeln!(out)?;
         }
         let name_width = states.keys().map(|h| h.0.len()).max().unwrap_or(0);
+        let mut max_width = 0_usize;
         for (host, state) in states {
             let label = format!("{host}:");
-            write!(out, "\x1b[2K")?;
+            let state_str = self.color_state(state);
+            // Visible width: "  " + label (padded) + " " + state text.
+            let visible_len = 2 + name_width + 1 + 1 + state.to_string().len();
+            let pad = self.prev_width.saturating_sub(visible_len);
             writeln!(
                 out,
-                "  {label:<width$} {}",
-                self.color_state(state),
+                "\r  {label:<width$} {state_str}{:pad$}",
+                "",
                 width = name_width + 1,
             )?;
+            max_width = max_width.max(visible_len);
         }
+        self.prev_width = max_width;
         out.flush()?;
         self.rendered = true;
         Ok(())
@@ -760,10 +776,9 @@ web1
         let mut printer = StatusPrinter::new(UseColor::No);
         assert_eq!(
             printer.render_to_string(&states),
-            "
-\x1b[2K  web1: connecting
-\x1b[2K  web2: connecting
-",
+            "\n\
+             \r  web1: connecting\n\
+             \r  web2: connecting\n",
         );
     }
 
@@ -781,10 +796,9 @@ web1
         ]);
         assert_eq!(
             printer.render_to_string(&states),
-            "\
-\x1b[2A\x1b[2K  web1: locked
-\x1b[2K  web2: connecting
-",
+            "\x1b[2A\
+             \r  web1: locked    \n\
+             \r  web2: connecting\n",
         );
     }
 
@@ -797,10 +811,9 @@ web1
         let mut printer = StatusPrinter::new(UseColor::Yes);
         assert_eq!(
             printer.render_to_string(&states),
-            "
-\x1b[2K  web1: \x1b[32mdone\x1b[0m
-\x1b[2K  web2: \x1b[31mstale\x1b[0m
-",
+            "\n\
+             \r  web1: \x1b[32mdone\x1b[0m\n\
+             \r  web2: \x1b[31mstale\x1b[0m\n",
         );
     }
 
@@ -813,10 +826,9 @@ web1
         let mut printer = StatusPrinter::new(UseColor::No);
         assert_eq!(
             printer.render_to_string(&states),
-            "
-\x1b[2K  backend:  connecting
-\x1b[2K  frontend: locked
-",
+            "\n\
+             \r  backend:  connecting\n\
+             \r  frontend: locked\n",
         );
     }
 
@@ -840,15 +852,18 @@ web1
             .expect("render succeeds");
         let output = String::from_utf8(buf).expect("output is utf-8");
 
+        // erase_status_block: 3 lines (blank + 2 hosts), each overwritten
+        // with spaces to prev_width (16 = "  web1: applying").
+        // Then log message, then re-render with prev_width reset to 0.
         assert_eq!(
             output,
-            "\
-\x1b[1A\x1b[2K\x1b[1A\x1b[2K\x1b[1A\x1b[2K
-web1:
-app.service activated
-
-\x1b[2K  web1: applying\n\
-\x1b[2K  web2: done\n",
+            "\x1b[1A\r                \r\
+             \x1b[1A\r                \r\
+             \x1b[1A\r                \r\
+             \nweb1:\napp.service activated\n\
+             \n\
+             \r  web1: applying\n\
+             \r  web2: done\n",
         );
     }
 }
