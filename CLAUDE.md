@@ -35,11 +35,22 @@
 
 ## Reviewing your own work
 
+Review at multiple levels, from high to low:
+
+ 1. Does the new behavior actually solve the problem we set out to solve?
+ 2. Does the diff implement the proposed solution? Are there logic bugs?
+ 3. Do the structs, methods, functions make sense? Could the call graph be simpler? Is there duplication?
+ 4. Local code quality: complex chains that could be a match? Comments stating the obvious? Missing justifications?
+
+At every level, ask: is this complexity inherent, or an artifact of how I implemented it?
+
+Specific checks:
  - Is it correct?
  - Can it be simpler or more elegant?
- - Code is a liability, can we achieve the same with less code?
+ - Code is a liability, can we achieve the same with less code? A "simplification" that adds lines probably isn't one.
  - Does new code duplicate something that already exists in the codebase?
  - Is it obvious to a reader with little context? Can it be made more obvious?
+ - Did I preserve all why-comments from the original code?
 
 ## Working with Git
 
@@ -62,6 +73,8 @@
  - Order function arguments from least-varying to most-varying. Configuration and context arguments (like a directory path) go before data arguments (like the specific changes to apply).
  - Prefer plain `match` over fancy method chains.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
+ - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
+ - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem.
  - Property-based tests are better than mere examples.
  - Prefer global imports over excessive qualification for types.
  - In assertions and `.expect()`, the message is the thing you expect to be true.
