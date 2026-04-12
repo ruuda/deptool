@@ -198,9 +198,9 @@ fn run_deploy(
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let printer = display::StatusPrinter::new(color);
-    let mut progress = deploy::DeployProgress::new(hosts, Box::new(printer));
+    let progress = deploy::DeployProgress::new(hosts, Box::new(printer));
 
-    deploy::run_deploy(&repo, &plan, &operator, connect, install, &mut progress)
+    deploy::run_deploy(&repo, &plan, &operator, connect, install, &progress)
 }
 
 fn run() -> Result<()> {

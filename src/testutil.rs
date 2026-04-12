@@ -208,12 +208,34 @@ impl TestHost {
     /// new SSH connection to the same host. The apps directory is shared
     /// across connections, as it would be in production.
     pub fn connect(&self) -> Box<dyn Connection> {
-        let repo = Repository::open(self.session.store.path()).expect("repo is opened");
+        Self::open_connection(
+            self.session.store.path(),
+            &self.session.hostname.0,
+            self.apps.path(),
+        )
+    }
+
+    /// Return a thread-safe factory for creating connections to this host.
+    ///
+    /// The factory captures owned paths (no references to self), so it is
+    /// `Send + Sync` and safe to call from multiple threads.
+    pub fn connector(&self) -> impl Fn() -> Box<dyn Connection> + Send + Sync {
+        let store_path = self.session.store.path().to_path_buf();
         let hostname = self.session.hostname.0.clone();
-        let session = crate::session::HostSession::new_test(repo, &hostname, self.apps.path());
+        let apps_path = self.apps.path().to_path_buf();
+        move || Self::open_connection(&store_path, &hostname, &apps_path)
+    }
+
+    fn open_connection(
+        store_path: &std::path::Path,
+        hostname: &str,
+        apps_path: &std::path::Path,
+    ) -> Box<dyn Connection> {
+        let repo = Repository::open(store_path).expect("repo is opened");
+        let session = crate::session::HostSession::new_test(repo, hostname, apps_path);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
-            hostname,
+            hostname: hostname.to_string(),
         };
         Box::new(LocalConnection {
             session,

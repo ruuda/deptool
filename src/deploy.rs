@@ -1,14 +1,15 @@
 //! Execute a deployment plan by driving remote host sessions.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-
-use std::collections::BTreeMap;
-
 use git2::Oid;
+
+use parking_lot::Mutex;
 
 use crate::error::{Error, Result};
 use crate::plan::Plan;
@@ -16,11 +17,12 @@ use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 use crate::store::{RefUpdate, Store};
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum HostState {
     Pending,
     Connecting,
     InstallingAgent,
+    Connected,
     Locked,
     Pushing,
     Applying,
@@ -45,6 +47,7 @@ impl std::fmt::Display for HostState {
             HostState::Pending => f.write_str("pending"),
             HostState::Connecting => f.write_str("connecting"),
             HostState::InstallingAgent => f.write_str("installing agent"),
+            HostState::Connected => f.write_str("connected"),
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
@@ -58,13 +61,17 @@ impl std::fmt::Display for HostState {
 }
 
 /// Receives deploy events for display or logging.
-pub trait DeployObserver {
+pub trait DeployObserver: Send {
     fn state_changed(&mut self, states: &BTreeMap<Hostname, HostState>);
     fn log_message(&mut self, states: &BTreeMap<Hostname, HostState>, host: &Hostname, text: &str);
 }
 
 /// Tracks per-host deploy state, notifying an observer on changes.
 pub struct DeployProgress {
+    inner: Mutex<ProgressInner>,
+}
+
+struct ProgressInner {
     states: BTreeMap<Hostname, HostState>,
     observer: Box<dyn DeployObserver>,
 }
@@ -72,36 +79,34 @@ pub struct DeployProgress {
 impl DeployProgress {
     pub fn new(hosts: Vec<Hostname>, observer: Box<dyn DeployObserver>) -> Self {
         let states = hosts.into_iter().map(|h| (h, HostState::Pending)).collect();
-        Self { states, observer }
+        Self {
+            inner: Mutex::new(ProgressInner { states, observer }),
+        }
     }
 
-    pub fn update(&mut self, host: &Hostname, state: HostState) {
-        *self.states.get_mut(host).expect("host is in the plan") = state;
-        self.observer.state_changed(&self.states);
+    pub fn update(&self, host: &Hostname, state: HostState) {
+        let inner = &mut *self.inner.lock();
+        *inner.states.get_mut(host).expect("host is in the plan") = state;
+        inner.observer.state_changed(&inner.states);
     }
 
-    pub fn log_message(&mut self, host: &Hostname, text: &str) {
-        self.observer.log_message(&self.states, host, text);
-    }
-
-    pub fn has_failures(&self) -> bool {
-        self.states.values().any(|s| s.is_failure())
+    pub fn log_message(&self, host: &Hostname, text: &str) {
+        let inner = &mut *self.inner.lock();
+        inner.observer.log_message(&inner.states, host, text);
     }
 
     pub fn num_failed(&self) -> usize {
-        self.states.values().filter(|s| s.is_failure()).count()
+        let states = &self.inner.lock().states;
+        states.values().filter(|s| s.is_failure()).count()
     }
 
-    /// Get a host's state by hostname.
-    ///
-    /// This exists to make the tests a bit less verbose.
     #[cfg(test)]
-    pub fn state(&self, host: &str) -> &HostState {
-        &self.states[&Hostname(host.into())]
+    fn state(&self, host: &str) -> HostState {
+        self.inner.lock().states[&Hostname(host.into())].clone()
     }
 }
 
-pub trait Connection {
+pub trait Connection: Send {
     fn hello(&self) -> &Hello;
     fn send_request(&mut self, request: &Request) -> Result<()>;
     fn read_message(&mut self) -> Result<Option<Message>>;
@@ -228,93 +233,132 @@ pub struct StaleHost {
 }
 
 pub struct LockResult {
-    pub locked: Vec<(Hostname, Box<dyn Connection>)>,
-    pub stale: Vec<(Hostname, StaleHost)>,
+    pub locked: BTreeMap<Hostname, Box<dyn Connection>>,
+    pub stale: BTreeMap<Hostname, StaleHost>,
 }
 
-/// Open sessions and acquire deploy locks on all hosts in the plan.
+/// Connect to a host, installing the agent if needed.
+fn try_connect(
+    host: &Hostname,
+    connect: &(impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync),
+    install: &(impl Fn(&Hostname) -> Result<()> + Sync),
+    progress: &DeployProgress,
+) -> Option<Box<dyn Connection>> {
+    progress.update(host, HostState::Connecting);
+    let conn = match connect(host) {
+        Ok(c) => c,
+        Err(Error::AgentNotInstalled) => {
+            progress.update(host, HostState::InstallingAgent);
+            if let Err(err) = install(host) {
+                progress.update(host, HostState::Failed(err.to_string()));
+                return None;
+            }
+            match connect(host) {
+                Ok(c) => c,
+                Err(err) => {
+                    progress.update(host, HostState::Failed(err.to_string()));
+                    return None;
+                }
+            }
+        }
+        Err(err) => {
+            progress.update(host, HostState::Failed(err.to_string()));
+            return None;
+        }
+    };
+    assert_eq!(
+        conn.hello().version,
+        protocol::VERSION,
+        "agent version matches operator version"
+    );
+    progress.update(host, HostState::Connected);
+    Some(conn)
+}
+
+/// Open sessions to all hosts in parallel.
 ///
-/// Tries every host even if some fail, so the caller gets all stale info
-/// in one pass. Hosts are locked in plan iteration order (asciibetical,
-/// since the plan uses a BTreeMap) to avoid deadlocks in case of concurrent
-/// deploys.
+/// Hosts that fail to connect are reported via progress and omitted
+/// from the result.
+fn connect_hosts(
+    plan: &Plan,
+    connect: &(impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync),
+    install: &(impl Fn(&Hostname) -> Result<()> + Sync),
+    progress: &DeployProgress,
+) -> BTreeMap<Hostname, Box<dyn Connection>> {
+    let mut connections = BTreeMap::new();
+    std::thread::scope(|s| {
+        let mut handles = Vec::new();
+        for host in plan.hosts.keys() {
+            handles.push((
+                host,
+                s.spawn(|| try_connect(host, connect, install, progress)),
+            ));
+        }
+        for (host, handle) in handles {
+            if let Some(conn) = handle.join().expect("connect thread panicked") {
+                connections.insert(host.clone(), conn);
+            }
+        }
+    });
+    connections
+}
+
+/// Acquire deploy locks on connected hosts.
+///
+/// Hosts are locked in the order provided (which should be asciibetical,
+/// matching plan iteration order) to avoid deadlocks in case of concurrent
+/// deploys. Tries every host even if some fail, so the caller gets all
+/// stale info in one pass.
 pub fn lock_hosts(
     plan: &Plan,
     operator: &str,
-    mut connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
-    mut install: impl FnMut(&Hostname) -> Result<()>,
-    progress: &mut DeployProgress,
+    connections: BTreeMap<Hostname, Box<dyn Connection>>,
+    progress: &DeployProgress,
 ) -> LockResult {
     let mut result = LockResult {
-        locked: Vec::new(),
-        stale: Vec::new(),
+        locked: BTreeMap::new(),
+        stale: BTreeMap::new(),
     };
 
-    for (host, host_plan) in &plan.hosts {
-        progress.update(host, HostState::Connecting);
-
-        let mut conn = match connect(host) {
-            Ok(c) => c,
-            Err(Error::AgentNotInstalled) => {
-                progress.update(host, HostState::InstallingAgent);
-                if let Err(err) = install(host) {
-                    progress.update(host, HostState::Failed(err.to_string()));
-                    continue;
-                }
-                match connect(host) {
-                    Ok(c) => c,
-                    Err(err) => {
-                        progress.update(host, HostState::Failed(err.to_string()));
-                        continue;
-                    }
-                }
-            }
-            Err(err) => {
-                progress.update(host, HostState::Failed(err.to_string()));
-                continue;
-            }
-        };
-
-        assert_eq!(
-            conn.hello().version,
-            protocol::VERSION,
-            "agent version matches operator version"
-        );
-
+    for (host, mut conn) in connections {
+        let host_plan = &plan.hosts[&host];
         let lock_request = Request::Lock {
-            expected_current_commit: host_plan.expected_current.clone(),
+            expected_current_commit: host_plan.expected_current,
             operator: operator.to_string(),
         };
         if let Err(err) = conn.send_request(&lock_request) {
-            progress.update(host, HostState::Failed(err.to_string()));
+            progress.update(&host, HostState::Failed(err.to_string()));
             continue;
         }
 
         match conn.read_message() {
             Ok(Some(Message::Locked)) => {
-                progress.update(host, HostState::Locked);
-                result.locked.push((host.clone(), conn));
+                progress.update(&host, HostState::Locked);
+                result.locked.insert(host, conn);
             }
             Ok(Some(Message::LockStale {
                 expected_commit,
                 actual_commit,
             })) => {
-                progress.update(host, HostState::Stale);
-                result.stale.push((
-                    host.clone(),
+                progress.update(&host, HostState::Stale);
+                result.stale.insert(
+                    host,
                     StaleHost {
                         expected_commit,
                         actual_commit,
                         connection: conn,
                     },
-                ));
+                );
             }
             Ok(Some(Message::LockBusy { held_by })) => {
-                progress.update(host, HostState::LockBusy(held_by));
+                // We continue to the next host rather than aborting early.
+                // This risks deadlock if two deploys lock hosts in different
+                // orders, but our alphabetical ordering prevents that.
+                progress.update(&host, HostState::LockBusy(held_by));
             }
             other => {
                 progress.update(
-                    host,
+                    &host,
                     HostState::Failed(format!("unexpected lock response: {other:?}")),
                 );
             }
@@ -324,47 +368,72 @@ pub fn lock_hosts(
     result
 }
 
-/// Send Apply to all locked hosts and stream responses.
-pub fn apply_hosts(
-    store: &Store,
+/// Push pack and apply on a single host.
+fn push_and_apply_host(
+    store_path: &Path,
+    host: &Hostname,
+    conn: &mut Box<dyn Connection>,
     plan: &Plan,
-    connections: &mut [(Hostname, Box<dyn Connection>)],
-    progress: &mut DeployProgress,
+    packs: &BTreeMap<Option<Oid>, String>,
+    progress: &DeployProgress,
 ) -> Result<()> {
-    for (host, conn) in connections.iter_mut() {
-        progress.update(host, HostState::Applying);
-        let request = Request::Apply {
-            target_commit: plan.commit.clone(),
-        };
-        conn.send_request(&request)?;
-        conn.close();
-        while let Some(message) = conn.read_message()? {
-            match &message {
-                Message::ApplyComplete { commit, .. } => {
-                    progress.update(host, HostState::Done);
-                    store.set_ref(
-                        &format!("refs/remotes/{host}/current"),
-                        *commit,
-                        RefUpdate::ApplyComplete,
-                    )?;
-                }
-                Message::SystemdUnitStatus { output } => {
-                    progress.log_message(host, output.trim_end());
-                }
-                Message::Error { message } => {
-                    progress.update(host, HostState::Failed(message.clone()));
-                }
-                _ => {}
-            }
+    progress.update(host, HostState::Pushing);
+    let key = plan.hosts[host].expected_current;
+    let encoded = &packs[&key];
+    conn.send_request(&Request::ReceivePack {
+        pack_data: encoded.clone(),
+    })?;
+    match conn.read_message()? {
+        Some(Message::PackReceived) => {}
+        Some(Message::Error { message }) => {
+            return Err(Error::AgentError(format!(
+                "{host}: receive pack failed: {message}"
+            )));
+        }
+        other => {
+            return Err(Error::ProtocolError(format!(
+                "{host}: unexpected response to ReceivePack: {other:?}"
+            )));
         }
     }
 
-    match progress.num_failed() {
-        0 => Ok(()),
-        n => Err(Error::DeployFailed(format!(
-            "encountered errors on {n} host(s)"
-        ))),
+    progress.update(host, HostState::Applying);
+    conn.send_request(&Request::Apply {
+        target_commit: plan.commit,
+    })?;
+    conn.close();
+    let mut applied_commit = None;
+    while let Some(message) = conn.read_message()? {
+        match &message {
+            Message::ApplyComplete { commit, .. } => {
+                applied_commit = Some(*commit);
+            }
+            Message::SystemdUnitStatus { output } => {
+                progress.log_message(host, output.trim_end());
+            }
+            Message::Error { message } => {
+                return Err(Error::AgentError(format!("{host}: {message}")));
+            }
+            _ => {}
+        }
     }
+    let applied_commit = applied_commit.ok_or_else(|| {
+        Error::ProtocolError(format!("{host}: agent closed without ApplyComplete"))
+    })?;
+    assert_eq!(
+        applied_commit, plan.commit,
+        "applied commit matches plan commit"
+    );
+
+    let store = Store::open(store_path)?;
+    store.set_ref(
+        &format!("refs/remotes/{host}/current"),
+        applied_commit,
+        RefUpdate::ApplyComplete,
+    )?;
+
+    progress.update(host, HostState::Done);
+    Ok(())
 }
 
 /// Pre-compute deduplicated packfiles for all hosts in the plan.
@@ -383,53 +452,22 @@ pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, S
     Ok(packs)
 }
 
-/// Send pre-computed packfiles to all locked hosts.
-pub fn push_packs(
-    plan: &Plan,
-    packs: &BTreeMap<Option<Oid>, String>,
-    connections: &mut [(Hostname, Box<dyn Connection>)],
-    progress: &mut DeployProgress,
-) -> Result<()> {
-    for (host, conn) in connections.iter_mut() {
-        progress.update(host, HostState::Pushing);
-        let key = plan.hosts[host].expected_current;
-        let encoded = &packs[&key];
-        conn.send_request(&Request::ReceivePack {
-            pack_data: encoded.clone(),
-        })?;
-        match conn.read_message()? {
-            Some(Message::PackReceived) => {}
-            Some(Message::Error { message }) => {
-                return Err(Error::ProtocolError(format!(
-                    "{host}: receive pack failed: {message}"
-                )));
-            }
-            other => {
-                return Err(Error::ProtocolError(format!(
-                    "{host}: unexpected response to ReceivePack: {other:?}"
-                )));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Fetch objects from stale hosts over their still-open sessions.
 ///
 /// For each stale host whose actual commit we don't already have, sends
 /// `RequestObjects` and receives a packfile. Updates the local tracking
 /// ref for each host.
-pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -> Result<()> {
+pub fn fetch_stale_objects(store: &Store, stale: &mut BTreeMap<Hostname, StaleHost>) -> Result<()> {
     for (host, info) in stale.iter_mut() {
-        let actual_commit = match &info.actual_commit {
-            Some(c) => c.clone(),
+        let actual_commit = match info.actual_commit {
+            Some(c) => c,
             None => continue,
         };
 
         // Fetch the pack if we don't already have this commit.
         if store.repo.find_commit(actual_commit).is_err() {
             info.connection.send_request(&Request::RequestObjects {
-                have_commit: info.expected_commit.clone(),
+                have_commit: info.expected_commit,
             })?;
 
             match info.connection.read_message()? {
@@ -463,6 +501,13 @@ pub fn fetch_stale_objects(store: &Store, stale: &mut [(Hostname, StaleHost)]) -
 
 /// Run a full deployment: lock all hosts, push packs, and apply.
 ///
+/// Connect and push+apply are parallel. Locking is sequential (to avoid
+/// deadlocks with concurrent deploys) and waits for all connects to
+/// finish before starting. We tried pipelining connect and lock (locking
+/// each host as soon as it connects, while later hosts are still
+/// connecting) but measured only ~20ms improvement on a 3-host cluster
+/// -- not worth the extra synchronization complexity.
+///
 /// If any host fails to lock (stale, busy, or connection error), fetches
 /// objects from stale hosts and aborts without pushing or applying to any
 /// host.
@@ -470,13 +515,14 @@ pub fn run_deploy(
     store: &Store,
     plan: &Plan,
     operator: &str,
-    connect: impl FnMut(&Hostname) -> Result<Box<dyn Connection>>,
-    install: impl FnMut(&Hostname) -> Result<()>,
-    progress: &mut DeployProgress,
+    connect: impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync,
+    install: impl Fn(&Hostname) -> Result<()> + Sync,
+    progress: &DeployProgress,
 ) -> Result<()> {
-    let mut lock_result = lock_hosts(plan, operator, connect, install, progress);
+    let connections = connect_hosts(plan, &connect, &install, progress);
+    let mut lock_result = lock_hosts(plan, operator, connections, progress);
 
-    if progress.has_failures() {
+    if lock_result.locked.len() < plan.hosts.len() {
         // Fetch objects from stale hosts so we have the data for the next plan.
         fetch_stale_objects(store, &mut lock_result.stale)?;
         let n = progress.num_failed();
@@ -486,9 +532,27 @@ pub fn run_deploy(
     }
 
     let packs = build_packs(store, plan)?;
-    push_packs(plan, &packs, &mut lock_result.locked, progress)?;
-    apply_hosts(store, plan, &mut lock_result.locked, progress)?;
-    Ok(())
+    let store_path = store.path();
+
+    std::thread::scope(|s| {
+        let packs = &packs;
+        for (host, mut conn) in lock_result.locked {
+            s.spawn(move || {
+                if let Err(err) =
+                    push_and_apply_host(store_path, &host, &mut conn, plan, packs, progress)
+                {
+                    progress.update(&host, HostState::Failed(err.to_string()));
+                }
+            });
+        }
+    });
+
+    match progress.num_failed() {
+        0 => Ok(()),
+        n => Err(Error::DeployFailed(format!(
+            "encountered errors on {n} host(s)"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -511,20 +575,26 @@ mod tests {
     /// Run a deploy through run_deploy using in-memory connections.
     fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
-        let mut progress = test_progress(&hostnames);
+        let progress = test_progress(&hostnames);
+        // Pre-build Sync-safe connection factories (TestHost is not Sync
+        // because git2::Repository is not Sync).
+        let connectors: Vec<_> = targets
+            .iter()
+            .map(|t| (t.session.hostname.clone(), t.connector()))
+            .collect();
         run_deploy(
             &driver.store,
             plan,
             "deckard@spinner",
             |host| {
-                let target = targets
+                let (_, connector) = connectors
                     .iter()
-                    .find(|t| t.session.hostname == *host)
+                    .find(|(h, _)| h == host)
                     .expect("host is in targets");
-                Ok(target.connect())
+                Ok(connector())
             },
             |_| panic!("install not expected"),
-            &mut progress,
+            &progress,
         )
     }
 
@@ -588,19 +658,20 @@ mod tests {
         // B's plan still thinks current is commit_v1, but target has commit_v2.
         let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
         let plan = make_plan(commit_v3, &[("web1", Some(commit_v1))]);
-        let mut progress = test_progress(&["web1"]);
+        let progress = test_progress(&["web1"]);
+        let connector = target.connector();
         let result = run_deploy(
             &driver_b.store,
             &plan,
             "deckard@spinner",
-            |_| Ok(target.connect()),
+            |_| Ok(connector()),
             |_| panic!("install not expected"),
-            &mut progress,
+            &progress,
         );
 
         // Deploy should abort because the host is stale.
         assert!(result.is_err());
-        assert_eq!(*progress.state("web1"), HostState::Stale);
+        assert_eq!(progress.state("web1"), HostState::Stale);
 
         // The stale fetch should have brought commit_v2 into driver B,
         // so B can re-plan with up-to-date information.
@@ -639,23 +710,25 @@ mod tests {
             commit_v3,
             &[("web1", Some(commit_v1)), ("web2", Some(commit_v1))],
         );
-        let mut progress = test_progress(&["web1", "web2"]);
+        let progress = test_progress(&["web1", "web2"]);
+        let c1 = web1.connector();
+        let c2 = web2.connector();
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
             |host| match host.0.as_str() {
-                "web1" => Ok(web1.connect()),
-                "web2" => Ok(web2.connect()),
+                "web1" => Ok(c1()),
+                "web2" => Ok(c2()),
                 _ => panic!("unexpected host: {host:?}"),
             },
             |_| panic!("install not expected"),
-            &mut progress,
+            &progress,
         );
 
         // Deploy should abort: web1 is stale.
         assert!(result.is_err());
-        assert_eq!(*progress.state("web1"), HostState::Stale);
+        assert_eq!(progress.state("web1"), HostState::Stale);
 
         // web2 should NOT have been modified despite being lockable.
         assert_eq!(
@@ -682,14 +755,15 @@ mod tests {
         );
 
         let plan = make_plan(commit, &[("web1", None)]);
-        let mut progress = test_progress(&["web1"]);
+        let progress = test_progress(&["web1"]);
+        let connector = target.connector();
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
-            |_| Ok(target.connect()),
+            |_| Ok(connector()),
             |_| panic!("install not expected"),
-            &mut progress,
+            &progress,
         );
 
         assert!(result.is_err());
@@ -707,24 +781,25 @@ mod tests {
 
         // web2 is in the plan but unreachable.
         let plan = make_plan(commit, &[("web1", None), ("web2", None)]);
-        let mut progress = test_progress(&["web1", "web2"]);
+        let progress = test_progress(&["web1", "web2"]);
+        let c1 = web1.connector();
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
             |host| match host.0.as_str() {
-                "web1" => Ok(web1.connect()),
+                "web1" => Ok(c1()),
                 other => Err(Error::ConnectionFailed(format!(
                     "ssh: connect to host {other}: Connection timed out",
                 ))),
             },
             |_| panic!("install not expected"),
-            &mut progress,
+            &progress,
         );
 
         // Deploy aborts because web2 is unreachable.
         assert!(result.is_err());
-        assert!(matches!(progress.state("web2"), HostState::Failed(_),));
+        assert!(matches!(progress.state("web2"), HostState::Failed(_)));
 
         // web1 should NOT have been modified.
         assert_eq!(
@@ -737,13 +812,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_reports_failure_when_agent_errors() -> Result<()> {
+    fn push_and_apply_reports_failure_on_bad_pack() -> Result<()> {
         let driver = TestRepo::new();
         let commit = driver.commit(&[("web1/app/conf", b"v1")]);
         let plan = make_plan(commit, &[("web1", None)]);
 
-        // Lock the host but don't push the pack, so apply will fail
-        // because the commit doesn't exist in the agent's store.
         let target = TestHost::new("web1");
         let mut conn = target.connect();
         conn.send_request(&Request::Lock {
@@ -752,15 +825,14 @@ mod tests {
         })?;
         assert_eq!(conn.read_message()?, Some(Message::Locked));
 
-        let mut progress = test_progress(&["web1"]);
-        let mut connections = vec![(Hostname::from("web1"), conn)];
-        let result = apply_hosts(&driver.store, &plan, &mut connections, &mut progress);
+        // Send a corrupt pack so the agent fails during ReceivePack.
+        let packs = BTreeMap::from([(None, BASE64.encode(b"not a valid pack"))]);
+        let progress = test_progress(&["web1"]);
+        let host = Hostname::from("web1");
+        let store_path = driver.store.path();
+        let result = push_and_apply_host(store_path, &host, &mut conn, &plan, &packs, &progress);
 
-        assert!(result.is_err(), "deploy should fail");
-        assert!(
-            matches!(progress.state("web1"), HostState::Failed(_)),
-            "host should be in failed state",
-        );
+        assert!(result.is_err(), "push should fail on bad pack");
         Ok(())
     }
 }

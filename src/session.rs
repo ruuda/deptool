@@ -63,7 +63,8 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 /// Callback for post-checkout mutations (symlinks, systemd lifecycle).
-type OnPostApply = Box<dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> Result<()>>;
+type OnPostApply =
+    Box<dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> Result<()> + Send + Sync>;
 
 pub struct HostSession {
     pub store: Store,
