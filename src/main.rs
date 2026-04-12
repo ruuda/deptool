@@ -243,7 +243,9 @@ fn post_apply(
     apps_dir: &Path,
     unit_dir: &Path,
 ) -> error::Result<()> {
-    // Reconcile manifest symlinks (e.g. config files in /etc).
+    // Reconcile manifest symlinks (e.g. config files in /etc) *before*
+    // any systemd lifecycle operations, because units may depend on paths
+    // that these symlinks provide.
     apply::reconcile_manifest_symlinks(apps_dir, &changes.symlinks)?;
 
     let mut touched: Vec<&str> = Vec::new();
