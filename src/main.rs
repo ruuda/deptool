@@ -258,11 +258,16 @@ fn post_apply(
     // "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
-    // TODO: The integration test runs this code path as a regular user,
-    // which triggers a polkit prompt for daemon-reload. Guard this behind
-    // a check or make the test skip the systemd phase.
-    systemctl_ok(&["daemon-reload"]);
+    let symlink_changes = apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
+
+    // Only poke systemd when something actually changed on disk.
+    let needs_reload = !symlink_changes.is_empty()
+        || !touched.is_empty()
+        || !changes.units.enable.is_empty()
+        || !changes.units.restart.is_empty();
+    if needs_reload {
+        systemctl_ok(&["daemon-reload"]);
+    }
 
     for unit in &changes.units.enable {
         touched.push(unit);
