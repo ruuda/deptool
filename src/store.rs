@@ -12,7 +12,11 @@ use crate::error::{Error, Result};
 use crate::prim::Hostname;
 
 /// Per-app manifest declaring runtime state that deptool should manage.
+///
+/// Unknown fields are rejected so typos and stale keys are caught early.
+/// Use a separate file for custom metadata.
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Manifest {
     #[serde(default)]
     pub systemd: SystemdConfig,
@@ -23,6 +27,7 @@ pub struct Manifest {
 }
 
 #[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SystemdConfig {
     #[serde(default)]
     pub units_enabled: Vec<String>,
@@ -256,25 +261,21 @@ impl Store {
     /// Validate manifests for all apps on a single host.
     fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
         let apps = self.get_host_apps(config_tree, host)?;
+
+        // Track unit files and symlink targets across apps to detect conflicts.
+        let mut unit_owners: BTreeMap<String, String> = BTreeMap::new();
+        let mut symlink_owners: BTreeMap<String, String> = BTreeMap::new();
+
         for (app, app_tree_oid) in &apps {
             let manifest = self.read_manifest(*app_tree_oid)?;
             let app_tree = self.repo.find_tree(*app_tree_oid)?;
 
-            if !manifest.systemd.units_enabled.is_empty() {
-                let systemd_tree = match app_tree.get_name("systemd") {
-                    Some(e) => self.repo.find_tree(e.id())?,
-                    None => {
-                        return Err(Error::InvalidConfig(format!(
-                            "app {app} enables units but has no systemd/ directory",
-                        )));
-                    }
-                };
-                for unit in &manifest.systemd.units_enabled {
-                    if systemd_tree.get_name(unit).is_none() {
-                        return Err(Error::InvalidConfig(format!(
-                            "app {app} enables {unit} but systemd/{unit} does not exist",
-                        )));
-                    }
+            // Check for duplicate unit files across apps.
+            for name in self.app_units(*app_tree_oid)? {
+                if let Some(other) = unit_owners.insert(name.clone(), app.clone()) {
+                    return Err(Error::InvalidConfig(format!(
+                        "unit {name} provided by both {other} and {app}",
+                    )));
                 }
             }
 
@@ -287,6 +288,12 @@ impl Store {
                 if app_tree.get_path(Path::new(source)).is_err() {
                     return Err(Error::InvalidConfig(format!(
                         "app {app} symlink source {source} does not exist in the app tree",
+                    )));
+                }
+                // Check for duplicate symlink targets across apps.
+                if let Some(other) = symlink_owners.insert(target.clone(), app.clone()) {
+                    return Err(Error::InvalidConfig(format!(
+                        "symlink {target} provided by both {other} and {app}",
                     )));
                 }
             }
@@ -393,32 +400,57 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_enabled_unit_without_systemd_dir() {
+    fn validate_rejects_unknown_manifest_key() {
         let t = TestRepo::new();
-        let manifest = br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#;
+        let manifest = br#"{"flavor": "spicy"}"#;
         let oid = t.commit(&[("host/nginx/manifest.json", manifest)]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        let Error::InvalidConfig(msg) = err else {
-            panic!("expected InvalidConfig, got {err}")
-        };
-        assert!(msg.contains("nginx") && msg.contains("systemd"), "{msg}");
+        assert!(matches!(err, Error::Json(_)));
     }
 
     #[test]
-    fn validate_rejects_enabled_unit_with_missing_file() {
+    fn validate_accepts_enabling_unit_not_shipped_by_app() -> Result<()> {
         let t = TestRepo::new();
-        let manifest = br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#;
+        // A distro-provided unit can be listed to enable it and to ensure
+        // it gets restarted when the app's config changes.
+        let manifest = br#"{"systemd": {"units_enabled": ["ntpd.service"]}}"#;
+        let oid = t.commit(&[("host/ntp/manifest.json", manifest)]);
+        t.store.validate(t.get_commit_tree_oid(oid))
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_unit_file_across_apps() {
+        let t = TestRepo::new();
         let oid = t.commit(&[
-            ("host/nginx/manifest.json", manifest),
-            ("host/nginx/systemd/other.service", b"[Unit]"),
+            ("host/app1/systemd/shared.service", b"[Unit]"),
+            ("host/app2/systemd/shared.service", b"[Unit]"),
         ]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
         let Error::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
-        assert!(msg.contains("nginx.service"), "{msg}");
+        assert!(msg.contains("shared.service"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_symlink_target_across_apps() {
+        let t = TestRepo::new();
+        let m1 = br#"{"symlinks": {"/etc/foo.conf": "foo.conf"}}"#;
+        let m2 = br#"{"symlinks": {"/etc/foo.conf": "foo.conf"}}"#;
+        let oid = t.commit(&[
+            ("host/app1/manifest.json", m1),
+            ("host/app1/foo.conf", b"v1"),
+            ("host/app2/manifest.json", m2),
+            ("host/app2/foo.conf", b"v2"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let Error::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("/etc/foo.conf"), "{msg}");
     }
 
     #[test]
@@ -457,7 +489,6 @@ mod tests {
             br#"{"systemd": {"units_enabled": ["nginx.service"]}, "symlinks": {"/etc/nginx.conf": "nginx.conf"}}"#;
         let oid = t.commit(&[
             ("host/nginx/manifest.json", manifest),
-            ("host/nginx/systemd/nginx.service", b"[Unit]"),
             ("host/nginx/nginx.conf", b"server {}"),
         ]);
 

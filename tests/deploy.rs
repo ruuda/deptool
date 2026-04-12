@@ -111,12 +111,7 @@ fn commit_rejects_invalid_config() {
     let config = TempDir::new("config");
     let app_dir = config.path().join("deckard/nginx");
     fs::create_dir_all(&app_dir).unwrap();
-    // Enable a unit that doesn't exist on disk.
-    fs::write(
-        app_dir.join("manifest.json"),
-        r#"{"systemd": {"units_enabled": ["nginx.service"]}}"#,
-    )
-    .unwrap();
+    fs::write(app_dir.join("manifest.json"), r#"{"unknown_key": true}"#).unwrap();
 
     let output = Command::new(DEPTOOL)
         .args(["commit", "--store"])
