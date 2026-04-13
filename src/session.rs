@@ -9,7 +9,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
 use crate::apply::{DesiredUnits, apply_host};
-use crate::error::Result;
+use crate::error::ApplyError;
 use crate::plan::Changes;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
@@ -63,8 +63,11 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 /// Callback for post-checkout mutations (symlinks, systemd lifecycle).
-type OnPostApply =
-    Box<dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> Result<()> + Send + Sync>;
+type OnPostApply = Box<
+    dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> std::result::Result<(), ApplyError>
+        + Send
+        + Sync,
+>;
 
 pub struct HostSession {
     pub store: Store,
@@ -136,9 +139,9 @@ impl HostSession {
         {
             Ok(f) => f,
             Err(err) => {
-                emit_message(Message::Error {
-                    message: format!("failed to open lock file: {err}"),
-                });
+                emit_message(Message::Error(ApplyError::Io(format!(
+                    "failed to open lock file: {err}",
+                ))));
                 return;
             }
         };
@@ -158,9 +161,9 @@ impl HostSession {
                 return;
             }
             Err(err) => {
-                emit_message(Message::Error {
-                    message: format!("flock failed: {err}"),
-                });
+                emit_message(Message::Error(ApplyError::Io(format!(
+                    "flock failed: {err}",
+                ))));
                 return;
             }
             Ok(true) => {}
@@ -193,9 +196,9 @@ impl HostSession {
         let bytes = BASE64.decode(pack_data).expect("pack_data is valid base64");
         match self.store.write_pack(&bytes) {
             Ok(()) => emit_message(Message::PackReceived),
-            Err(err) => emit_message(Message::Error {
-                message: format!("failed to write pack: {err}"),
-            }),
+            Err(err) => emit_message(Message::Error(ApplyError::Store(format!(
+                "failed to write pack: {err}",
+            )))),
         }
     }
 
@@ -218,9 +221,9 @@ impl HostSession {
                     Ok(bytes) => emit_message(Message::SendPack {
                         pack_data: BASE64.encode(&bytes),
                     }),
-                    Err(err) => emit_message(Message::Error {
-                        message: format!("failed to create pack: {err}"),
-                    }),
+                    Err(err) => emit_message(Message::Error(ApplyError::Store(format!(
+                        "failed to create pack: {err}",
+                    )))),
                 }
             }
             Request::Apply { target_commit } => {
@@ -249,9 +252,7 @@ impl HostSession {
                 let changes = match result {
                     Ok(changes) => changes,
                     Err(err) => {
-                        emit_message(Message::Error {
-                            message: format!("apply failed: {err}"),
-                        });
+                        emit_message(Message::Error(err));
                         return;
                     }
                 };
@@ -262,9 +263,7 @@ impl HostSession {
                     .expect("desired_units succeeds for a just-applied commit");
 
                 if let Err(err) = (self.on_post_apply)(&desired_units, &changes, emit_message) {
-                    emit_message(Message::Error {
-                        message: format!("post-apply failed: {err}"),
-                    });
+                    emit_message(Message::Error(err));
                     return;
                 }
 

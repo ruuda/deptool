@@ -62,7 +62,9 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
 /// Create a commit with the given files, without touching the filesystem.
 fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
-    store.commit_tree(tree_oid)
+    Ok(store
+        .commit_tree(tree_oid)?
+        .expect("test commit has changes"))
 }
 
 /// A bare Git repository backed by a temporary directory.
@@ -257,14 +259,17 @@ impl Connection for LocalConnection {
         &self.hello
     }
 
-    fn send_request(&mut self, request: &Request) -> Result<()> {
+    fn send_request(
+        &mut self,
+        request: &Request,
+    ) -> std::result::Result<(), crate::error::HostError> {
         let buffer = &mut self.message_buffer;
         self.session
             .handle_request(request.clone(), &mut |msg| buffer.push_back(msg));
         Ok(())
     }
 
-    fn read_message(&mut self) -> Result<Option<Message>> {
+    fn read_message(&mut self) -> std::result::Result<Option<Message>, crate::error::HostError> {
         Ok(self.message_buffer.pop_front())
     }
 

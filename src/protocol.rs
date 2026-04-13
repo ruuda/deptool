@@ -66,7 +66,5 @@ pub enum Message {
     SendPack {
         pack_data: String,
     },
-    Error {
-        message: String,
-    },
+    Error(crate::error::ApplyError),
 }

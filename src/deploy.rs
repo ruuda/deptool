@@ -11,13 +11,13 @@ use git2::Oid;
 
 use parking_lot::Mutex;
 
-use crate::error::{Error, Result};
+use crate::error::{Error, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 use crate::store::{RefUpdate, Store};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug)]
 pub enum HostState {
     Pending,
     Connecting,
@@ -29,7 +29,7 @@ pub enum HostState {
     Done,
     Stale,
     LockBusy(Option<String>),
-    Failed(String),
+    Failed(HostError),
 }
 
 impl HostState {
@@ -55,8 +55,14 @@ impl std::fmt::Display for HostState {
             HostState::Stale => f.write_str("stale"),
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
-            HostState::Failed(reason) => write!(f, "failed: {reason}"),
+            HostState::Failed(err) => write!(f, "failed: {err}"),
         }
+    }
+}
+
+impl From<HostError> for HostState {
+    fn from(err: HostError) -> Self {
+        HostState::Failed(err)
     }
 }
 
@@ -84,9 +90,9 @@ impl DeployProgress {
         }
     }
 
-    pub fn update(&self, host: &Hostname, state: HostState) {
+    pub fn update(&self, host: &Hostname, state: impl Into<HostState>) {
         let inner = &mut *self.inner.lock();
-        *inner.states.get_mut(host).expect("host is in the plan") = state;
+        *inner.states.get_mut(host).expect("host is in the plan") = state.into();
         inner.observer.state_changed(&inner.states);
     }
 
@@ -101,15 +107,20 @@ impl DeployProgress {
     }
 
     #[cfg(test)]
-    fn state(&self, host: &str) -> HostState {
-        self.inner.lock().states[&Hostname(host.into())].clone()
+    fn state(&self, host: &str) -> parking_lot::MappedMutexGuard<'_, HostState> {
+        parking_lot::MutexGuard::map(self.inner.lock(), |inner| {
+            inner
+                .states
+                .get_mut(&Hostname(host.into()))
+                .expect("host is in the plan")
+        })
     }
 }
 
 pub trait Connection: Send {
     fn hello(&self) -> &Hello;
-    fn send_request(&mut self, request: &Request) -> Result<()>;
-    fn read_message(&mut self) -> Result<Option<Message>>;
+    fn send_request(&mut self, request: &Request) -> std::result::Result<(), HostError>;
+    fn read_message(&mut self) -> std::result::Result<Option<Message>, HostError>;
     /// Close stdin to signal no more requests are coming.
     fn close(&mut self);
 }
@@ -136,12 +147,13 @@ impl RemoteSession {
     /// Returns `Err(AgentNotInstalled)` if the process exits with an error
     /// before sending a hello, indicating that likely the binary is not on the
     /// target.
-    pub fn new(mut cmd: Command) -> Result<Self> {
+    pub fn new(mut cmd: Command) -> std::result::Result<Self, HostError> {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .spawn()
+            .map_err(HostError::connection_failed)?;
 
         let mut reader = BufReader::new(child.stdout.take().expect("stdout is piped"));
         let writer = child.stdin.take().expect("stdin is piped");
@@ -157,11 +169,12 @@ impl RemoteSession {
                     let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
                 }
                 let stderr = stderr.trim();
-                match child.wait()?.code() {
+                let code = child.wait().map_err(HostError::connection_failed)?.code();
+                match code {
                     // 255: SSH connection failure (host unreachable, DNS
                     // failure, connection refused, timeout, etc.)
                     Some(255) => {
-                        return Err(Error::ConnectionFailed(stderr.to_string()));
+                        return Err(HostError::ConnectionFailed(stderr.to_string()));
                     }
                     // When we run `deptool` directly and the shell reports that
                     // the binary is not found, the exit code is 127, but when
@@ -169,24 +182,25 @@ impl RemoteSession {
                     // code 1. TODO: Would it be better to start the agent as
                     // the current user and the let it reexec itself under sudo
                     // if its uid is unexpected?
-                    Some(1 | 127) => return Err(Error::AgentNotInstalled),
+                    Some(1 | 127) => return Err(HostError::AgentNotInstalled),
                     Some(code) => {
-                        return Err(Error::ProtocolError(format!(
+                        return Err(HostError::ProtocolError(format!(
                             "ssh exited with status {code} \
                              before agent sent hello: {stderr}"
                         )));
                     }
                     // On Unix, None means the process was killed by a signal.
                     None => {
-                        return Err(Error::ProtocolError(format!(
+                        return Err(HostError::ProtocolError(format!(
                             "ssh killed by signal \
                              before agent sent hello: {stderr}"
                         )));
                     }
                 }
             }
-            Ok(_) => serde_json::from_str(&line)?,
-            Err(e) => return Err(e.into()),
+            Ok(_) => serde_json::from_str(&line)
+                .map_err(|e| HostError::ProtocolError(format!("invalid hello: {e}")))?,
+            Err(e) => return Err(HostError::connection_failed(e)),
         };
 
         Ok(RemoteSession {
@@ -203,21 +217,24 @@ impl Connection for RemoteSession {
         &self.hello
     }
 
-    fn send_request(&mut self, request: &Request) -> Result<()> {
+    fn send_request(&mut self, request: &Request) -> std::result::Result<(), HostError> {
         let writer = self.writer.as_mut().expect("stdin is still open");
-        serde_json::to_writer(&mut *writer, request)?;
-        writeln!(writer)?;
-        writer.flush()?;
+        serde_json::to_writer(&mut *writer, request).map_err(HostError::protocol_error)?;
+        writeln!(writer).map_err(HostError::protocol_error)?;
+        writer.flush().map_err(HostError::protocol_error)?;
         Ok(())
     }
 
-    fn read_message(&mut self) -> Result<Option<Message>> {
+    fn read_message(&mut self) -> std::result::Result<Option<Message>, HostError> {
         let mut line = String::new();
-        let n = self.reader.read_line(&mut line)?;
+        let n = self
+            .reader
+            .read_line(&mut line)
+            .map_err(HostError::protocol_error)?;
         if n == 0 {
             return Ok(None);
         }
-        let message: Message = serde_json::from_str(&line)?;
+        let message: Message = serde_json::from_str(&line).map_err(HostError::protocol_error)?;
         Ok(Some(message))
     }
 
@@ -240,29 +257,29 @@ pub struct LockResult {
 /// Connect to a host, installing the agent if needed.
 fn try_connect(
     host: &Hostname,
-    connect: &(impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync),
-    install: &(impl Fn(&Hostname) -> Result<()> + Sync),
+    connect: &(impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync),
+    install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
     progress: &DeployProgress,
 ) -> Option<Box<dyn Connection>> {
     progress.update(host, HostState::Connecting);
     let conn = match connect(host) {
         Ok(c) => c,
-        Err(Error::AgentNotInstalled) => {
+        Err(HostError::AgentNotInstalled) => {
             progress.update(host, HostState::InstallingAgent);
             if let Err(err) = install(host) {
-                progress.update(host, HostState::Failed(err.to_string()));
+                progress.update(host, err);
                 return None;
             }
             match connect(host) {
                 Ok(c) => c,
                 Err(err) => {
-                    progress.update(host, HostState::Failed(err.to_string()));
+                    progress.update(host, err);
                     return None;
                 }
             }
         }
         Err(err) => {
-            progress.update(host, HostState::Failed(err.to_string()));
+            progress.update(host, err);
             return None;
         }
     };
@@ -274,9 +291,7 @@ fn try_connect(
     if conn.hello().hostname != host.0 {
         progress.update(
             host,
-            HostState::Failed(
-                Error::HostnameMismatch(conn.hello().hostname.clone()).to_string(),
-            ),
+            HostError::HostnameMismatch(conn.hello().hostname.clone()),
         );
         return None;
     }
@@ -290,8 +305,8 @@ fn try_connect(
 /// from the result.
 fn connect_hosts(
     plan: &Plan,
-    connect: &(impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync),
-    install: &(impl Fn(&Hostname) -> Result<()> + Sync),
+    connect: &(impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync),
+    install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
     progress: &DeployProgress,
 ) -> BTreeMap<Hostname, Box<dyn Connection>> {
     let mut connections = BTreeMap::new();
@@ -336,7 +351,7 @@ pub fn lock_hosts(
             operator: operator.to_string(),
         };
         if let Err(err) = conn.send_request(&lock_request) {
-            progress.update(&host, HostState::Failed(err.to_string()));
+            progress.update(&host, err);
             continue;
         }
 
@@ -368,7 +383,7 @@ pub fn lock_hosts(
             other => {
                 progress.update(
                     &host,
-                    HostState::Failed(format!("unexpected lock response: {other:?}")),
+                    HostError::ProtocolError(format!("unexpected lock response: {other:?}")),
                 );
             }
         }
@@ -385,7 +400,7 @@ fn push_and_apply_host(
     plan: &Plan,
     packs: &BTreeMap<Option<Oid>, String>,
     progress: &DeployProgress,
-) -> Result<()> {
+) -> std::result::Result<(), HostError> {
     progress.update(host, HostState::Pushing);
     let key = plan.hosts[host].expected_current;
     let encoded = &packs[&key];
@@ -394,14 +409,12 @@ fn push_and_apply_host(
     })?;
     match conn.read_message()? {
         Some(Message::PackReceived) => {}
-        Some(Message::Error { message }) => {
-            return Err(Error::AgentError(format!(
-                "{host}: receive pack failed: {message}"
-            )));
+        Some(Message::Error(apply_err)) => {
+            return Err(HostError::Apply(apply_err));
         }
         other => {
-            return Err(Error::ProtocolError(format!(
-                "{host}: unexpected response to ReceivePack: {other:?}"
+            return Err(HostError::ProtocolError(format!(
+                "unexpected response to ReceivePack: {other:?}"
             )));
         }
     }
@@ -420,14 +433,14 @@ fn push_and_apply_host(
             Message::SystemdUnitStatus { output } => {
                 progress.log_message(host, output.trim_end());
             }
-            Message::Error { message } => {
-                return Err(Error::AgentError(format!("{host}: {message}")));
+            Message::Error(apply_err) => {
+                return Err(HostError::Apply(apply_err.clone()));
             }
             _ => {}
         }
     }
     let applied_commit = applied_commit.ok_or_else(|| {
-        Error::ProtocolError(format!("{host}: agent closed without ApplyComplete"))
+        HostError::ProtocolError("agent closed without ApplyComplete".to_string())
     })?;
     assert_eq!(
         applied_commit, plan.commit,
@@ -465,46 +478,60 @@ pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, S
 ///
 /// For each stale host whose actual commit we don't already have, sends
 /// `RequestObjects` and receives a packfile. Updates the local tracking
-/// ref for each host.
-pub fn fetch_stale_objects(store: &Store, stale: &mut BTreeMap<Hostname, StaleHost>) -> Result<()> {
+/// ref for each host. Reports per-host errors via progress.
+pub fn fetch_stale_objects(
+    store: &Store,
+    stale: &mut BTreeMap<Hostname, StaleHost>,
+    progress: &DeployProgress,
+) {
     for (host, info) in stale.iter_mut() {
-        let actual_commit = match info.actual_commit {
-            Some(c) => c,
-            None => continue,
-        };
+        match fetch_from_stale_host(store, host, info) {
+            Ok(()) => {}
+            Err(err) => progress.update(host, err),
+        }
+    }
+}
 
-        // Fetch the pack if we don't already have this commit.
-        if store.repo.find_commit(actual_commit).is_err() {
-            info.connection.send_request(&Request::RequestObjects {
-                have_commit: info.expected_commit,
-            })?;
+fn fetch_from_stale_host(
+    store: &Store,
+    host: &Hostname,
+    info: &mut StaleHost,
+) -> std::result::Result<(), HostError> {
+    let actual_commit = match info.actual_commit {
+        Some(c) => c,
+        None => return Ok(()),
+    };
 
-            match info.connection.read_message()? {
-                Some(Message::SendPack { pack_data }) => {
-                    let bytes = BASE64
-                        .decode(&pack_data)
-                        .expect("SendPack contains valid base64");
-                    store.write_pack(&bytes)?;
-                }
-                Some(Message::Error { message }) => {
-                    return Err(Error::ProtocolError(format!(
-                        "{host}: RequestObjects failed: {message}"
-                    )));
-                }
-                other => {
-                    return Err(Error::ProtocolError(format!(
-                        "{host}: unexpected response to RequestObjects: {other:?}"
-                    )));
-                }
+    // Fetch the pack if we don't already have this commit.
+    if store.repo.find_commit(actual_commit).is_err() {
+        info.connection.send_request(&Request::RequestObjects {
+            have_commit: info.expected_commit,
+        })?;
+
+        match info.connection.read_message()? {
+            Some(Message::SendPack { pack_data }) => {
+                let bytes = BASE64
+                    .decode(&pack_data)
+                    .expect("SendPack contains valid base64");
+                store.write_pack(&bytes)?;
+            }
+            Some(Message::Error(apply_err)) => {
+                return Err(HostError::Apply(apply_err));
+            }
+            other => {
+                return Err(HostError::ProtocolError(format!(
+                    "unexpected response to RequestObjects: {other:?}"
+                )));
             }
         }
-
-        store.set_ref(
-            &format!("refs/remotes/{host}/current"),
-            actual_commit,
-            RefUpdate::FetchStale,
-        )?;
     }
+
+    store.set_ref(
+        &format!("refs/remotes/{host}/current"),
+        actual_commit,
+        RefUpdate::FetchStale,
+    )?;
+
     Ok(())
 }
 
@@ -524,8 +551,8 @@ pub fn run_deploy(
     store: &Store,
     plan: &Plan,
     operator: &str,
-    connect: impl Fn(&Hostname) -> Result<Box<dyn Connection>> + Sync,
-    install: impl Fn(&Hostname) -> Result<()> + Sync,
+    connect: impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync,
+    install: impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync,
     progress: &DeployProgress,
 ) -> Result<()> {
     let connections = connect_hosts(plan, &connect, &install, progress);
@@ -533,7 +560,7 @@ pub fn run_deploy(
 
     if lock_result.locked.len() < plan.hosts.len() {
         // Fetch objects from stale hosts so we have the data for the next plan.
-        fetch_stale_objects(store, &mut lock_result.stale)?;
+        fetch_stale_objects(store, &mut lock_result.stale, progress);
         let n = progress.num_failed();
         return Err(Error::DeployFailed(format!(
             "failed to lock {n} host(s), aborting",
@@ -550,7 +577,7 @@ pub fn run_deploy(
                 if let Err(err) =
                     push_and_apply_host(store_path, &host, &mut conn, plan, packs, progress)
                 {
-                    progress.update(&host, HostState::Failed(err.to_string()));
+                    progress.update(&host, err);
                 }
             });
         }
@@ -680,7 +707,7 @@ mod tests {
 
         // Deploy should abort because the host is stale.
         assert!(result.is_err());
-        assert_eq!(progress.state("web1"), HostState::Stale);
+        assert!(matches!(*progress.state("web1"), HostState::Stale));
 
         // The stale fetch should have brought commit_v2 into driver B,
         // so B can re-plan with up-to-date information.
@@ -737,7 +764,7 @@ mod tests {
 
         // Deploy should abort: web1 is stale.
         assert!(result.is_err());
-        assert_eq!(progress.state("web1"), HostState::Stale);
+        assert!(matches!(*progress.state("web1"), HostState::Stale));
 
         // web2 should NOT have been modified despite being lockable.
         assert_eq!(
@@ -776,7 +803,7 @@ mod tests {
         );
 
         assert!(result.is_err());
-        assert!(matches!(progress.state("web1"), HostState::LockBusy(_)));
+        assert!(matches!(*progress.state("web1"), HostState::LockBusy(_)));
 
         drop(lock_holder);
         Ok(())
@@ -798,7 +825,7 @@ mod tests {
             "deckard@spinner",
             |host| match host.0.as_str() {
                 "web1" => Ok(c1()),
-                other => Err(Error::ConnectionFailed(format!(
+                other => Err(HostError::ConnectionFailed(format!(
                     "ssh: connect to host {other}: Connection timed out",
                 ))),
             },
@@ -808,7 +835,7 @@ mod tests {
 
         // Deploy aborts because web2 is unreachable.
         assert!(result.is_err());
-        assert!(matches!(progress.state("web2"), HostState::Failed(_)));
+        assert!(matches!(*progress.state("web2"), HostState::Failed(_)));
 
         // web1 should NOT have been modified.
         assert_eq!(
@@ -824,9 +851,15 @@ mod tests {
     fn deploy_fails_on_hostname_mismatch() {
         struct Conn(Hello);
         impl Connection for Conn {
-            fn hello(&self) -> &Hello { &self.0 }
-            fn send_request(&mut self, _: &Request) -> Result<()> { unimplemented!() }
-            fn read_message(&mut self) -> Result<Option<Message>> { unimplemented!() }
+            fn hello(&self) -> &Hello {
+                &self.0
+            }
+            fn send_request(&mut self, _: &Request) -> std::result::Result<(), HostError> {
+                unimplemented!()
+            }
+            fn read_message(&mut self) -> std::result::Result<Option<Message>, HostError> {
+                unimplemented!()
+            }
             fn close(&mut self) {}
         }
 
@@ -834,19 +867,21 @@ mod tests {
         let host = Hostname::from("web1");
         let result = try_connect(
             &host,
-            &|_| Ok(Box::new(Conn(Hello {
-                version: protocol::VERSION.to_string(),
-                hostname: "spinner".to_string(),
-            }))),
+            &|_| {
+                Ok(Box::new(Conn(Hello {
+                    version: protocol::VERSION.to_string(),
+                    hostname: "spinner".to_string(),
+                })))
+            },
             &|_| panic!("install not expected"),
             &progress,
         );
 
         assert!(result.is_none());
-        match progress.state("web1") {
-            HostState::Failed(msg) => assert!(msg.contains("spinner"), "{msg}"),
-            other => panic!("expected Failed, got {other:?}"),
-        }
+        assert!(matches!(
+            &*progress.state("web1"),
+            HostState::Failed(HostError::HostnameMismatch(h)) if h == "spinner"
+        ));
     }
 
     #[test]

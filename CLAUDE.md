@@ -72,6 +72,7 @@ Specific checks:
  - At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
  - Order function arguments from least-varying to most-varying. Configuration and context arguments (like a directory path) go before data arguments (like the specific changes to apply).
  - Prefer plain `match` over fancy method chains.
+ - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()` when the ok-path is the important one -- `if let Err` buries the function call after the error handling keyword.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
  - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem.

@@ -9,7 +9,7 @@ use std::process::Command;
 use bpaf::Bpaf;
 
 use deploy::Connection;
-use error::{Error, Result};
+use error::{ApplyError, Error, HostError, Result};
 use prim::Hostname;
 use store::Store;
 
@@ -138,7 +138,7 @@ fn run_deploy(
 
     let remote_store_str = remote_store
         .to_str()
-        .ok_or_else(|| Error::InvalidConfig("remote store path is not valid UTF-8".into()))?
+        .expect("remote store path is valid UTF-8")
         .to_string();
 
     let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
@@ -161,7 +161,7 @@ fn run_deploy(
         "remote binary path is free of shell metacharacters"
     );
 
-    let connect = |host: &Hostname| -> Result<Box<dyn Connection>> {
+    let connect = |host: &Hostname| -> std::result::Result<Box<dyn Connection>, HostError> {
         let cmd = match mode {
             DeployMode::Local => {
                 let mut cmd =
@@ -189,8 +189,9 @@ fn run_deploy(
         let session = deploy::RemoteSession::new(cmd)?;
         Ok(Box::new(session))
     };
-    let install =
-        |host: &Hostname| -> Result<()> { setup::install_binary(host, &remote_bin_path, &binary) };
+    let install = |host: &Hostname| -> std::result::Result<(), HostError> {
+        setup::install_binary(host, &remote_bin_path, &binary)
+    };
 
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let hostname = prim::read_hostname();
@@ -211,10 +212,9 @@ fn run() -> Result<()> {
             let store = Store::open_or_init(&store)?;
             let tree_oid = store.build_tree(&dir)?;
             store.validate(tree_oid)?;
-            match store.commit_tree(tree_oid) {
-                Ok(commit_oid) => println!("{commit_oid}"),
-                Err(error::Error::NoChanges) => println!("No changes."),
-                Err(e) => return Err(e),
+            match store.commit_tree(tree_oid)? {
+                Some(commit_oid) => println!("{commit_oid}"),
+                None => println!("No changes."),
             }
         }
         Cmd::Deploy {
@@ -246,7 +246,7 @@ fn post_apply(
     emit: &mut dyn FnMut(protocol::Message),
     apps_dir: &Path,
     unit_dir: &Path,
-) -> error::Result<()> {
+) -> std::result::Result<(), ApplyError> {
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
     // that these symlinks provide.
@@ -315,9 +315,7 @@ fn post_apply(
     if all_active {
         Ok(())
     } else {
-        Err(error::Error::AgentError(
-            "one or more units failed to become active".into(),
-        ))
+        Err(ApplyError::SystemdActivationFailed)
     }
 }
 

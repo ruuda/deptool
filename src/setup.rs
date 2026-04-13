@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::SystemTime;
 
-use crate::error::{Error, Result};
+use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 
 pub const BIN_DIR: &str = "/var/lib/deptool/bin";
@@ -29,7 +29,11 @@ pub fn truncated_sha256(bytes: &[u8], prefix_len: usize) -> String {
 /// We execute a single command over SSH. The command reads the binary from
 /// stdin via `dd`, makes it executable, and prints its sha256sum so the
 /// caller can verify the transfer was successful.
-pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> Result<()> {
+pub fn install_binary(
+    host: &Hostname,
+    remote_bin_path: &str,
+    binary: &[u8],
+) -> std::result::Result<(), HostError> {
     let install_command = [
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
         &format!("sudo dd status=none of={remote_bin_path}"),
@@ -42,23 +46,28 @@ pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> 
         .args([&host.0, &install_command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .spawn()?;
+        .spawn()
+        .map_err(HostError::connection_failed)?;
     child
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(binary)?;
+        .write_all(binary)
+        .map_err(HostError::connection_failed)?;
 
     // Compute the expected shasum while sending.
     // SHA256 is 32 bytes, so this is the full hash.
     // TODO: We could compute it only once at startup and pass it here.
     let expected_hash = truncated_sha256(binary, 32);
 
-    let output = child.wait_with_output()?.stdout;
+    let output = child
+        .wait_with_output()
+        .map_err(HostError::connection_failed)?
+        .stdout;
 
     // Parse the hash out of a `sha256sum` output line (`<hash>  <filename>\n`).
     let make_err =
-        || Error::SetupProtocolError("Failed to read sha256sum after installation.".into());
+        || HostError::SetupProtocolError("Failed to read sha256sum after installation.".into());
     let actual_hash = std::str::from_utf8(&output)
         .map_err(|_| make_err())?
         .split_whitespace()
@@ -66,7 +75,7 @@ pub fn install_binary(host: &Hostname, remote_bin_path: &str, binary: &[u8]) -> 
         .ok_or_else(make_err)?;
 
     if actual_hash != expected_hash {
-        return Err(Error::SetupChecksumMismatch {
+        return Err(HostError::SetupChecksumMismatch {
             actual_hash: actual_hash.into(),
             expected_hash,
         });

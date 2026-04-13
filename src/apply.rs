@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 
 use git2::{Oid, Tree};
 
-use crate::error::Result;
+use crate::error::ApplyError;
 use crate::plan::{AppDiff, Changes, SymlinkChanges, diff_enabled, diff_symlinks};
 use crate::prim::Hostname;
 use crate::store::{self, Store};
+
+type Result<T> = std::result::Result<T, ApplyError>;
 
 /// Map from unit filename to the absolute symlink target path.
 pub type DesiredUnits = BTreeMap<String, PathBuf>;
@@ -219,6 +221,7 @@ pub fn reconcile_manifest_symlinks(
 /// config files already present on the host can be moved under Deptool
 /// management without manual intervention.
 fn create_symlink(source: &Path, link: &Path) -> Result<()> {
+    let link_name = link.display().to_string();
     match unix_fs::symlink(source, link) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -227,16 +230,16 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
                 unix_fs::symlink(source, link)?;
                 Ok(())
             } else {
-                Err(crate::error::Error::AgentError(format!(
-                    "cannot create symlink at {}: \
-                     a file with different contents already exists; \
-                     remove it manually and retry",
-                    link.display(),
-                )))
+                Err(ApplyError::SymlinkFailed {
+                    link: link_name,
+                    cause: "a file with different contents already exists; \
+                            remove it manually and retry"
+                        .into(),
+                })
             }
         }
         Err(err) => {
-            let detail = match err.kind() {
+            let cause = match err.kind() {
                 std::io::ErrorKind::NotFound => match link.parent() {
                     Some(parent) if !parent.exists() => {
                         format!("parent directory {} does not exist", parent.display())
@@ -245,10 +248,10 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
                 },
                 _ => err.to_string(),
             };
-            Err(crate::error::Error::AgentError(format!(
-                "cannot create symlink at {}: {detail}",
-                link.display(),
-            )))
+            Err(ApplyError::SymlinkFailed {
+                link: link_name,
+                cause,
+            })
         }
     }
 }
@@ -280,12 +283,14 @@ fn files_match(a: &Path, b: &Path) -> Result<bool> {
 fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     match fs::read_link(link) {
         Ok(actual) if actual.starts_with(apps_dir) => Ok(()),
-        Ok(actual) => Err(crate::error::Error::AgentError(format!(
-            "refusing to touch {}: points to {}, not into {}",
-            link.display(),
-            actual.display(),
-            apps_dir.display(),
-        ))),
+        Ok(actual) => Err(ApplyError::SymlinkFailed {
+            link: link.display().to_string(),
+            cause: format!(
+                "refusing to touch: points to {}, not into {}",
+                actual.display(),
+                apps_dir.display(),
+            ),
+        }),
         // Dangling or missing -- nothing to protect.
         Err(_) => Ok(()),
     }
@@ -334,12 +339,12 @@ fn collect_actual_units(
         }
         let target = fs::read_link(&path)?;
         if target.starts_with(apps_dir) {
-            let name = entry
-                .file_name()
-                .to_str()
-                .ok_or(crate::error::Error::NonUtf8FileName)?
-                .to_string();
-            units.insert(name, target);
+            let name = entry.file_name();
+            let name = name.to_str().ok_or_else(|| ApplyError::SymlinkFailed {
+                link: entry.path().display().to_string(),
+                cause: "file name is not valid UTF-8".into(),
+            })?;
+            units.insert(name.to_string(), target);
         }
     }
 
@@ -349,8 +354,11 @@ fn collect_actual_units(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::Result;
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
+
+    // Tests do both apply calls (-> ApplyError) and raw git operations
+    // (-> git2::Error), so use the top-level Result that accepts both.
+    use crate::error::Result;
 
     #[test]
     fn apply_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {

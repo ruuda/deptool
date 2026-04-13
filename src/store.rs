@@ -8,8 +8,10 @@ use git2::{Commit, Oid, Repository, Tree};
 
 use serde::Deserialize;
 
-use crate::error::{Error, Result};
+use crate::error::StoreError;
 use crate::prim::Hostname;
+
+type Result<T> = std::result::Result<T, StoreError>;
 
 /// Per-app manifest declaring runtime state that deptool should manage.
 ///
@@ -74,7 +76,10 @@ impl Store {
         build_tree_recursive(&self.repo, dir)
     }
 
-    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Oid> {
+    /// Commit a tree to `refs/heads/main`.
+    ///
+    /// Returns `None` if the tree is identical to the current head.
+    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Option<Oid>> {
         let tree = self.repo.find_tree(tree_oid)?;
 
         // Use the ambient Git author metadata if configured, fall back to
@@ -93,19 +98,19 @@ impl Store {
             .transpose()?;
 
         if parent.as_ref().is_some_and(|c| c.tree_id() == tree_oid) {
-            return Err(Error::NoChanges);
+            return Ok(None);
         }
 
         let parents: Vec<&Commit> = parent.iter().collect();
 
-        Ok(self.repo.commit(
+        Ok(Some(self.repo.commit(
             Some("refs/heads/main"),
             &author_sig,
             &author_sig,
             "Update config",
             &tree,
             &parents,
-        )?)
+        )?))
     }
 
     /// Check out a subtree (host/app) from a commit into a target directory.
@@ -273,7 +278,7 @@ impl Store {
             // Check for duplicate unit files across apps.
             for name in self.app_units(*app_tree_oid)? {
                 if let Some(other) = unit_owners.insert(name.clone(), app.clone()) {
-                    return Err(Error::InvalidConfig(format!(
+                    return Err(StoreError::InvalidConfig(format!(
                         "unit {name} provided by both {other} and {app}",
                     )));
                 }
@@ -281,18 +286,18 @@ impl Store {
 
             for (target, source) in &manifest.symlinks {
                 if !target.starts_with('/') {
-                    return Err(Error::InvalidConfig(format!(
+                    return Err(StoreError::InvalidConfig(format!(
                         "app {app} symlink target {target} is not an absolute path",
                     )));
                 }
                 if app_tree.get_path(Path::new(source)).is_err() {
-                    return Err(Error::InvalidConfig(format!(
+                    return Err(StoreError::InvalidConfig(format!(
                         "app {app} symlink source {source} does not exist in the app tree",
                     )));
                 }
                 // Check for duplicate symlink targets across apps.
                 if let Some(other) = symlink_owners.insert(target.clone(), app.clone()) {
-                    return Err(Error::InvalidConfig(format!(
+                    return Err(StoreError::InvalidConfig(format!(
                         "symlink {target} provided by both {other} and {app}",
                     )));
                 }
@@ -353,7 +358,7 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
 
     for entry in entries {
         let name = entry.file_name();
-        let name = name.to_str().ok_or(Error::NonUtf8FileName)?;
+        let name = name.to_str().ok_or(StoreError::NonUtf8FileName)?;
 
         match entry.file_type()? {
             ft if ft.is_dir() => {
@@ -374,7 +379,8 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
 
 #[cfg(test)]
 mod tests {
-    use crate::error::{Error, Result};
+    use super::*;
+    use crate::error::StoreError;
     use crate::testutil::TestRepo;
 
     #[test]
@@ -390,13 +396,12 @@ mod tests {
     }
 
     #[test]
-    fn commit_tree_rejects_unchanged_tree() {
+    fn commit_tree_returns_none_when_unchanged() {
         let t = TestRepo::new();
         let oid = t.commit(&[("web1/app/config", b"v1")]);
         let tree_oid = t.get_commit_tree_oid(oid);
 
-        let err = t.store.commit_tree(tree_oid).unwrap_err();
-        assert!(matches!(err, Error::NoChanges));
+        assert!(t.store.commit_tree(tree_oid).unwrap().is_none());
     }
 
     #[test]
@@ -406,7 +411,7 @@ mod tests {
         let oid = t.commit(&[("host/nginx/manifest.json", manifest)]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        assert!(matches!(err, Error::Json(_)));
+        assert!(matches!(err, StoreError::Json(_)));
     }
 
     #[test]
@@ -428,7 +433,7 @@ mod tests {
         ]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        let Error::InvalidConfig(msg) = err else {
+        let StoreError::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("shared.service"), "{msg}");
@@ -447,7 +452,7 @@ mod tests {
         ]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        let Error::InvalidConfig(msg) = err else {
+        let StoreError::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("/etc/foo.conf"), "{msg}");
@@ -463,7 +468,7 @@ mod tests {
         ]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        let Error::InvalidConfig(msg) = err else {
+        let StoreError::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("not an absolute path"), "{msg}");
@@ -476,7 +481,7 @@ mod tests {
         let oid = t.commit(&[("host/nginx/manifest.json", manifest)]);
 
         let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
-        let Error::InvalidConfig(msg) = err else {
+        let StoreError::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("missing.conf"), "{msg}");
