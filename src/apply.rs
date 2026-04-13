@@ -235,10 +235,21 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
                 )))
             }
         }
-        Err(err) => Err(crate::error::Error::AgentError(format!(
-            "cannot create symlink at {}: {err}",
-            link.display(),
-        ))),
+        Err(err) => {
+            let detail = match err.kind() {
+                std::io::ErrorKind::NotFound => match link.parent() {
+                    Some(parent) if !parent.exists() => {
+                        format!("parent directory {} does not exist", parent.display())
+                    }
+                    _ => err.to_string(),
+                },
+                _ => err.to_string(),
+            };
+            Err(crate::error::Error::AgentError(format!(
+                "cannot create symlink at {}: {detail}",
+                link.display(),
+            )))
+        }
     }
 }
 
