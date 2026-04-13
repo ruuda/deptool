@@ -271,6 +271,15 @@ fn try_connect(
         protocol::VERSION,
         "agent version matches operator version"
     );
+    if conn.hello().hostname != host.0 {
+        progress.update(
+            host,
+            HostState::Failed(
+                Error::HostnameMismatch(conn.hello().hostname.clone()).to_string(),
+            ),
+        );
+        return None;
+    }
     progress.update(host, HostState::Connected);
     Some(conn)
 }
@@ -809,6 +818,35 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn deploy_fails_on_hostname_mismatch() {
+        struct Conn(Hello);
+        impl Connection for Conn {
+            fn hello(&self) -> &Hello { &self.0 }
+            fn send_request(&mut self, _: &Request) -> Result<()> { unimplemented!() }
+            fn read_message(&mut self) -> Result<Option<Message>> { unimplemented!() }
+            fn close(&mut self) {}
+        }
+
+        let progress = test_progress(&["web1"]);
+        let host = Hostname::from("web1");
+        let result = try_connect(
+            &host,
+            &|_| Ok(Box::new(Conn(Hello {
+                version: protocol::VERSION.to_string(),
+                hostname: "spinner".to_string(),
+            }))),
+            &|_| panic!("install not expected"),
+            &progress,
+        );
+
+        assert!(result.is_none());
+        match progress.state("web1") {
+            HostState::Failed(msg) => assert!(msg.contains("spinner"), "{msg}"),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 
     #[test]

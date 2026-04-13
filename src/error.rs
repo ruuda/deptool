@@ -31,6 +31,8 @@ pub enum Error {
         expected_hash: String,
         actual_hash: String,
     },
+    /// The agent reported a different hostname than the driver expected.
+    HostnameMismatch(String),
     /// Unexpected response during binary installation handshake.
     SetupProtocolError(String),
     /// Unexpected or malformed message from the agent session.
@@ -77,6 +79,9 @@ impl fmt::Display for Error {
             Error::NoChanges => write!(f, "no changes"),
             Error::DeployFailed(msg) => write!(f, "{msg}"),
             Error::AgentError(msg) => write!(f, "{msg}"),
+            Error::HostnameMismatch(actual) => {
+                write!(f, "hostname mismatch: /etc/hostname contains {actual:?}")
+            }
             Error::SetupChecksumMismatch {
                 expected_hash,
                 actual_hash,
