@@ -1,5 +1,8 @@
-// Shared modules, re-exported for integration tests.
-// The binary entry point is in main.rs.
+//! Deptool: a declarative deployment tool.
+//!
+//! Operator-side modules: [`plan`], [`deploy`], [`display`], [`setup`].
+//! Agent-side modules: [`session`], [`apply`].
+//! Shared: [`store`], [`protocol`], [`error`], [`prim`].
 
 pub mod apply;
 pub mod deploy;
