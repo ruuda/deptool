@@ -8,7 +8,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
-use crate::apply::{DesiredUnits, apply_host};
+use crate::apply::{DesiredUnits, apply_checkout, diff_host};
 use crate::error::ApplyError;
 use crate::plan::SystemDiff;
 use crate::prim::Hostname;
@@ -88,6 +88,14 @@ struct DeployLock {
     _file: File,
     /// Who initiated the deploy (e.g. "deckard@spinner").
     operator: String,
+}
+
+/// State known during an apply, gathered from the lock and the request.
+struct ApplyContext {
+    operator: String,
+    current_commit: Option<Oid>,
+    target_commit: Oid,
+    is_rollback_safe: bool,
 }
 
 impl HostSession {
@@ -234,68 +242,158 @@ impl HostSession {
                 target_commit,
                 is_rollback_safe,
             } => {
-                let current_commit = self.current_commit();
-
-                let operator = &self
-                    .lock
-                    .as_ref()
-                    .expect("lock is held during apply")
-                    .operator;
-                let result = apply_host(
-                    &self.store,
+                let ctx = ApplyContext {
+                    operator: self
+                        .lock
+                        .as_ref()
+                        .expect("lock is held during apply")
+                        .operator
+                        .clone(),
+                    current_commit: self.current_commit(),
                     target_commit,
-                    current_commit,
-                    &self.hostname,
-                    &self.apps_dir,
-                    operator,
-                    |app, diff| {
-                        emit_message(Message::AppliedApp {
-                            app: app.to_string(),
-                            diff: diff.clone(),
-                        });
-                    },
-                );
-
-                let changes = match result {
-                    Ok(changes) => changes,
-                    Err(err) => {
-                        emit_message(Message::Error(err));
-                        return;
-                    }
-                };
-
-                assert_eq!(
-                    changes.is_rollback_safe(),
                     is_rollback_safe,
-                    "agent and driver disagree on rollback safety",
-                );
-
-                let desired_units = self
-                    .store
-                    .desired_units(target_commit, &self.hostname, &self.apps_dir)
-                    .expect("desired_units succeeds for a just-applied commit");
-
-                if let Err(err) = (self.on_post_apply)(&desired_units, &changes, emit_message) {
+                };
+                if let Err(err) = self.handle_apply(&ctx, emit_message) {
                     emit_message(Message::Error(err));
-                    return;
                 }
-
-                self.store
-                    .set_ref(
-                        "refs/heads/current",
-                        target_commit,
-                        RefUpdate::SetCurrent { operator },
-                    )
-                    .expect("updating current ref succeeds while we hold the lock");
-
-                emit_message(Message::ApplyComplete {
-                    commit: target_commit,
-                    enabled_units: changes.units.enable,
-                    restarted_units: changes.units.restart,
-                    disabled_units: changes.units.disable,
-                });
             }
         }
+    }
+
+    fn handle_apply(
+        &self,
+        ctx: &ApplyContext,
+        emit_message: &mut impl FnMut(Message),
+    ) -> std::result::Result<(), ApplyError> {
+        // Compute all diffs before any mutations, same as the driver's
+        // make_plan but aggregated per-host.
+        let (app_diffs, system_diff) = diff_host(
+            &self.store,
+            &self.hostname,
+            &self.apps_dir,
+            ctx.current_commit,
+            ctx.target_commit,
+        )?;
+
+        assert_eq!(
+            system_diff.is_rollback_safe(),
+            ctx.is_rollback_safe,
+            "agent and driver disagree on rollback safety",
+        );
+
+        self.store.set_ref(
+            "refs/heads/target",
+            ctx.target_commit,
+            RefUpdate::SetTarget {
+                operator: &ctx.operator,
+            },
+        )?;
+
+        apply_checkout(
+            &self.store,
+            ctx.target_commit,
+            &app_diffs,
+            &self.hostname,
+            &self.apps_dir,
+            |app, diff| {
+                emit_message(Message::AppliedApp {
+                    app: app.to_string(),
+                    diff: diff.clone(),
+                });
+            },
+        )?;
+
+        let desired_units =
+            self.store
+                .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?;
+
+        match (self.on_post_apply)(&desired_units, &system_diff, emit_message) {
+            Ok(()) => {}
+            Err(err) if system_diff.is_rollback_safe() => {
+                return self.handle_rollback(err, ctx, emit_message);
+            }
+            Err(err) => return Err(err),
+        }
+
+        self.store.set_ref(
+            "refs/heads/current",
+            ctx.target_commit,
+            RefUpdate::SetCurrent {
+                operator: &ctx.operator,
+            },
+        )?;
+
+        emit_message(Message::ApplyComplete {
+            commit: ctx.target_commit,
+            enabled_units: system_diff.units.enable,
+            restarted_units: system_diff.units.restart,
+            disabled_units: system_diff.units.disable,
+        });
+        Ok(())
+    }
+
+    /// Roll back to the good commit after a failed post-apply.
+    ///
+    /// Re-applies the commit that was `current` before the failed deploy
+    /// attempt.
+    fn handle_rollback(
+        &self,
+        error: ApplyError,
+        ctx: &ApplyContext,
+        emit_message: &mut impl FnMut(Message),
+    ) -> std::result::Result<(), ApplyError> {
+        // TODO: support rollback to empty (first deploy) by making
+        // apply_checkout accept an optional target commit.
+        let good_commit = match ctx.current_commit {
+            None => unimplemented!("rollback to empty host"),
+            Some(commit) => commit,
+        };
+
+        emit_message(Message::RollingBack);
+
+        let (diffs, system_diff) = diff_host(
+            &self.store,
+            &self.hostname,
+            &self.apps_dir,
+            Some(ctx.target_commit),
+            good_commit,
+        )?;
+
+        // TODO: Instead of reusing `apply_checkout`, which deletes the checkout
+        // dir and recreates it if it already exists (which it does in this
+        // case), we can just update the app's `current` symlinks. That's fewer
+        // operations so less likely to fail, and it preserves the older ctimes
+        // on the existing checkout which can be valuable debugging signals for
+        // operators.
+        apply_checkout(
+            &self.store,
+            good_commit,
+            &diffs,
+            &self.hostname,
+            &self.apps_dir,
+            |app, diff| {
+                emit_message(Message::AppliedApp {
+                    app: app.to_string(),
+                    diff: diff.clone(),
+                });
+            },
+        )?;
+
+        let desired_units =
+            self.store
+                .desired_units(good_commit, &self.hostname, &self.apps_dir)?;
+        (self.on_post_apply)(&desired_units, &system_diff, emit_message)?;
+
+        self.store.set_ref(
+            "refs/heads/target",
+            good_commit,
+            RefUpdate::Rollback {
+                operator: &ctx.operator,
+            },
+        )?;
+
+        emit_message(Message::RolledBack { error });
+        Ok(())
     }
 }
 
@@ -372,5 +470,120 @@ mod tests {
         );
 
         drop(lock_holder);
+    }
+
+    /// Create a TestHost with a custom post_apply callback.
+    fn test_host(
+        hostname: &str,
+        files: &[(&str, &[u8])],
+        on_post_apply: super::OnPostApply,
+    ) -> (crate::testutil::TestHost, Oid) {
+        use crate::testutil::TempDir;
+        let store_dir = TempDir::new("store");
+        let apps = TempDir::new("apps");
+        let repo = git2::Repository::init_bare(store_dir.path()).expect("repo is created");
+        let store = Store { repo };
+        let oid = crate::testutil::commit_files(&store, files).expect("commit succeeds");
+        let session = HostSession::new(
+            store,
+            hostname.into(),
+            apps.path().to_path_buf(),
+            on_post_apply,
+        );
+        let host = crate::testutil::TestHost::from_parts(session, store_dir, apps);
+        (host, oid)
+    }
+
+    /// Lock the host and push a pack containing `commit`.
+    fn lock_and_push(host: &mut crate::testutil::TestHost, commit: Oid) {
+        host.interact(Request::Lock {
+            expected_current_commit: None,
+            operator: "deckard@spinner".into(),
+        });
+        let store = Store::open(host.session.store.path()).expect("store opens");
+        let pack = store
+            .create_pack(commit, None)
+            .expect("pack creation succeeds");
+        let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
+        host.interact(Request::ReceivePack { pack_data: encoded });
+    }
+
+    #[test]
+    fn rollback_on_post_apply_failure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Fail on first post_apply call, succeed on second (rollback).
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let count = call_count.clone();
+        let on_post_apply: super::OnPostApply = Box::new(move |_, _, _| {
+            if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(ApplyError::SystemdActivationFailed)
+            } else {
+                Ok(())
+            }
+        });
+
+        // Two commits: c1 is the good state, c2 is the broken deploy.
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        host.set_current(c1);
+        let store = Store::open(host.session.store.path()).expect("store opens");
+        let c2 = crate::testutil::commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
+            .expect("commit succeeds");
+
+        // Lock and push c2.
+        host.interact(Request::Lock {
+            expected_current_commit: Some(c1),
+            operator: "deckard@spinner".into(),
+        });
+        let pack = store.create_pack(c2, Some(c1)).expect("pack succeeds");
+        let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
+        host.interact(Request::ReceivePack { pack_data: encoded });
+
+        let msgs = host.interact(Request::Apply {
+            target_commit: c2,
+            is_rollback_safe: true,
+        });
+
+        // Forward apply emits AppliedApp, then post_apply fails, then rollback.
+        assert!(matches!(
+            msgs.as_slice(),
+            [
+                Message::AppliedApp { .. },
+                Message::RollingBack,
+                Message::AppliedApp { .. },
+                Message::RolledBack { .. },
+            ],
+        ));
+    }
+
+    #[test]
+    fn no_rollback_when_not_rollback_safe() {
+        let on_post_apply: super::OnPostApply =
+            Box::new(|_, _, _| Err(ApplyError::SystemdActivationFailed));
+
+        // Data with a newly enabled unit -- not rollback-safe.
+        let (mut host, c1) = test_host(
+            "web1",
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
+                ),
+            ],
+            on_post_apply,
+        );
+        lock_and_push(&mut host, c1);
+
+        let msgs = host.interact(Request::Apply {
+            target_commit: c1,
+            is_rollback_safe: false,
+        });
+
+        assert!(matches!(
+            msgs.as_slice(),
+            [Message::AppliedApp { .. }, Message::Error(_)],
+        ));
     }
 }

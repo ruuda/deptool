@@ -10,7 +10,7 @@ use git2::Oid;
 use crate::error::ApplyError;
 use crate::plan::{AppDiff, SymlinkChanges, SystemDiff, compute_system_diff};
 use crate::prim::Hostname;
-use crate::store::{self, Store};
+use crate::store::Store;
 
 type Result<T> = std::result::Result<T, ApplyError>;
 
@@ -71,44 +71,47 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Apply a deployment to a host's filesystem.
-///
-/// Sets the target ref, diffs current vs target apps, checks out or removes
-/// each changed app, and computes the unit lifecycle and symlink actions.
-/// Does *not* reconcile symlinks or touch systemd -- the caller does that
-/// in the post-apply phase. Calls `on_app` for each changed app.
-pub fn apply_host(
+/// Compute per-app diffs and the aggregate system diff for a host deploy.
+pub fn diff_host(
     store: &Store,
-    commit_oid: Oid,
-    actual_current: Option<Oid>,
     host: &Hostname,
     apps_dir: &Path,
-    operator: &str,
-    mut on_app: impl FnMut(&str, &AppDiff),
-) -> Result<SystemDiff<PathBuf>> {
-    store.set_ref(
-        "refs/heads/target",
-        commit_oid,
-        store::RefUpdate::SetTarget { operator },
-    )?;
-
-    let target_tree = store.get_commit_tree(commit_oid)?;
-    let target_apps = store.get_host_apps(&target_tree, host)?;
-
-    let current_apps = match actual_current {
+    current_commit: Option<Oid>,
+    target_commit: Oid,
+) -> Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>)> {
+    let current_apps = match current_commit {
         None => BTreeMap::new(),
         Some(oid) => {
             let tree = store.get_commit_tree(oid)?;
             store.get_host_apps(&tree, host)?
         }
     };
+    let target_tree = store.get_commit_tree(target_commit)?;
+    let target_apps = store.get_host_apps(&target_tree, host)?;
+    let app_diffs = crate::plan::diff_apps(&current_apps, &target_apps);
 
-    let diff = crate::plan::diff_apps(&current_apps, &target_apps);
-
-    // Checkout/remove each app and aggregate system-level side effects.
-    // Uses compute_system_diff (same as the plan), so display and apply agree.
     let mut system = SystemDiff::<PathBuf>::default();
-    for (app, change) in &diff {
+    for (app, change) in &app_diffs {
+        let mut resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
+        system.append(&mut resolved);
+    }
+
+    Ok((app_diffs, system))
+}
+
+/// Checkout or remove each changed app on the filesystem.
+///
+/// This is the only part of a deploy that mutates `apps_dir`. It does not
+/// touch refs, systemd, or host-level symlinks.
+pub fn apply_checkout(
+    store: &Store,
+    commit_oid: Oid,
+    app_diffs: &BTreeMap<String, AppDiff>,
+    host: &Hostname,
+    apps_dir: &Path,
+    mut on_app: impl FnMut(&str, &AppDiff),
+) -> Result<()> {
+    for (app, change) in app_diffs {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
                 apply_app(store, commit_oid, host, app, apps_dir)?;
@@ -118,16 +121,8 @@ pub fn apply_host(
             }
         }
         on_app(app, change);
-        let resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
-        system.append(&mut { resolved });
     }
-
-    // We don't update refs/heads/current here. There is more to do (enabling
-    // and disabling systemd units), and if that fails, we don't want the
-    // `current` ref to say that the deploy was done while it was in fact
-    // unfinished. It's better for it to be behind than ahead.
-
-    Ok(system)
+    Ok(())
 }
 
 /// Reconcile unit symlinks: make unit_dir match desired.
@@ -321,6 +316,7 @@ fn collect_actual_units(
 mod tests {
     use super::*;
     use crate::plan::diff_enabled;
+    use crate::store;
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     // Tests do both apply calls (-> ApplyError) and raw git operations
@@ -509,7 +505,7 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
-    /// Test harness for `apply_host` calls.
+    /// Test harness for `apply_checkout` calls.
     struct ApplyTest {
         repo: TestRepo,
         apps: TempDir,
@@ -532,28 +528,37 @@ mod tests {
             on_app: impl FnMut(&str, &AppDiff),
         ) -> Result<SystemDiff<PathBuf>> {
             let host = &"web1".into();
-            let operator = "deckard@spinner";
-            let changes = apply_host(
+            let (app_diffs, system) =
+                diff_host(&self.repo.store, host, self.apps.path(), current, commit)?;
+
+            self.repo.store.set_ref(
+                "refs/heads/target",
+                commit,
+                store::RefUpdate::SetTarget {
+                    operator: "deckard@spinner",
+                },
+            )?;
+            apply_checkout(
                 &self.repo.store,
                 commit,
-                current,
+                &app_diffs,
                 host,
                 self.apps.path(),
-                operator,
                 on_app,
             )?;
+
             // Reconcile here so tests that check unit symlinks still work.
             let desired = self
                 .repo
                 .store
                 .desired_units(commit, host, self.apps.path())?;
             reconcile_symlinks(&desired, self.apps.path(), self.units.path())?;
-            Ok(changes)
+            Ok(system)
         }
     }
 
     #[test]
-    fn apply_host_sets_target_ref() -> Result<()> {
+    fn apply_checkout_sets_target_ref() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
 
@@ -568,7 +573,7 @@ mod tests {
             .id();
         assert_eq!(target, c1);
 
-        // The `current` ref is *not* updated by apply_host, it's only updated
+        // The `current` ref is *not* updated by apply_checkout, it's only updated
         // all the way at the end after other system mutations.
         assert!(
             t.repo
@@ -582,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_host_writes_operator_to_reflog() -> Result<()> {
+    fn apply_checkout_writes_operator_to_reflog() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
 
@@ -600,7 +605,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_host_reports_per_app_changes() -> Result<()> {
+    fn apply_checkout_reports_per_app_changes() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
@@ -616,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_host_only_enables_units_from_systemd_json() -> Result<()> {
+    fn apply_checkout_only_enables_units_from_systemd_json() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
             ("web1/nginx/systemd/nginx.service", b"[Service]"),

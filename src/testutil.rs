@@ -60,7 +60,7 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
 }
 
 /// Create a commit with the given files, without touching the filesystem.
-fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
+pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
     Ok(store
         .commit_tree(tree_oid)?
@@ -147,6 +147,15 @@ pub struct TestHost {
 }
 
 impl TestHost {
+    /// Construct from pre-built parts.
+    pub fn from_parts(session: crate::session::HostSession, store: TempDir, apps: TempDir) -> Self {
+        TestHost {
+            session,
+            _store: store,
+            apps,
+        }
+    }
+
     /// Create a new host with a fresh bare repo.
     pub fn new(hostname: &str) -> Self {
         let store = TempDir::new("store");
