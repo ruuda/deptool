@@ -40,6 +40,35 @@ pub struct SystemDiff<T = String> {
 }
 
 impl<T> SystemDiff<T> {
+    /// Whether this diff can be safely rolled back by re-applying the previous
+    /// commit.
+    ///
+    /// * Creations are unsafe: they may overwrite pre-existing state we can't
+    ///   restore. This is a consequence of enabling gradual adoption.
+    /// * Removals and restarts are safe: we created that state, so if we
+    ///   already deleted it, we can just recreate it.
+    ///
+    /// IMPORTANT: every field of every struct must be destructured here, so
+    /// that adding a field anywhere is a compile error that forces revisiting
+    /// this safety check. Do NOT use field access (e.g. `self.symlinks.create`)
+    /// -- it silently ignores new fields.
+    pub fn is_rollback_safe(&self) -> bool {
+        let SystemDiff { units, symlinks } = self;
+        let UnitChanges {
+            enable,
+            restart: _,
+            disable: _,
+            link,
+            unlink: _,
+        } = units;
+        let SymlinkChanges {
+            create,
+            remove: _,
+            change: _,
+        } = symlinks;
+        enable.is_empty() && link.is_empty() && create.is_empty()
+    }
+
     /// Move all entries from `other` into `self`, leaving `other` empty.
     pub fn append(&mut self, other: &mut Self) {
         self.units.enable.append(&mut other.units.enable);
@@ -428,6 +457,130 @@ mod tests {
 
         let plan = make_plan(&t.store)?;
         assert!(plan.hosts.is_empty());
+        Ok(())
+    }
+
+    /// Plan a single-host update and return the resulting SystemDiff.
+    fn diff_update(before: &[(&str, &[u8])], after: &[(&str, &[u8])]) -> Result<SystemDiff> {
+        let t = TestRepo::new();
+        let c1 = t.commit(before);
+        t.set_host_tracking_ref("web1", c1);
+        t.commit(after);
+        let plan = make_plan(&t.store)?;
+        let host = plan.hosts.into_values().next().expect("plan has one host");
+        let app = host.apps.into_values().next().expect("host has one app");
+        Ok(app.system)
+    }
+
+    #[test]
+    fn rollback_safe_for_content_only_update() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[("web1/nginx/nginx.conf", b"v2")],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unsafe_when_units_enabled() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
+                ),
+            ],
+        )?;
+        assert!(!d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unsafe_when_symlinks_added() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"symlinks":{"/etc/nginx.conf":"nginx.conf"}}"#,
+                ),
+            ],
+        )?;
+        assert!(!d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_safe_when_symlinks_changed_or_removed() -> Result<()> {
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"symlinks":{"/etc/a":"nginx.conf","/etc/b":"nginx.conf"}}"#,
+                ),
+            ],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                ("web1/nginx/alt.conf", b"v2"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"symlinks":{"/etc/a":"alt.conf"}}"#,
+                ),
+            ],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unsafe_when_unit_files_added() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                ("web1/nginx/systemd/nginx.service", b"[Service]"),
+            ],
+        )?;
+        assert!(!d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_safe_when_unit_files_removed() -> Result<()> {
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/systemd/nginx.service", b"[Service]"),
+                (
+                    "web1/nginx/manifest.json",
+                    br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
+                ),
+            ],
+            &[("web1/nginx/nginx.conf", b"v2")],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_safe_when_unit_stays_enabled_across_update() -> Result<()> {
+        let manifest = br#"{"systemd":{"units_enabled":["nginx.service"]}}"#;
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/manifest.json", manifest),
+            ],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                ("web1/nginx/manifest.json", manifest),
+            ],
+        )?;
+        assert!(d.is_rollback_safe());
         Ok(())
     }
 
