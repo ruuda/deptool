@@ -1,12 +1,12 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use git2::Oid;
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{Result, StoreError};
 use crate::prim::Hostname;
 use crate::store::Store;
 
@@ -31,34 +31,17 @@ pub enum AppDiff {
 /// Side effects to apply to the host system for a set of app changes.
 ///
 /// Per-app instances can be combined via `merge` into a host-level aggregate.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SystemDiff {
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemDiff<T = String> {
     /// Unit lifecycle actions.
     pub units: UnitChanges,
     /// Manifest symlink changes.
-    pub symlinks: SymlinkChanges<String>,
+    pub symlinks: SymlinkChanges<T>,
 }
 
-impl SystemDiff {
-    pub fn empty() -> Self {
-        SystemDiff {
-            units: UnitChanges {
-                enable: Vec::new(),
-                restart: Vec::new(),
-                disable: Vec::new(),
-                link: Vec::new(),
-                unlink: Vec::new(),
-            },
-            symlinks: SymlinkChanges {
-                create: Vec::new(),
-                remove: Vec::new(),
-                change: Vec::new(),
-            },
-        }
-    }
-
+impl<T> SystemDiff<T> {
     /// Move all entries from `other` into `self`, leaving `other` empty.
-    pub fn append(&mut self, other: &mut SystemDiff) {
+    pub fn append(&mut self, other: &mut Self) {
         self.units.enable.append(&mut other.units.enable);
         self.units.restart.append(&mut other.units.restart);
         self.units.disable.append(&mut other.units.disable);
@@ -67,6 +50,20 @@ impl SystemDiff {
         self.symlinks.create.append(&mut other.symlinks.create);
         self.symlinks.remove.append(&mut other.symlinks.remove);
         self.symlinks.change.append(&mut other.symlinks.change);
+    }
+}
+
+impl SystemDiff {
+    /// Resolve manifest symlink paths for a specific app on the host.
+    ///
+    /// Converts relative source paths to absolute paths under
+    /// `apps_dir/<app>/current/`.
+    pub fn resolve_symlinks(self, app: &str, apps_dir: &Path) -> SystemDiff<PathBuf> {
+        let current_dir = apps_dir.join(app).join("current");
+        SystemDiff {
+            units: self.units,
+            symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
+        }
     }
 }
 
@@ -101,7 +98,7 @@ pub struct Plan {
 ///
 /// The `link`/`unlink` and `enable`/`disable`/`restart` groups can overlap:
 /// a unit file may be both linked and enabled in the same deploy.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitChanges {
     /// Newly enabled units: `systemctl enable --now`.
     pub enable: Vec<String>,
@@ -130,13 +127,7 @@ impl UnitChanges {
 /// Both sets are pre-filtered to changed apps only, so a unit appearing
 /// in both means its app changed while it stayed enabled → restart.
 pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitChanges {
-    let mut changes = UnitChanges {
-        enable: Vec::new(),
-        restart: Vec::new(),
-        disable: Vec::new(),
-        link: Vec::new(),
-        unlink: Vec::new(),
-    };
+    let mut changes = UnitChanges::default();
     for name in target {
         if prev.contains(name) {
             changes.restart.push(name.clone());
@@ -153,7 +144,7 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitC
 }
 
 /// Manifest symlink actions, derived from comparing two commits' manifests.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymlinkChanges<T> {
     /// New symlinks to create: (link_path, source_path).
     pub create: Vec<(T, T)>,
@@ -166,6 +157,27 @@ pub struct SymlinkChanges<T> {
 impl<T> SymlinkChanges<T> {
     pub fn is_empty(&self) -> bool {
         self.create.is_empty() && self.remove.is_empty() && self.change.is_empty()
+    }
+
+    /// Transform link and source paths.
+    pub fn map<U>(
+        self,
+        mut link: impl FnMut(T) -> U,
+        mut source: impl FnMut(T) -> U,
+    ) -> SymlinkChanges<U> {
+        SymlinkChanges {
+            create: self
+                .create
+                .into_iter()
+                .map(|(l, s)| (link(l), source(s)))
+                .collect(),
+            remove: self.remove.into_iter().map(&mut link).collect(),
+            change: self
+                .change
+                .into_iter()
+                .map(|(l, s)| (link(l), source(s)))
+                .collect(),
+        }
     }
 }
 
@@ -194,13 +206,6 @@ pub fn diff_symlinks<T: Clone + Ord>(
         }
     }
     changes
-}
-
-/// All deployment changes for a host, computed from the git state.
-#[derive(Debug)]
-pub struct Changes {
-    pub units: UnitChanges,
-    pub symlinks: SymlinkChanges<PathBuf>,
 }
 
 /// Diff two sets of app tree oids for a single host.
@@ -242,9 +247,12 @@ pub fn diff_apps(
     changes
 }
 
-/// Compute per-app actions from an `AppDiff` and the store.
-pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
-    let system = match &diff {
+/// Compute the system-level side effects of a single app change.
+pub fn compute_system_diff(
+    store: &Store,
+    diff: &AppDiff,
+) -> std::result::Result<SystemDiff, StoreError> {
+    let result = match diff {
         AppDiff::Add { new_tree } => {
             let enabled = store.enabled_units(*new_tree)?;
             let mut units = diff_enabled(&BTreeSet::new(), &enabled);
@@ -275,6 +283,12 @@ pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
             SystemDiff { units, symlinks }
         }
     };
+    Ok(result)
+}
+
+/// Compute per-app diff and system actions for the plan.
+pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
+    let system = compute_system_diff(store, &diff)?;
     Ok(AppPlan { diff, system })
 }
 

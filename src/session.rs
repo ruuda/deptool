@@ -10,7 +10,7 @@ use git2::Oid;
 
 use crate::apply::{DesiredUnits, apply_host};
 use crate::error::ApplyError;
-use crate::plan::Changes;
+use crate::plan::SystemDiff;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -64,7 +64,11 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 
 /// Callback for post-checkout mutations (symlinks, systemd lifecycle).
 type OnPostApply = Box<
-    dyn Fn(&DesiredUnits, &Changes, &mut dyn FnMut(Message)) -> std::result::Result<(), ApplyError>
+    dyn Fn(
+            &DesiredUnits,
+            &SystemDiff<PathBuf>,
+            &mut dyn FnMut(Message),
+        ) -> std::result::Result<(), ApplyError>
         + Send
         + Sync,
 >;
