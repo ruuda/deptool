@@ -422,6 +422,7 @@ fn push_and_apply_host(
     progress.update(host, HostState::Applying);
     conn.send_request(&Request::Apply {
         target_commit: plan.commit,
+        is_rollback_safe: plan.hosts[host].is_rollback_safe,
     })?;
     conn.close();
     let mut applied_commit = None;
@@ -646,7 +647,7 @@ mod tests {
                             apps: BTreeMap::new(),
                             expected_current: expected_current.clone(),
                             is_fast_forward: true,
-                            is_rollback_safe: false,
+                            is_rollback_safe: true,
                         },
                     )
                 })

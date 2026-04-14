@@ -3,6 +3,9 @@
 use git2::Oid;
 use serde::{Deserialize, Serialize};
 
+use crate::error::ApplyError;
+use crate::plan::AppDiff;
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -24,6 +27,12 @@ pub enum Request {
     Apply {
         #[serde(with = "crate::prim::ser::oid")]
         target_commit: Oid,
+        /// Whether the agent should attempt rollback on failure.
+        ///
+        /// The agent recomputes this independently and asserts it matches.
+        /// Sending it over the wire ensures the user's confirmation and the
+        /// agent's execution agree -- a safeguard against bugs.
+        is_rollback_safe: bool,
     },
 }
 
@@ -53,7 +62,7 @@ pub enum Message {
     },
     AppliedApp {
         app: String,
-        diff: crate::plan::AppDiff,
+        diff: AppDiff,
     },
     ApplyComplete {
         #[serde(with = "crate::prim::ser::oid")]
@@ -66,5 +75,11 @@ pub enum Message {
     SendPack {
         pack_data: String,
     },
-    Error(crate::error::ApplyError),
+    /// The agent is attempting to roll back after a failed apply.
+    RollingBack,
+    /// The forward deploy failed but rollback succeeded.
+    RolledBack {
+        error: ApplyError,
+    },
+    Error(ApplyError),
 }

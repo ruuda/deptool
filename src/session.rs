@@ -230,7 +230,10 @@ impl HostSession {
                     )))),
                 }
             }
-            Request::Apply { target_commit } => {
+            Request::Apply {
+                target_commit,
+                is_rollback_safe,
+            } => {
                 let current_commit = self.current_commit();
 
                 let operator = &self
@@ -260,6 +263,12 @@ impl HostSession {
                         return;
                     }
                 };
+
+                assert_eq!(
+                    changes.is_rollback_safe(),
+                    is_rollback_safe,
+                    "agent and driver disagree on rollback safety",
+                );
 
                 let desired_units = self
                     .store
