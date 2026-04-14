@@ -11,7 +11,7 @@ use git2::Oid;
 
 use parking_lot::Mutex;
 
-use crate::error::{Error, HostError, Result};
+use crate::error::{ApplyError, Error, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
@@ -26,9 +26,11 @@ pub enum HostState {
     Locked,
     Pushing,
     Applying,
+    RollingBack,
     Done,
     Stale,
     LockBusy(Option<String>),
+    RolledBack(ApplyError),
     Failed(HostError),
 }
 
@@ -36,7 +38,10 @@ impl HostState {
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
-            HostState::Stale | HostState::LockBusy(_) | HostState::Failed(_)
+            HostState::Stale
+                | HostState::LockBusy(_)
+                | HostState::RolledBack(_)
+                | HostState::Failed(_)
         )
     }
 }
@@ -51,10 +56,12 @@ impl std::fmt::Display for HostState {
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
+            HostState::RollingBack => f.write_str("rolling back"),
             HostState::Done => f.write_str("done"),
             HostState::Stale => f.write_str("stale"),
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
+            HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
             HostState::Failed(err) => write!(f, "failed: {err}"),
         }
     }
@@ -430,6 +437,13 @@ fn push_and_apply_host(
         match &message {
             Message::ApplyComplete { commit, .. } => {
                 applied_commit = Some(*commit);
+            }
+            Message::RollingBack => {
+                progress.update(host, HostState::RollingBack);
+            }
+            Message::RolledBack { error } => {
+                progress.update(host, HostState::RolledBack(error.clone()));
+                return Ok(());
             }
             Message::SystemdUnitStatus { output } => {
                 progress.log_message(host, output.trim_end());
