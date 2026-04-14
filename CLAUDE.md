@@ -1,16 +1,21 @@
-## Interaction with me
+## Interaction
 
- - Be brief.
- - Don't throw walls of text at me. Break things down in steps and ask me one thing at a time.
+ - Be brief. Don't throw walls of text. Break things down in steps.
+ - Ask one question at a time. Don't bundle multiple questions.
+ - Don't acknowledge corrections ("You're right", "Good point"). Just act on them.
+ - Use Blade Runner names in examples, not the user's real name.
 
 ## Agent notes
 
- - Use quiet modes to avoid polluting your context window with irrelevant tool output. E.g. use `--quiet` on `cargo {test,check,fmt}`.
+ - Use quiet modes to avoid polluting your context window. E.g. `--quiet` on build/test commands.
  - By your nature you are overconfident in your knowledge. Don't trust, verify. Read man pages, check tool behavior where possible.
  - However, tool calls are not a substitute for thinking. Form a hypothesis before verifying.
  - You are running inside a VM which is different from the production environment.
- - Avoid cryptic Bash tool calls, they are hard for me to review for permission checks.
+ - Avoid cryptic Bash tool calls, they are hard to review for permission checks.
  - Always use `rcl` for json processing, it's better suited for this than `jq`.
+ - Don't fabricate capabilities. Verify tool availability before claiming you can use something.
+ - When the compiler warns, it's right. Investigate instead of suppressing.
+ - Verify subagent work: check that agents committed on the right branch with actual changes.
 
 ## Project details
 
@@ -31,7 +36,9 @@
  - If the changes touch a test or code covered by tests, confirm with `cargo test --quiet`.
  - If the changes are not covered by a test, ask yourself, should they be? Not everything makes sense to test.
  - Run `cargo fmt --quiet` at the end on Rust code, `black --quiet` on Python code.
- - After a task is complete (I will tell you when it is, after you address my comments), reflect on the conversation. Are there any generic learnings? Update CLAUDE.md or your memory to prevent future instances of you from making the same mistakes.
+ - Write failing tests first, then implement (red-green).
+ - New code paths need new tests before claiming done.
+ - After a task is complete (I will tell you when it is, after you address my comments), reflect on the conversation. Are there any generic learnings? Update CLAUDE.md or your memory.
 
 ## Reviewing your own work
 
@@ -48,37 +55,55 @@ Specific checks:
  - Is it correct?
  - Can it be simpler or more elegant?
  - Code is a liability, can we achieve the same with less code? A "simplification" that adds lines probably isn't one.
- - Does new code duplicate something that already exists in the codebase?
+ - Does new code duplicate something that already exists in the codebase? Look for existing functions before creating new ones.
  - Is it obvious to a reader with little context? Can it be made more obvious?
- - Did I preserve all why-comments from the original code?
+ - Did I preserve all why-comments from the original code? Grep for them before and after rewrites.
 
 ## Working with Git
 
  - Git is available.
- - Do not commit. I will do that at logical points on our behalf.
+ - Do not commit unless asked. I will do that at logical points on our behalf.
  - Before embarking on a large task, record the current Git head, so you can later review what you did against that commit.
  - For large tasks, check the intermediate status with `git diff --shortstat` or `git diff --numstat`.
  - Negative diffstats are good. Codebase growth needs to be justified. Ask yourself whether the lines spent are well-spent.
- - Don't game the line stats. Redability is more important than line count.
+ - Don't game the line stats. Readability is more important than line count.
 
 ## Code style
 
  - Optimize for readability.
  - Aim for self-documenting code, use comments when the purpose or workings of a piece of code is not obvious.
+ - Comments explain *why*, not *what*. Don't state the obvious.
  - Simpler is more readable than complex.
  - Linear is more readable than branchy.
- - Name things after what they are and do, not after their purpose.
+ - Name things after what they are and do, not after their purpose. Names must be clear without consulting their definition.
  - A reader who does not know the function args by heart can't tell what a call site like `frobnicate(true, None, 32)` does. Extract arguments into named variables when needed, prefer enums with descriptive names if possible.
  - At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
  - Order function arguments from least-varying to most-varying. Configuration and context arguments (like a directory path) go before data arguments (like the specific changes to apply).
- - Prefer plain `match` over fancy method chains.
+ - Prefer plain `match` over fancy method chains or `let-else` when simpler.
  - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()` when the ok-path is the important one -- `if let Err` buries the function call after the error handling keyword.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
  - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem.
+ - Don't overengineer. The right design emerges by subtraction. Justify with the current problem, not hypothetical future needs.
+ - When analogous code already exists, mirror its structure. Symmetry signals good design.
+ - Place code in the module that owns the concept, not wherever it's called from.
+ - When changing one side of a boundary, minimize changes to the other side.
  - Property-based tests are better than mere examples.
+ - Tests read like behavior descriptions. Name tests after the property they assert (Hspec style). Extract lookups into helpers to reduce noise.
  - Prefer global imports over excessive qualification for types.
  - In assertions and `.expect()`, the message is the thing you expect to be true.
- - Doc comments should have a 1-line summary that fits in 80-ish columns, and then optionally a body separated from the summary by a blank line.
  - Use `.expect()` for logically impossible states and programming errors. Reserve `Result`/`Error` for expected runtime failures.
- - Comments start with a capital and use regular punctuation. Use *stars* for emphasis, not ALL CAPS. If you must use em-dashes at all, write them as -- in comments (but not in doc comments).
+ - Don't annotate closure types when the compiler can infer them.
+ - Use `.to_str().ok_or()` not `.to_string_lossy()` when loss would break the program.
+ - Newtypes go all the way down. If a callee unwraps a newtype, it should accept the newtype instead.
+ - Use named struct fields, not tuples, when fields have the same type. Named fields prevent silent swaps.
+ - Don't reuse error variants for unrelated failures -- the Display output lies. Read the doc comment before reusing a variant.
+ - Error construction stays where the error is detected. Checks belong inside the function that has the state, not in the caller.
+ - Doc comments should have a 1-line summary that fits in 80-ish columns, then optionally a body separated by a blank line.
+ - Comments start with a capital and use regular punctuation. Use *stars* for emphasis, not ALL CAPS. Write em-dashes as -- in comments.
+
+## Writing documentation
+
+ - Follow Google's technical writing advice: active voice, clear sentences, define terms before using them.
+ - Don't be verbose. Docs go out of date, so avoid details that change often.
+ - Documented behavior must be consistent with the implementation. Verify against the code.
