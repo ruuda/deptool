@@ -242,7 +242,7 @@ use session::AgentConfig;
 
 fn post_apply(
     desired_units: &apply::DesiredUnits,
-    changes: &plan::Changes,
+    changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
     apps_dir: &Path,
     unit_dir: &Path,

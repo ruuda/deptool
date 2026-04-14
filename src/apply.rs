@@ -5,10 +5,10 @@ use std::fs;
 use std::os::unix::fs as unix_fs;
 use std::path::{Path, PathBuf};
 
-use git2::{Oid, Tree};
+use git2::Oid;
 
 use crate::error::ApplyError;
-use crate::plan::{AppDiff, Changes, SymlinkChanges, diff_enabled, diff_symlinks};
+use crate::plan::{AppDiff, SymlinkChanges, SystemDiff, compute_system_diff};
 use crate::prim::Hostname;
 use crate::store::{self, Store};
 
@@ -85,7 +85,7 @@ pub fn apply_host(
     apps_dir: &Path,
     operator: &str,
     mut on_app: impl FnMut(&str, &AppDiff),
-) -> Result<Changes> {
+) -> Result<SystemDiff<PathBuf>> {
     store.set_ref(
         "refs/heads/target",
         commit_oid,
@@ -95,17 +95,19 @@ pub fn apply_host(
     let target_tree = store.get_commit_tree(commit_oid)?;
     let target_apps = store.get_host_apps(&target_tree, host)?;
 
-    let (current_tree, current_apps) = match actual_current {
-        None => (None, BTreeMap::new()),
+    let current_apps = match actual_current {
+        None => BTreeMap::new(),
         Some(oid) => {
             let tree = store.get_commit_tree(oid)?;
-            let apps = store.get_host_apps(&tree, host)?;
-            (Some(tree), apps)
+            store.get_host_apps(&tree, host)?
         }
     };
 
     let diff = crate::plan::diff_apps(&current_apps, &target_apps);
 
+    // Checkout/remove each app and aggregate system-level side effects.
+    // Uses compute_system_diff (same as the plan), so display and apply agree.
+    let mut system = SystemDiff::<PathBuf>::default();
     for (app, change) in &diff {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
@@ -116,33 +118,16 @@ pub fn apply_host(
             }
         }
         on_app(app, change);
+        let resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
+        system.append(&mut { resolved });
     }
-
-    // Compute unit lifecycle actions. We collect enabled units only from
-    // changed apps: unchanged apps need no action. This means a unit in
-    // both prev and target was enabled across a change, so we need to restart
-    // it so it picks up its new config.
-    let changed_apps: BTreeSet<&str> = diff.keys().map(|app| app.as_str()).collect();
-    let prev_enabled = match &current_tree {
-        None => BTreeSet::new(),
-        Some(tree) => collect_enabled_units(store, tree, host, &changed_apps)?,
-    };
-    let target_enabled = collect_enabled_units(store, &target_tree, host, &changed_apps)?;
-    let units = diff_enabled(&prev_enabled, &target_enabled);
-
-    let target_symlinks = store.desired_symlinks(commit_oid, host, apps_dir)?;
-    let prev_symlinks = match actual_current {
-        Some(oid) => store.desired_symlinks(oid, host, apps_dir)?,
-        None => BTreeMap::new(),
-    };
-    let symlinks = diff_symlinks(&prev_symlinks, &target_symlinks);
 
     // We don't update refs/heads/current here. There is more to do (enabling
     // and disabling systemd units), and if that fails, we don't want the
     // `current` ref to say that the deploy was done while it was in fact
     // unfinished. It's better for it to be behind than ahead.
 
-    Ok(Changes { units, symlinks })
+    Ok(system)
 }
 
 /// Reconcile unit symlinks: make unit_dir match desired.
@@ -296,25 +281,6 @@ fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     }
 }
 
-/// Collect enabled unit names from manifests, filtered to given apps.
-fn collect_enabled_units(
-    store: &Store,
-    config_tree: &Tree,
-    host: &Hostname,
-    filter_apps: &BTreeSet<&str>,
-) -> Result<BTreeSet<String>> {
-    let host_apps = store.get_host_apps(config_tree, host)?;
-    let mut enabled = BTreeSet::new();
-    for (app, app_tree_oid) in &host_apps {
-        if !filter_apps.contains(app.as_str()) {
-            continue;
-        }
-        let manifest = store.read_manifest(*app_tree_oid)?;
-        enabled.extend(manifest.systemd.units_enabled);
-    }
-    Ok(enabled)
-}
-
 /// Collect actual unit symlinks in unit_dir that point into apps_dir.
 ///
 /// We create absolute symlinks, so we just check whether the raw symlink
@@ -354,6 +320,7 @@ fn collect_actual_units(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan::diff_enabled;
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     // Tests do both apply calls (-> ApplyError) and raw git operations
@@ -563,7 +530,7 @@ mod tests {
             commit: git2::Oid,
             current: Option<git2::Oid>,
             on_app: impl FnMut(&str, &AppDiff),
-        ) -> Result<Changes> {
+        ) -> Result<SystemDiff<PathBuf>> {
             let host = &"web1".into();
             let operator = "deckard@spinner";
             let changes = apply_host(
