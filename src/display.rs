@@ -70,11 +70,14 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 /// Write the deployment plan as a diffstat.
 pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
     for (host, host_plan) in &plan.hosts {
-        if host_plan.is_fast_forward {
-            writeln!(out, "{host}")?;
-        } else {
-            writeln!(out, "{host} {}", color.red("(diverged)"))?;
+        write!(out, "{host}")?;
+        if !host_plan.is_fast_forward {
+            write!(out, " {}", color.red("(diverged)"))?;
         }
+        if !host_plan.is_rollback_safe {
+            write!(out, " {}", color.yellow("(rollback unavailable)"))?;
+        }
+        writeln!(out)?;
         for (app, app_plan) in &host_plan.apps {
             match &app_plan.diff {
                 AppDiff::Add { new_tree } => {
@@ -119,6 +122,13 @@ pub enum Decision {
 /// re-shows the prompt. Enter or `N` aborts (the default).
 pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
     println!();
+
+    let all_rollback_safe = plan.hosts.values().all(|h| h.is_rollback_safe);
+    if all_rollback_safe {
+        println!("Auto-rollback if deploy fails.");
+    } else {
+        println!("{}", color.yellow("Rollback unavailable for some hosts."));
+    }
 
     let diverged = plan.hosts.values().filter(|h| !h.is_fast_forward).count();
     if diverged > 0 {
@@ -725,6 +735,37 @@ web1
             render(&t.store, &plan)?,
             "\
 web1 (diverged)
+  + nginx
+      + nginx.conf
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unavailable_host_shows_warning() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
+                    expected_current: None,
+                    is_fast_forward: true,
+                    is_rollback_safe: false,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1 (rollback unavailable)
   + nginx
       + nginx.conf
 ",
