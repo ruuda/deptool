@@ -1,6 +1,6 @@
 //! Plan display and deploy confirmation prompt.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -93,14 +93,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
-            write_unit_actions(
-                out,
-                &app_plan.units,
-                &app_plan.link_units,
-                &app_plan.unlink_units,
-                color,
-            )?;
-            write_symlink_actions(out, &app_plan.symlinks, color)?;
+            write_unit_actions(out, &app_plan.system.units, color)?;
+            write_symlink_actions(out, &app_plan.system.symlinks, color)?;
         }
     }
     Ok(())
@@ -221,20 +215,14 @@ fn empty_tree_oid() -> Oid {
 }
 
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.
-fn write_unit_actions(
-    out: &mut impl Write,
-    units: &UnitChanges,
-    link: &BTreeSet<String>,
-    unlink: &BTreeSet<String>,
-    color: UseColor,
-) -> Result<()> {
+fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
     for unit in &units.disable {
         writeln!(out, "      {} {unit}", color.red("disable"))?;
     }
-    for unit in unlink {
+    for unit in &units.unlink {
         writeln!(out, "      {} {unit}", color.red("unlink"))?;
     }
-    for unit in link {
+    for unit in &units.link {
         writeln!(out, "      {} {unit}", color.green("link"))?;
     }
     for unit in &units.enable {

@@ -28,18 +28,53 @@ pub enum AppDiff {
     },
 }
 
+/// Side effects to apply to the host system for a set of app changes.
+///
+/// Per-app instances can be combined via `merge` into a host-level aggregate.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemDiff {
+    /// Unit lifecycle actions.
+    pub units: UnitChanges,
+    /// Manifest symlink changes.
+    pub symlinks: SymlinkChanges<String>,
+}
+
+impl SystemDiff {
+    pub fn empty() -> Self {
+        SystemDiff {
+            units: UnitChanges {
+                enable: Vec::new(),
+                restart: Vec::new(),
+                disable: Vec::new(),
+                link: Vec::new(),
+                unlink: Vec::new(),
+            },
+            symlinks: SymlinkChanges {
+                create: Vec::new(),
+                remove: Vec::new(),
+                change: Vec::new(),
+            },
+        }
+    }
+
+    /// Move all entries from `other` into `self`, leaving `other` empty.
+    pub fn append(&mut self, other: &mut SystemDiff) {
+        self.units.enable.append(&mut other.units.enable);
+        self.units.restart.append(&mut other.units.restart);
+        self.units.disable.append(&mut other.units.disable);
+        self.units.link.append(&mut other.units.link);
+        self.units.unlink.append(&mut other.units.unlink);
+        self.symlinks.create.append(&mut other.symlinks.create);
+        self.symlinks.remove.append(&mut other.symlinks.remove);
+        self.symlinks.change.append(&mut other.symlinks.change);
+    }
+}
+
 /// Per-app diff and precomputed actions, produced during planning.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppPlan {
     pub diff: AppDiff,
-    /// Unit lifecycle actions (enable, disable, restart).
-    pub units: UnitChanges,
-    /// Unit files newly provided by this app.
-    pub link_units: BTreeSet<String>,
-    /// Unit files no longer provided by this app.
-    pub unlink_units: BTreeSet<String>,
-    /// Manifest symlink changes.
-    pub symlinks: SymlinkChanges<String>,
+    pub system: SystemDiff,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +98,9 @@ pub struct Plan {
 /// previous and target commits. If the system drifts (e.g. a human disables
 /// a unit manually), the operator will see it in `systemctl status` output
 /// that we report after applying.
+///
+/// The `link`/`unlink` and `enable`/`disable`/`restart` groups can overlap:
+/// a unit file may be both linked and enabled in the same deploy.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitChanges {
     /// Newly enabled units: `systemctl enable --now`.
@@ -71,11 +109,19 @@ pub struct UnitChanges {
     pub restart: Vec<String>,
     /// No longer enabled: `systemctl disable --now`.
     pub disable: Vec<String>,
+    /// Unit files newly provided by this app.
+    pub link: Vec<String>,
+    /// Unit files no longer provided by this app.
+    pub unlink: Vec<String>,
 }
 
 impl UnitChanges {
     pub fn is_empty(&self) -> bool {
-        self.enable.is_empty() && self.restart.is_empty() && self.disable.is_empty()
+        self.enable.is_empty()
+            && self.restart.is_empty()
+            && self.disable.is_empty()
+            && self.link.is_empty()
+            && self.unlink.is_empty()
     }
 }
 
@@ -88,6 +134,8 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitC
         enable: Vec::new(),
         restart: Vec::new(),
         disable: Vec::new(),
+        link: Vec::new(),
+        unlink: Vec::new(),
     };
     for name in target {
         if prev.contains(name) {
@@ -196,44 +244,38 @@ pub fn diff_apps(
 
 /// Compute per-app actions from an `AppDiff` and the store.
 pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
-    let (units, link_units, unlink_units, symlinks) = match &diff {
+    let system = match &diff {
         AppDiff::Add { new_tree } => {
-            let link_units = store.app_units(*new_tree)?;
             let enabled = store.enabled_units(*new_tree)?;
-            let units = diff_enabled(&BTreeSet::new(), &enabled);
+            let mut units = diff_enabled(&BTreeSet::new(), &enabled);
+            units.link = store.app_units(*new_tree)?.into_iter().collect();
             let manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
-            (units, link_units, BTreeSet::new(), symlinks)
+            SystemDiff { units, symlinks }
         }
         AppDiff::Remove { old_tree } => {
-            let unlink_units = store.app_units(*old_tree)?;
             let enabled = store.enabled_units(*old_tree)?;
-            let units = diff_enabled(&enabled, &BTreeSet::new());
+            let mut units = diff_enabled(&enabled, &BTreeSet::new());
+            units.unlink = store.app_units(*old_tree)?.into_iter().collect();
             let manifest = store.read_manifest(*old_tree)?;
             let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
-            (units, BTreeSet::new(), unlink_units, symlinks)
+            SystemDiff { units, symlinks }
         }
         AppDiff::Update { old_tree, new_tree } => {
             let old_all = store.app_units(*old_tree)?;
             let new_all = store.app_units(*new_tree)?;
-            let link_units = new_all.difference(&old_all).cloned().collect();
-            let unlink_units = old_all.difference(&new_all).cloned().collect();
             let old_enabled = store.enabled_units(*old_tree)?;
             let new_enabled = store.enabled_units(*new_tree)?;
-            let units = diff_enabled(&old_enabled, &new_enabled);
+            let mut units = diff_enabled(&old_enabled, &new_enabled);
+            units.link = new_all.difference(&old_all).cloned().collect();
+            units.unlink = old_all.difference(&new_all).cloned().collect();
             let old_manifest = store.read_manifest(*old_tree)?;
             let new_manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
-            (units, link_units, unlink_units, symlinks)
+            SystemDiff { units, symlinks }
         }
     };
-    Ok(AppPlan {
-        diff,
-        units,
-        link_units,
-        unlink_units,
-        symlinks,
-    })
+    Ok(AppPlan { diff, system })
 }
 
 /// Build a deployment plan by comparing main against each host's current ref.
