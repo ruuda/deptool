@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use git2::{Delta, Oid, Repository};
 
@@ -139,7 +139,7 @@ pub enum Decision {
 
 /// Show the confirmation prompt.
 ///
-/// `d` pages through the full file diff for each host sequentially, then
+/// `d` shows the full file diff for all hosts in a single pager, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
 pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
     println!();
@@ -170,20 +170,53 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
     }
 }
 
-/// Open a pager with the full file diff for each host in the plan.
+/// Collect the full file diff for every host and pipe it through one pager.
+///
+/// Without this, each `git diff` invocation opens its own pager, so deploying
+/// to N hosts means dismissing N pagers.
 fn show_diffs(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<()> {
+    println!();
+    let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
         let old_oid = host_tree_oid(store, host_plan.expected_current.as_ref(), host)?;
         let new_oid = host_tree_oid(store, Some(&plan.commit), host)?;
-        println!("\n{}", color.blue(&host.to_string()));
-        Command::new("git")
+        if !combined.is_empty() {
+            writeln!(combined)?;
+        }
+        writeln!(combined, "{}", color.blue(&host.to_string()))?;
+        let child = Command::new("git")
             .arg("--git-dir")
             .arg(store_path)
             .args(["diff", "--color=always"])
             .arg(old_oid.to_string())
             .arg(new_oid.to_string())
-            .status()?;
+            .stdout(Stdio::piped())
+            .spawn()?;
+        let output = child.wait_with_output()?;
+        combined.extend_from_slice(&output.stdout);
     }
+    pipe_through_pager(&combined)
+}
+
+/// Pipe content through the user's pager ($PAGER, defaulting to `less`).
+fn pipe_through_pager(content: &[u8]) -> Result<()> {
+    let pager = std::env::var("PAGER").unwrap_or_else(|_| "less".into());
+    let mut parts = pager.split_whitespace();
+    let program = parts.next().expect("pager fallback is non-empty");
+    let mut cmd = Command::new(program);
+    cmd.args(parts).stdin(Stdio::piped());
+    // The LESS env var sets default flags for less. F = quit if output fits
+    // on one screen, R = pass through ANSI color codes, X = don't clear the
+    // screen on exit. Without R, less strips the diff coloring.
+    if std::env::var_os("LESS").is_none() {
+        cmd.env("LESS", "FRX");
+    }
+    let mut child = cmd.spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        // Ignore broken pipe -- the user may quit the pager early.
+        let _ = stdin.write_all(content);
+    }
+    child.wait()?;
     Ok(())
 }
 
