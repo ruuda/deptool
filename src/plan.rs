@@ -109,6 +109,11 @@ pub struct HostPlan {
     #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
     pub is_fast_forward: bool,
+    /// Whether the host can be automatically rolled back on deploy failure.
+    ///
+    /// True when every app's `SystemDiff` is rollback-safe. See
+    /// [`SystemDiff::is_rollback_safe`] for what that means.
+    pub is_rollback_safe: bool,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,8 +366,11 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
 
         if !diffs.is_empty() {
             let mut apps = BTreeMap::new();
+            let mut is_rollback_safe = true;
             for (name, diff) in diffs {
-                apps.insert(name, compute_app_plan(store, diff)?);
+                let plan = compute_app_plan(store, diff)?;
+                is_rollback_safe &= plan.system.is_rollback_safe();
+                apps.insert(name, plan);
             }
             let is_fast_forward = match &expected_current {
                 None => true,
@@ -375,6 +383,7 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
                     apps,
                     expected_current,
                     is_fast_forward,
+                    is_rollback_safe,
                 },
             );
         }
@@ -581,6 +590,49 @@ mod tests {
             ],
         )?;
         assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn host_rollback_safe_for_content_only_update() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+
+        let plan = make_plan(&t.store)?;
+        assert!(plan.hosts[&"web1".into()].is_rollback_safe);
+        Ok(())
+    }
+
+    #[test]
+    fn host_rollback_safe_when_app_added_without_system_effects() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
+
+        let plan = make_plan(&t.store)?;
+        assert!(plan.hosts[&"web1".into()].is_rollback_safe);
+        Ok(())
+    }
+
+    #[test]
+    fn host_rollback_unsafe_when_any_app_is_unsafe() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        t.commit(&[
+            ("web1/nginx/conf", b"v2"),
+            (
+                "web1/nginx/manifest.json",
+                br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
+            ),
+            ("web1/rofld/conf", b"v1"),
+        ]);
+
+        let plan = make_plan(&t.store)?;
+        assert!(!plan.hosts[&"web1".into()].is_rollback_safe);
         Ok(())
     }
 

@@ -646,6 +646,7 @@ mod tests {
                             apps: BTreeMap::new(),
                             expected_current: expected_current.clone(),
                             is_fast_forward: true,
+                            is_rollback_safe: false,
                         },
                     )
                 })

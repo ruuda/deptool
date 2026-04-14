@@ -451,6 +451,7 @@ mod tests {
                     )]),
                     expected_current: None,
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -487,6 +488,7 @@ web1
                     )]),
                     expected_current: None,
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -527,6 +529,7 @@ web1
                     )]),
                     expected_current: None,
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -570,6 +573,7 @@ web1
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -608,6 +612,7 @@ web1
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -640,6 +645,7 @@ web1
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -679,6 +685,7 @@ web1
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -710,6 +717,7 @@ web1
                     )]),
                     expected_current: None,
                     is_fast_forward: false,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -744,6 +752,7 @@ web1 (diverged)
                     )]),
                     expected_current: None,
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
@@ -780,6 +789,7 @@ web1
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
+                    is_rollback_safe: true,
                 },
             )]),
         };
