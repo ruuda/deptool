@@ -9,7 +9,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, SymlinkChanges, UnitChanges, diff_enabled, diff_symlinks};
+use crate::plan::{AppDiff, Plan, SymlinkChanges, UnitChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
 
@@ -75,50 +75,32 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
         } else {
             writeln!(out, "{host} {}", color.red("(diverged)"))?;
         }
-        for (app, diff) in &host_plan.apps {
-            match diff {
+        for (app, app_plan) in &host_plan.apps {
+            match &app_plan.diff {
                 AppDiff::Add { new_tree } => {
                     writeln!(out, "  {} {app}", color.green("+"))?;
                     for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
-                    let manifest = store.read_manifest(*new_tree)?;
-                    let link = store.app_units(*new_tree)?;
-                    let enabled = store.enabled_units(*new_tree)?;
-                    let units = diff_enabled(&BTreeSet::new(), &enabled);
-                    write_unit_actions(out, &units, &link, &BTreeSet::new(), color)?;
-                    let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
-                    write_symlink_actions(out, &symlinks, color)?;
                 }
-                AppDiff::Remove { old_tree } => {
+                AppDiff::Remove { .. } => {
                     writeln!(out, "  {} {app}", color.red("-"))?;
-                    let manifest = store.read_manifest(*old_tree)?;
-                    let unlink = store.app_units(*old_tree)?;
-                    let enabled = store.enabled_units(*old_tree)?;
-                    let units = diff_enabled(&enabled, &BTreeSet::new());
-                    write_unit_actions(out, &units, &BTreeSet::new(), &unlink, color)?;
-                    let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
-                    write_symlink_actions(out, &symlinks, color)?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "  {} {app}", color.yellow("~"))?;
                     for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
-                    let old_manifest = store.read_manifest(*old_tree)?;
-                    let new_manifest = store.read_manifest(*new_tree)?;
-                    let old_all = store.app_units(*old_tree)?;
-                    let new_all = store.app_units(*new_tree)?;
-                    let link: BTreeSet<_> = new_all.difference(&old_all).cloned().collect();
-                    let unlink: BTreeSet<_> = old_all.difference(&new_all).cloned().collect();
-                    let old_enabled = store.enabled_units(*old_tree)?;
-                    let new_enabled = store.enabled_units(*new_tree)?;
-                    let units = diff_enabled(&old_enabled, &new_enabled);
-                    write_unit_actions(out, &units, &link, &unlink, color)?;
-                    let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
-                    write_symlink_actions(out, &symlinks, color)?;
                 }
             }
+            write_unit_actions(
+                out,
+                &app_plan.units,
+                &app_plan.link_units,
+                &app_plan.unlink_units,
+                color,
+            )?;
+            write_symlink_actions(out, &app_plan.symlinks, color)?;
         }
     }
     Ok(())
@@ -445,7 +427,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::plan::{AppDiff, HostPlan, Plan};
+    use crate::plan::{AppDiff, HostPlan, Plan, compute_app_plan};
     use crate::prim::Hostname;
     use crate::testutil::TestRepo;
 
@@ -475,7 +457,10 @@ mod tests {
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
                     expected_current: None,
                     is_fast_forward: true,
                 },
@@ -508,7 +493,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
                     expected_current: None,
                     is_fast_forward: true,
                 },
@@ -545,7 +533,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
                     expected_current: None,
                     is_fast_forward: true,
                 },
@@ -585,7 +576,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
+                    )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
                 },
@@ -620,7 +614,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
+                    )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
                 },
@@ -651,7 +648,7 @@ web1
                 HostPlan {
                     apps: BTreeMap::from([(
                         "nginx".into(),
-                        AppDiff::Update { old_tree, new_tree },
+                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
@@ -690,7 +687,7 @@ web1
                 HostPlan {
                     apps: BTreeMap::from([(
                         "nginx".into(),
-                        AppDiff::Update { old_tree, new_tree },
+                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
                     )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
@@ -719,7 +716,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
                     expected_current: None,
                     is_fast_forward: false,
                 },
@@ -750,7 +750,10 @@ web1 (diverged)
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Add { new_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
                     expected_current: None,
                     is_fast_forward: true,
                 },
@@ -783,7 +786,10 @@ web1
             hosts: BTreeMap::from([(
                 Hostname::from("web1"),
                 HostPlan {
-                    apps: BTreeMap::from([("nginx".into(), AppDiff::Remove { old_tree })]),
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
+                    )]),
                     expected_current: Some(c1),
                     is_fast_forward: true,
                 },

@@ -28,9 +28,23 @@ pub enum AppDiff {
     },
 }
 
+/// Per-app diff and precomputed actions, produced during planning.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppPlan {
+    pub diff: AppDiff,
+    /// Unit lifecycle actions (enable, disable, restart).
+    pub units: UnitChanges,
+    /// Unit files newly provided by this app.
+    pub link_units: BTreeSet<String>,
+    /// Unit files no longer provided by this app.
+    pub unlink_units: BTreeSet<String>,
+    /// Manifest symlink changes.
+    pub symlinks: SymlinkChanges<String>,
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostPlan {
-    pub apps: BTreeMap<String, AppDiff>,
+    pub apps: BTreeMap<String, AppPlan>,
     #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
     pub is_fast_forward: bool,
@@ -49,7 +63,7 @@ pub struct Plan {
 /// previous and target commits. If the system drifts (e.g. a human disables
 /// a unit manually), the operator will see it in `systemctl status` output
 /// that we report after applying.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitChanges {
     /// Newly enabled units: `systemctl enable --now`.
     pub enable: Vec<String>,
@@ -91,7 +105,7 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitC
 }
 
 /// Manifest symlink actions, derived from comparing two commits' manifests.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymlinkChanges<T> {
     /// New symlinks to create: (link_path, source_path).
     pub create: Vec<(T, T)>,
@@ -180,6 +194,48 @@ pub fn diff_apps(
     changes
 }
 
+/// Compute per-app actions from an `AppDiff` and the store.
+pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
+    let (units, link_units, unlink_units, symlinks) = match &diff {
+        AppDiff::Add { new_tree } => {
+            let link_units = store.app_units(*new_tree)?;
+            let enabled = store.enabled_units(*new_tree)?;
+            let units = diff_enabled(&BTreeSet::new(), &enabled);
+            let manifest = store.read_manifest(*new_tree)?;
+            let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
+            (units, link_units, BTreeSet::new(), symlinks)
+        }
+        AppDiff::Remove { old_tree } => {
+            let unlink_units = store.app_units(*old_tree)?;
+            let enabled = store.enabled_units(*old_tree)?;
+            let units = diff_enabled(&enabled, &BTreeSet::new());
+            let manifest = store.read_manifest(*old_tree)?;
+            let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
+            (units, BTreeSet::new(), unlink_units, symlinks)
+        }
+        AppDiff::Update { old_tree, new_tree } => {
+            let old_all = store.app_units(*old_tree)?;
+            let new_all = store.app_units(*new_tree)?;
+            let link_units = new_all.difference(&old_all).cloned().collect();
+            let unlink_units = old_all.difference(&new_all).cloned().collect();
+            let old_enabled = store.enabled_units(*old_tree)?;
+            let new_enabled = store.enabled_units(*new_tree)?;
+            let units = diff_enabled(&old_enabled, &new_enabled);
+            let old_manifest = store.read_manifest(*old_tree)?;
+            let new_manifest = store.read_manifest(*new_tree)?;
+            let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
+            (units, link_units, unlink_units, symlinks)
+        }
+    };
+    Ok(AppPlan {
+        diff,
+        units,
+        link_units,
+        unlink_units,
+        symlinks,
+    })
+}
+
 /// Build a deployment plan by comparing main against each host's current ref.
 ///
 /// TODO: Currently this is based only on the repository state, which means we
@@ -216,9 +272,13 @@ pub fn make_plan(store: &Store) -> Result<Plan> {
             }
         };
 
-        let apps = diff_apps(&current_apps, &target_apps);
+        let diffs = diff_apps(&current_apps, &target_apps);
 
-        if !apps.is_empty() {
+        if !diffs.is_empty() {
+            let mut apps = BTreeMap::new();
+            for (name, diff) in diffs {
+                apps.insert(name, compute_app_plan(store, diff)?);
+            }
             let is_fast_forward = match &expected_current {
                 None => true,
                 Some(current) => store.repo.graph_descendant_of(commit, *current)?,
@@ -253,8 +313,8 @@ mod tests {
         assert_eq!(plan.hosts.len(), 1);
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 2);
-        assert!(matches!(apps["rofld"], AppDiff::Add { .. }));
-        assert!(matches!(apps["nginx"], AppDiff::Add { .. }));
+        assert!(matches!(apps["rofld"].diff, AppDiff::Add { .. }));
+        assert!(matches!(apps["nginx"].diff, AppDiff::Add { .. }));
         Ok(())
     }
 
@@ -269,7 +329,7 @@ mod tests {
         let plan = make_plan(&t.store)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
-        assert!(matches!(apps["nginx"], AppDiff::Update { .. }));
+        assert!(matches!(apps["nginx"].diff, AppDiff::Update { .. }));
         Ok(())
     }
 
@@ -284,7 +344,7 @@ mod tests {
         let plan = make_plan(&t.store)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
-        assert!(matches!(apps["rofld"], AppDiff::Remove { .. }));
+        assert!(matches!(apps["rofld"].diff, AppDiff::Remove { .. }));
         Ok(())
     }
 
@@ -300,7 +360,7 @@ mod tests {
         assert!(!plan.hosts.contains_key(&"web1".into()));
         let apps = &plan.hosts[&"web2".into()].apps;
         assert_eq!(apps.len(), 1);
-        assert!(matches!(apps["rofld"], AppDiff::Add { .. }));
+        assert!(matches!(apps["rofld"].diff, AppDiff::Add { .. }));
         Ok(())
     }
 
