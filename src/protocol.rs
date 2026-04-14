@@ -81,5 +81,10 @@ pub enum Message {
     RolledBack {
         error: ApplyError,
     },
+    /// The forward deploy failed and rollback also failed.
+    RollbackFailed {
+        apply_error: ApplyError,
+        rollback_error: ApplyError,
+    },
     Error(ApplyError),
 }

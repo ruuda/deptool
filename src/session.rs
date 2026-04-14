@@ -336,6 +336,11 @@ impl HostSession {
     ///
     /// Re-applies the commit that was `current` before the failed deploy
     /// attempt.
+    /// Roll back to the good commit after a failed post-apply.
+    ///
+    /// Re-applies the commit that was `current` before the failed deploy
+    /// attempt. The original error is included in the `RollingBack` message
+    /// so the operator sees it regardless of whether rollback succeeds.
     fn handle_rollback(
         &self,
         error: ApplyError,
@@ -351,6 +356,24 @@ impl HostSession {
 
         emit_message(Message::RollingBack);
 
+        if let Err(rollback_error) = self.try_rollback(good_commit, ctx, emit_message) {
+            emit_message(Message::RollbackFailed {
+                apply_error: error,
+                rollback_error,
+            });
+            return Ok(());
+        }
+
+        emit_message(Message::RolledBack { error });
+        Ok(())
+    }
+
+    fn try_rollback(
+        &self,
+        good_commit: Oid,
+        ctx: &ApplyContext,
+        emit_message: &mut impl FnMut(Message),
+    ) -> std::result::Result<(), ApplyError> {
         let (diffs, system_diff) = diff_host(
             &self.store,
             &self.hostname,
@@ -391,8 +414,6 @@ impl HostSession {
                 operator: &ctx.operator,
             },
         )?;
-
-        emit_message(Message::RolledBack { error });
         Ok(())
     }
 }
@@ -514,15 +535,14 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Fail on first post_apply call, succeed on second (rollback).
-        let call_count = Arc::new(AtomicUsize::new(0));
-        let count = call_count.clone();
-        let on_post_apply: super::OnPostApply = Box::new(move |_, _, _| {
-            if count.fetch_add(1, Ordering::SeqCst) == 0 {
-                Err(ApplyError::SystemdActivationFailed)
-            } else {
-                Ok(())
-            }
-        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let on_post_apply: super::OnPostApply = {
+            let calls = calls.clone();
+            Box::new(move |_, _, _| match calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(ApplyError::SystemdActivationFailed),
+                _ => Ok(()),
+            })
+        };
 
         // Two commits: c1 is the good state, c2 is the broken deploy.
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
@@ -584,6 +604,54 @@ mod tests {
         assert!(matches!(
             msgs.as_slice(),
             [Message::AppliedApp { .. }, Message::Error(_)],
+        ));
+    }
+
+    #[test]
+    fn failed_rollback_reports_rollback_error_and_logs_original() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Forward deploy fails with one error, rollback fails with another.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let on_post_apply: super::OnPostApply = {
+            let calls = calls.clone();
+            Box::new(move |_, _, _| match calls.fetch_add(1, Ordering::SeqCst) {
+                0 => Err(ApplyError::SystemdActivationFailed),
+                _ => Err(ApplyError::Store("rollback IO error".into())),
+            })
+        };
+
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        host.set_current(c1);
+        let store = Store::open(host.session.store.path()).expect("store opens");
+        let c2 = crate::testutil::commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
+            .expect("commit succeeds");
+
+        host.interact(Request::Lock {
+            expected_current_commit: Some(c1),
+            operator: "deckard@spinner".into(),
+        });
+        let pack = store.create_pack(c2, Some(c1)).expect("pack succeeds");
+        let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
+        host.interact(Request::ReceivePack { pack_data: encoded });
+
+        let msgs = host.interact(Request::Apply {
+            target_commit: c2,
+            is_rollback_safe: true,
+        });
+
+        assert!(matches!(
+            msgs.as_slice(),
+            [
+                Message::AppliedApp { .. },
+                Message::RollingBack,
+                Message::AppliedApp { .. },
+                Message::RollbackFailed {
+                    apply_error: ApplyError::SystemdActivationFailed,
+                    rollback_error: ApplyError::Store(_),
+                },
+            ],
         ));
     }
 }

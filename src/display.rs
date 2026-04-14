@@ -374,9 +374,11 @@ impl StatusPrinter {
     fn color_state(&self, state: &HostState) -> String {
         match state {
             HostState::Done => self.color.green(&state.to_string()),
-            HostState::Failed(_) | HostState::Stale | HostState::LockBusy(_) => {
-                self.color.red(&state.to_string())
-            }
+            HostState::Failed(_)
+            | HostState::RolledBack(_)
+            | HostState::RollbackFailed { .. }
+            | HostState::Stale
+            | HostState::LockBusy(_) => self.color.red(&state.to_string()),
             _ => self.color.yellow(&state.to_string()),
         }
     }

@@ -31,6 +31,10 @@ pub enum HostState {
     Stale,
     LockBusy(Option<String>),
     RolledBack(ApplyError),
+    RollbackFailed {
+        apply_error: ApplyError,
+        rollback_error: ApplyError,
+    },
     Failed(HostError),
 }
 
@@ -41,6 +45,7 @@ impl HostState {
             HostState::Stale
                 | HostState::LockBusy(_)
                 | HostState::RolledBack(_)
+                | HostState::RollbackFailed { .. }
                 | HostState::Failed(_)
         )
     }
@@ -62,6 +67,13 @@ impl std::fmt::Display for HostState {
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
             HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
+            HostState::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => write!(
+                f,
+                "failed: {apply_error}, rollback also failed: {rollback_error}"
+            ),
             HostState::Failed(err) => write!(f, "failed: {err}"),
         }
     }
@@ -443,6 +455,19 @@ fn push_and_apply_host(
             }
             Message::RolledBack { error } => {
                 progress.update(host, HostState::RolledBack(error.clone()));
+                return Ok(());
+            }
+            Message::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => {
+                progress.update(
+                    host,
+                    HostState::RollbackFailed {
+                        apply_error: apply_error.clone(),
+                        rollback_error: rollback_error.clone(),
+                    },
+                );
                 return Ok(());
             }
             Message::SystemdUnitStatus { output } => {
