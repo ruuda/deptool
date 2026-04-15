@@ -409,7 +409,7 @@ impl HostSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::TestHost;
+    use crate::testutil::{TempDir, TestHost, commit_files};
 
     #[test]
     fn lock_succeeds_on_fresh_host_with_no_expected_current() {
@@ -486,25 +486,24 @@ mod tests {
         hostname: &str,
         files: &[(&str, &[u8])],
         on_post_apply: super::OnPostApply,
-    ) -> (crate::testutil::TestHost, Oid) {
-        use crate::testutil::TempDir;
+    ) -> (TestHost, Oid) {
         let store_dir = TempDir::new("store");
         let apps = TempDir::new("apps");
         let repo = git2::Repository::init_bare(store_dir.path()).expect("repo is created");
         let store = Store { repo };
-        let oid = crate::testutil::commit_files(&store, files).expect("commit succeeds");
+        let oid = commit_files(&store, files).expect("commit succeeds");
         let session = HostSession::new(
             store,
             hostname.into(),
             apps.path().to_path_buf(),
             on_post_apply,
         );
-        let host = crate::testutil::TestHost::from_parts(session, store_dir, apps);
+        let host = TestHost::from_parts(session, store_dir, apps);
         (host, oid)
     }
 
     /// Lock the host and push a pack containing `commit`.
-    fn lock_and_push(host: &mut crate::testutil::TestHost, commit: Oid) {
+    fn lock_and_push(host: &mut TestHost, commit: Oid) {
         host.interact(Request::Lock {
             expected_current_commit: None,
             operator: "deckard@spinner".into(),
@@ -515,6 +514,27 @@ mod tests {
             .expect("pack creation succeeds");
         let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
         host.interact(Request::ReceivePack { pack_data: encoded });
+    }
+
+    #[test]
+    fn successful_apply_sets_refs_and_reflog() {
+        let (mut host, c1) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
+        lock_and_push(&mut host, c1);
+
+        let msgs = host.interact(Request::Apply {
+            target_commit: c1,
+            is_rollback_safe: true,
+        });
+
+        assert!(matches!(msgs.as_slice(), [Message::ApplyComplete { .. }]));
+
+        // Both target and current refs point to the deployed commit.
+        assert_eq!(host.get_ref("refs/heads/target"), Some(c1));
+        assert_eq!(host.get_ref("refs/heads/current"), Some(c1));
+
+        // Reflog records the operator.
+        let msg = host.last_reflog_message("refs/heads/target");
+        assert!(msg.contains("deckard@spinner"), "reflog: {msg}");
     }
 
     #[test]
@@ -536,7 +556,7 @@ mod tests {
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
-        let c2 = crate::testutil::commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
+        let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
             .expect("commit succeeds");
 
         // Lock and push c2.
@@ -604,7 +624,7 @@ mod tests {
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
-        let c2 = crate::testutil::commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
+        let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
             .expect("commit succeeds");
 
         host.interact(Request::Lock {

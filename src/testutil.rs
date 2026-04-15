@@ -10,6 +10,7 @@ use git2::{Oid, Repository};
 use crate::deploy::Connection;
 use crate::error::Result;
 use crate::protocol::{self, Hello, Message, Request};
+use crate::session::HostSession;
 use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -141,14 +142,14 @@ impl TestRepo {
 /// Wraps a `HostSession` and provides helpers for sending requests and
 /// collecting responses.
 pub struct TestHost {
-    pub session: crate::session::HostSession,
+    pub session: HostSession,
     _store: TempDir,
     apps: TempDir,
 }
 
 impl TestHost {
     /// Construct from pre-built parts.
-    pub fn from_parts(session: crate::session::HostSession, store: TempDir, apps: TempDir) -> Self {
+    pub fn from_parts(session: HostSession, store: TempDir, apps: TempDir) -> Self {
         TestHost {
             session,
             _store: store,
@@ -160,8 +161,8 @@ impl TestHost {
     pub fn new(hostname: &str) -> Self {
         let store = TempDir::new("store");
         let apps = TempDir::new("apps");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let session = crate::session::HostSession::new_test(repo, hostname, apps.path());
+        let s = Store::open_or_init(store.path()).expect("store is created");
+        let session = HostSession::new_test(s.repo, hostname, apps.path());
         TestHost {
             session,
             _store: store,
@@ -191,18 +192,30 @@ impl TestHost {
             .expect("ref is set");
     }
 
-    /// The host-local `refs/heads/current` commit, if any.
-    pub fn get_current(&self) -> Option<Oid> {
+    /// The commit a ref points to, if the ref exists.
+    pub fn get_ref(&self, refname: &str) -> Option<Oid> {
         self.session
             .store
             .repo
-            .find_reference("refs/heads/current")
+            .find_reference(refname)
             .ok()
-            .map(|r| {
-                r.peel_to_commit()
-                    .expect("current ref points to a commit")
-                    .id()
-            })
+            .map(|r| r.peel_to_commit().expect("ref points to a commit").id())
+    }
+
+    /// The most recent reflog message for a ref.
+    pub fn last_reflog_message(&self, refname: &str) -> String {
+        let reflog = self
+            .session
+            .store
+            .repo
+            .reflog(refname)
+            .expect("reflog exists");
+        reflog
+            .get(0)
+            .expect("reflog has an entry")
+            .message()
+            .expect("reflog message is valid utf-8")
+            .to_string()
     }
 
     /// Send a request and collect all response messages.
@@ -243,7 +256,7 @@ impl TestHost {
         apps_path: &std::path::Path,
     ) -> Box<dyn Connection> {
         let repo = Repository::open(store_path).expect("repo is opened");
-        let session = crate::session::HostSession::new_test(repo, hostname, apps_path);
+        let session = HostSession::new_test(repo, hostname, apps_path);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             hostname: hostname.to_string(),
@@ -258,7 +271,7 @@ impl TestHost {
 
 /// In-memory connection that wraps a HostSession directly.
 struct LocalConnection {
-    session: crate::session::HostSession,
+    session: HostSession,
     hello: Hello,
     message_buffer: VecDeque<Message>,
 }

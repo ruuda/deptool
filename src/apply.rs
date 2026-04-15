@@ -314,7 +314,6 @@ fn collect_actual_units(
 mod tests {
     use super::*;
     use crate::plan::diff_enabled;
-    use crate::store;
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     // Tests do both apply calls (-> ApplyError) and raw git operations
@@ -503,7 +502,7 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
-    /// Test harness for `apply_checkout` calls.
+    /// Test harness for `diff_host` + `apply_checkout` + `reconcile_symlinks`.
     struct ApplyTest {
         repo: TestRepo,
         apps: TempDir,
@@ -527,14 +526,6 @@ mod tests {
             let host = &"web1".into();
             let (app_diffs, system) =
                 diff_host(&self.repo.store, host, self.apps.path(), current, commit)?;
-
-            self.repo.store.set_ref(
-                "refs/heads/target",
-                commit,
-                store::RefUpdate::SetTarget {
-                    operator: "deckard@spinner",
-                },
-            )?;
             apply_checkout(&self.repo.store, commit, &app_diffs, host, self.apps.path())?;
 
             // Reconcile here so tests that check unit symlinks still work.
@@ -548,54 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_checkout_sets_target_ref() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
-
-        t.apply(c1, None)?;
-
-        let target = t
-            .repo
-            .store
-            .repo
-            .find_reference("refs/heads/target")?
-            .peel_to_commit()?
-            .id();
-        assert_eq!(target, c1);
-
-        // The `current` ref is *not* updated by apply_checkout, it's only updated
-        // all the way at the end after other system mutations.
-        assert!(
-            t.repo
-                .store
-                .repo
-                .find_reference("refs/heads/current")
-                .is_err()
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn apply_checkout_writes_operator_to_reflog() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
-
-        t.apply(c1, None)?;
-
-        let reflog = t.repo.store.repo.reflog("refs/heads/target")?;
-        let entry = reflog.get(0).expect("reflog has an entry");
-        let message = entry.message().expect("reflog message is valid utf-8");
-        assert!(
-            message.contains("deckard@spinner"),
-            "reflog message should contain operator: {message}",
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn apply_checkout_only_enables_units_from_systemd_json() -> Result<()> {
+    fn diff_host_only_enables_units_from_systemd_json() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
             ("web1/nginx/systemd/nginx.service", b"[Service]"),

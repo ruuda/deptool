@@ -809,7 +809,7 @@ mod tests {
 
         // web2 should NOT have been modified despite being lockable.
         assert_eq!(
-            web2.get_current(),
+            web2.get_ref("refs/heads/current"),
             Some(commit_v1),
             "web2 should still be at v1"
         );
@@ -880,7 +880,7 @@ mod tests {
 
         // web1 should NOT have been modified.
         assert_eq!(
-            web1.get_current(),
+            web1.get_ref("refs/heads/current"),
             None,
             "web1 should not have been deployed to"
         );
