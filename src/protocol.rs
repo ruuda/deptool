@@ -4,7 +4,6 @@ use git2::Oid;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApplyError;
-use crate::plan::AppDiff;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -59,10 +58,6 @@ pub enum Message {
     /// Output of `systemctl status` for systemd units that were just changed.
     SystemdUnitStatus {
         output: String,
-    },
-    AppliedApp {
-        app: String,
-        diff: AppDiff,
     },
     ApplyComplete {
         #[serde(with = "crate::prim::ser::oid")]

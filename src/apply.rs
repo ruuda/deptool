@@ -109,7 +109,6 @@ pub fn apply_checkout(
     app_diffs: &BTreeMap<String, AppDiff>,
     host: &Hostname,
     apps_dir: &Path,
-    mut on_app: impl FnMut(&str, &AppDiff),
 ) -> Result<()> {
     for (app, change) in app_diffs {
         match change {
@@ -120,7 +119,6 @@ pub fn apply_checkout(
                 remove_app(app, apps_dir)?;
             }
         }
-        on_app(app, change);
     }
     Ok(())
 }
@@ -525,7 +523,6 @@ mod tests {
             &self,
             commit: git2::Oid,
             current: Option<git2::Oid>,
-            on_app: impl FnMut(&str, &AppDiff),
         ) -> Result<SystemDiff<PathBuf>> {
             let host = &"web1".into();
             let (app_diffs, system) =
@@ -538,14 +535,7 @@ mod tests {
                     operator: "deckard@spinner",
                 },
             )?;
-            apply_checkout(
-                &self.repo.store,
-                commit,
-                &app_diffs,
-                host,
-                self.apps.path(),
-                on_app,
-            )?;
+            apply_checkout(&self.repo.store, commit, &app_diffs, host, self.apps.path())?;
 
             // Reconcile here so tests that check unit symlinks still work.
             let desired = self
@@ -562,7 +552,7 @@ mod tests {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
 
-        t.apply(c1, None, |_, _| {})?;
+        t.apply(c1, None)?;
 
         let target = t
             .repo
@@ -591,7 +581,7 @@ mod tests {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
 
-        t.apply(c1, None, |_, _| {})?;
+        t.apply(c1, None)?;
 
         let reflog = t.repo.store.repo.reflog("refs/heads/target")?;
         let entry = reflog.get(0).expect("reflog has an entry");
@@ -601,22 +591,6 @@ mod tests {
             "reflog message should contain operator: {message}",
         );
 
-        Ok(())
-    }
-
-    #[test]
-    fn apply_checkout_reports_per_app_changes() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-
-        let mut applied = Vec::new();
-        t.apply(c1, None, |app, diff| {
-            applied.push((app.to_string(), diff.clone()));
-        })?;
-
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].0, "nginx");
-        assert!(matches!(applied[0].1, AppDiff::Add { .. }));
         Ok(())
     }
 
@@ -632,7 +606,7 @@ mod tests {
             ),
         ]);
 
-        let changes = t.apply(c1, None, |_, _| {})?;
+        let changes = t.apply(c1, None)?;
 
         // Both units are symlinked (available).
         assert!(t.units.path().join("nginx.service").is_symlink());

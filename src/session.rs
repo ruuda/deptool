@@ -295,12 +295,6 @@ impl HostSession {
             &app_diffs,
             &self.hostname,
             &self.apps_dir,
-            |app, diff| {
-                emit_message(Message::AppliedApp {
-                    app: app.to_string(),
-                    diff: diff.clone(),
-                });
-            },
         )?;
 
         let desired_units =
@@ -394,12 +388,6 @@ impl HostSession {
             &diffs,
             &self.hostname,
             &self.apps_dir,
-            |app, diff| {
-                emit_message(Message::AppliedApp {
-                    app: app.to_string(),
-                    diff: diff.clone(),
-                });
-            },
         )?;
 
         let desired_units =
@@ -565,15 +553,9 @@ mod tests {
             is_rollback_safe: true,
         });
 
-        // Forward apply emits AppliedApp, then post_apply fails, then rollback.
         assert!(matches!(
             msgs.as_slice(),
-            [
-                Message::AppliedApp { .. },
-                Message::RollingBack,
-                Message::AppliedApp { .. },
-                Message::RolledBack { .. },
-            ],
+            [Message::RollingBack, Message::RolledBack { .. }],
         ));
     }
 
@@ -601,10 +583,7 @@ mod tests {
             is_rollback_safe: false,
         });
 
-        assert!(matches!(
-            msgs.as_slice(),
-            [Message::AppliedApp { .. }, Message::Error(_)],
-        ));
+        assert!(matches!(msgs.as_slice(), [Message::Error(_)],));
     }
 
     #[test]
@@ -644,9 +623,7 @@ mod tests {
         assert!(matches!(
             msgs.as_slice(),
             [
-                Message::AppliedApp { .. },
                 Message::RollingBack,
-                Message::AppliedApp { .. },
                 Message::RollbackFailed {
                     apply_error: ApplyError::SystemdActivationFailed,
                     rollback_error: ApplyError::Store(_),
