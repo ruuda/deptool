@@ -9,9 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
-use crate::apply::{self, CheckoutMode, DesiredUnits, apply_checkout, diff_host};
+use crate::apply::{self, CheckoutMode, checkout};
 use crate::error::ApplyError;
-use crate::plan::SystemDiff;
+use crate::plan::{DesiredUnits, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -64,7 +64,7 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 }
 
 /// Callback for post-checkout mutations (symlinks, systemd lifecycle).
-type OnPostApply = Box<
+type OnActivate = Box<
     dyn Fn(
             &DesiredUnits,
             &SystemDiff<PathBuf>,
@@ -78,7 +78,7 @@ pub struct HostSession {
     pub store: Store,
     pub hostname: Hostname,
     apps_dir: PathBuf,
-    on_post_apply: OnPostApply,
+    on_activate: OnActivate,
     state: SessionState,
 }
 
@@ -105,13 +105,13 @@ impl HostSession {
         store: Store,
         hostname: Hostname,
         apps_dir: PathBuf,
-        on_post_apply: OnPostApply,
+        on_activate: OnActivate,
     ) -> Self {
         HostSession {
             store,
             hostname,
             apps_dir,
-            on_post_apply,
+            on_activate,
             state: SessionState::Unlocked,
         }
     }
@@ -119,12 +119,12 @@ impl HostSession {
     /// Create a session for testing that does not touch systemd or symlinks.
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
-        let on_post_apply: OnPostApply = Box::new(|_, _, _| Ok(()));
+        let on_activate: OnActivate = Box::new(|_, _, _| Ok(()));
         HostSession::new(
             Store { repo },
             hostname.into(),
             apps_dir.to_path_buf(),
-            on_post_apply,
+            on_activate,
         )
     }
 
@@ -293,7 +293,7 @@ impl HostSession {
             },
         )?;
 
-        apply_checkout(
+        checkout(
             &self.store,
             Some(ctx.target_commit),
             &app_diffs,
@@ -306,7 +306,7 @@ impl HostSession {
             self.store
                 .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?;
 
-        match (self.on_post_apply)(&desired_units, &system_diff, emit_message) {
+        match (self.on_activate)(&desired_units, &system_diff, emit_message) {
             Ok(()) => {}
             Err(err) if system_diff.is_rollback_safe() => {
                 return self.handle_rollback(err, ctx, emit_message);
@@ -333,11 +333,11 @@ impl HostSession {
         Ok(())
     }
 
-    /// Roll back to the good commit after a failed post-apply.
+    /// Roll back to the good commit after a failed activation.
     ///
     /// Re-applies the commit that was `current` before the failed deploy
     /// attempt.
-    /// Roll back to the good commit after a failed post-apply.
+    /// Roll back to the good commit after a failed activation.
     ///
     /// Re-applies the commit that was `current` before the failed deploy
     /// attempt. The original error is included in the `RollingBack` message
@@ -375,7 +375,7 @@ impl HostSession {
             ctx.current_commit,
         )?;
 
-        apply_checkout(
+        checkout(
             &self.store,
             ctx.current_commit,
             &diffs,
@@ -390,7 +390,7 @@ impl HostSession {
                 .desired_units(oid, &self.hostname, &self.apps_dir)?,
             None => BTreeMap::new(),
         };
-        (self.on_post_apply)(&desired_units, &system_diff, emit_message)?;
+        (self.on_activate)(&desired_units, &system_diff, emit_message)?;
 
         match ctx.current_commit {
             Some(good) => self.store.set_ref(
@@ -484,10 +484,8 @@ mod tests {
         drop(lock_holder);
     }
 
-    /// Build an OnPostApply that returns results from a list, one per call.
-    fn post_apply_sequence(
-        results: Vec<std::result::Result<(), ApplyError>>,
-    ) -> super::OnPostApply {
+    /// Build an OnActivate that returns results from a list, one per call.
+    fn activate_sequence(results: Vec<std::result::Result<(), ApplyError>>) -> super::OnActivate {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
@@ -495,16 +493,16 @@ mod tests {
             let i = calls.fetch_add(1, Ordering::SeqCst);
             results
                 .get(i)
-                .expect("unexpected extra post_apply call")
+                .expect("unexpected extra activate call")
                 .clone()
         })
     }
 
-    /// Create a TestHost with a custom post_apply callback.
+    /// Create a TestHost with a custom activate callback.
     fn test_host(
         hostname: &str,
         files: &[(&str, &[u8])],
-        on_post_apply: super::OnPostApply,
+        on_activate: super::OnActivate,
     ) -> (TestHost, Oid) {
         let store_dir = TempDir::new("store");
         let apps = TempDir::new("apps");
@@ -514,7 +512,7 @@ mod tests {
             store,
             hostname.into(),
             apps.path().to_path_buf(),
-            on_post_apply,
+            on_activate,
         );
         let host = TestHost::from_parts(session, store_dir, apps);
         (host, oid)
@@ -558,12 +556,11 @@ mod tests {
     }
 
     #[test]
-    fn rollback_on_post_apply_failure() {
-        let on_post_apply =
-            post_apply_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
+    fn rollback_on_activate_failure() {
+        let on_activate = activate_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
 
         // Two commits: c1 is the good state, c2 is the broken deploy.
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
         let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
@@ -602,7 +599,7 @@ mod tests {
 
     #[test]
     fn no_rollback_when_not_rollback_safe() {
-        let on_post_apply: super::OnPostApply =
+        let on_activate: super::OnActivate =
             Box::new(|_, _, _| Err(ApplyError::SystemdActivationFailed));
 
         // Data with a newly enabled unit -- not rollback-safe.
@@ -615,7 +612,7 @@ mod tests {
                     br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
                 ),
             ],
-            on_post_apply,
+            on_activate,
         );
         lock_and_push(&mut host, c1);
 
@@ -629,11 +626,10 @@ mod tests {
 
     #[test]
     fn rollback_to_empty_on_first_deploy_failure() {
-        let on_post_apply =
-            post_apply_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
+        let on_activate = activate_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
 
         // First deploy: no current_commit.
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
         lock_and_push(&mut host, c1);
 
         let msgs = host.interact(Request::Apply {
@@ -658,12 +654,12 @@ mod tests {
 
     #[test]
     fn failed_rollback_reports_rollback_error_and_logs_original() {
-        let on_post_apply = post_apply_sequence(vec![
+        let on_activate = activate_sequence(vec![
             Err(ApplyError::SystemdActivationFailed),
             Err(ApplyError::Store("rollback IO error".into())),
         ]);
 
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
         let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])

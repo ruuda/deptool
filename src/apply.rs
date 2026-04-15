@@ -1,4 +1,4 @@
-//! Materialize apps on the target host.
+//! Host filesystem operations: app checkout, symlink reconciliation, and cleanup.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -8,14 +8,11 @@ use std::path::{Path, PathBuf};
 use git2::Oid;
 
 use crate::error::ApplyError;
-use crate::plan::{AppDiff, SymlinkChanges, SystemDiff, compute_system_diff};
+use crate::plan::{AppDiff, DesiredUnits, SymlinkChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
 
 type Result<T> = std::result::Result<T, ApplyError>;
-
-/// Map from unit filename to the absolute symlink target path.
-pub type DesiredUnits = BTreeMap<String, PathBuf>;
 
 const OID_PREFIX_LEN: usize = 10;
 
@@ -44,7 +41,7 @@ pub enum CheckoutMode {
 /// call. After a normal deploy this is the last successful version. After
 /// a rollback this is the *failed* version (useful for debugging), not the
 /// previous successful one.
-fn apply_app(
+fn checkout_app(
     store: &Store,
     commit_oid: Oid,
     host: &Hostname,
@@ -142,41 +139,11 @@ fn gc_app_dir(app_dir: &Path) {
     }
 }
 
-/// Compute per-app diffs and the aggregate system diff for a host deploy.
-///
-/// Either commit can be None to represent an empty host (no apps).
-pub fn diff_host(
-    store: &Store,
-    host: &Hostname,
-    apps_dir: &Path,
-    current_commit: Option<Oid>,
-    target_commit: Option<Oid>,
-) -> Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>)> {
-    let get_apps = |oid| -> Result<BTreeMap<String, Oid>> {
-        let tree = store.get_commit_tree(oid)?;
-        Ok(store.get_host_apps(&tree, host)?)
-    };
-    let current_apps = current_commit
-        .map(get_apps)
-        .transpose()?
-        .unwrap_or_default();
-    let target_apps = target_commit.map(get_apps).transpose()?.unwrap_or_default();
-    let app_diffs = crate::plan::diff_apps(&current_apps, &target_apps);
-
-    let mut system = SystemDiff::<PathBuf>::default();
-    for (app, change) in &app_diffs {
-        let mut resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
-        system.append(&mut resolved);
-    }
-
-    Ok((app_diffs, system))
-}
-
 /// Checkout or remove each changed app on the filesystem.
 ///
 /// This is the only part of a deploy that mutates `apps_dir`. It does not
 /// touch refs, systemd, or host-level symlinks.
-pub fn apply_checkout(
+pub fn checkout(
     store: &Store,
     commit_oid: Option<Oid>,
     app_diffs: &BTreeMap<String, AppDiff>,
@@ -188,7 +155,7 @@ pub fn apply_checkout(
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                apply_app(store, oid, host, app, apps_dir, mode)?;
+                checkout_app(store, oid, host, app, apps_dir, mode)?;
             }
             AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
@@ -201,7 +168,7 @@ pub fn apply_checkout(
 /// Reconcile unit symlinks: make unit_dir match desired.
 ///
 /// Returns the set of unit names whose symlinks were added or changed.
-pub fn reconcile_symlinks(
+pub fn reconcile_unit_symlinks(
     desired: &DesiredUnits,
     apps_dir: &Path,
     unit_dir: &Path,
@@ -241,10 +208,7 @@ pub fn reconcile_symlinks(
 /// The checks and mutations are not atomic (TOCTOU), but we hold the
 /// deploy lock and assume the target filesystem is not changing
 /// concurrently.
-pub fn reconcile_manifest_symlinks(
-    apps_dir: &Path,
-    changes: &SymlinkChanges<PathBuf>,
-) -> Result<()> {
+pub fn reconcile_config_symlinks(apps_dir: &Path, changes: &SymlinkChanges<PathBuf>) -> Result<()> {
     for target in &changes.remove {
         if target.symlink_metadata().is_ok() {
             verify_managed(target, apps_dir)?;
@@ -388,7 +352,7 @@ fn collect_actual_units(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::diff_enabled;
+    use crate::plan::{SystemDiff, diff_enabled, diff_host};
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     // Tests do both apply calls (-> ApplyError) and raw git operations
@@ -396,7 +360,7 @@ mod tests {
     use crate::error::Result;
 
     #[test]
-    fn apply_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
+    fn checkout_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
@@ -414,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_app_replaces_existing_checkout() -> Result<()> {
+    fn checkout_app_replaces_existing_checkout() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
@@ -462,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_app_swaps_symlink_on_update() -> Result<()> {
+    fn checkout_app_swaps_symlink_on_update() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
@@ -538,16 +502,16 @@ mod tests {
         Ok(())
     }
 
-    // reconcile_symlinks tests (which need filesystem access)
+    // reconcile_unit_symlinks tests (which need filesystem access)
 
     #[test]
-    fn reconcile_symlinks_creates_symlink_for_desired_unit() -> Result<()> {
+    fn reconcile_unit_symlinks_creates_symlink_for_desired_unit() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        let changed = reconcile_symlinks(&desired, apps.path(), units.path())?;
+        let changed = reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
 
         assert_eq!(changed, BTreeSet::from(["nginx.service".to_string()]));
         assert!(units.path().join("nginx.service").is_symlink());
@@ -555,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
+    fn reconcile_unit_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
@@ -563,7 +527,7 @@ mod tests {
         // Create a symlink as if a previous reconcile put it there.
         unix_fs::symlink(&target, units.path().join("nginx.service"))?;
 
-        let changed = reconcile_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        let changed = reconcile_unit_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         assert!(!units.path().join("nginx.service").exists());
@@ -571,7 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_symlinks_leaves_unmanaged_symlinks_intact() -> Result<()> {
+    fn reconcile_unit_symlinks_leaves_unmanaged_symlinks_intact() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
@@ -581,7 +545,7 @@ mod tests {
             units.path().join("sshd.service"),
         )?;
 
-        let changed = reconcile_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        let changed = reconcile_unit_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         assert!(units.path().join("sshd.service").is_symlink());
@@ -589,14 +553,14 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
+    fn reconcile_unit_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        reconcile_symlinks(&desired, apps.path(), units.path())?;
-        let changed = reconcile_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
+        let changed = reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         Ok(())
@@ -635,7 +599,7 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
-    /// Test harness for `diff_host` + `apply_checkout` + `reconcile_symlinks`.
+    /// Test harness for `diff_host` + `checkout` + `reconcile_unit_symlinks`.
     struct ApplyTest {
         repo: TestRepo,
         apps: TempDir,
@@ -658,7 +622,7 @@ mod tests {
             commit: Oid,
             mode: CheckoutMode,
         ) -> std::result::Result<(), ApplyError> {
-            apply_app(
+            checkout_app(
                 &self.repo.store,
                 commit,
                 &host.into(),
@@ -681,7 +645,7 @@ mod tests {
                 current,
                 Some(commit),
             )?;
-            apply_checkout(
+            checkout(
                 &self.repo.store,
                 Some(commit),
                 &app_diffs,
@@ -695,7 +659,7 @@ mod tests {
                 .repo
                 .store
                 .desired_units(commit, host, self.apps.path())?;
-            reconcile_symlinks(&desired, self.apps.path(), self.units.path())?;
+            reconcile_unit_symlinks(&desired, self.apps.path(), self.units.path())?;
             Ok(system)
         }
     }
@@ -739,7 +703,7 @@ mod tests {
             remove: Vec::new(),
             change: Vec::new(),
         };
-        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        reconcile_config_symlinks(apps.path(), &changes)?;
         assert_eq!(fs::read_link(&link)?, source);
 
         // Clean up for the next case.
@@ -747,7 +711,7 @@ mod tests {
 
         // A regular file with identical contents is adopted.
         fs::write(&link, b"config data")?;
-        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        reconcile_config_symlinks(apps.path(), &changes)?;
         assert!(link.is_symlink());
         assert_eq!(fs::read_link(&link)?, source);
 
@@ -756,7 +720,7 @@ mod tests {
 
         // A regular file with different contents is refused.
         fs::write(&link, b"different data")?;
-        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
         assert!(
             err.to_string().contains("different contents"),
             "error mentions the conflict: {err}",
@@ -780,7 +744,7 @@ mod tests {
             remove: vec![managed.clone()],
             change: Vec::new(),
         };
-        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        reconcile_config_symlinks(apps.path(), &changes)?;
         assert!(managed.symlink_metadata().is_err());
 
         // Unmanaged symlink is refused.
@@ -789,7 +753,7 @@ mod tests {
             remove: vec![unmanaged],
             change: Vec::new(),
         };
-        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
         assert!(
             err.to_string().contains("refusing to touch"),
             "error explains the refusal: {err}",
@@ -813,7 +777,7 @@ mod tests {
             remove: Vec::new(),
             change: vec![(managed.clone(), new_source.clone())],
         };
-        reconcile_manifest_symlinks(apps.path(), &changes)?;
+        reconcile_config_symlinks(apps.path(), &changes)?;
         assert_eq!(fs::read_link(&managed)?, new_source);
 
         // Unmanaged symlink is refused.
@@ -822,7 +786,7 @@ mod tests {
             remove: Vec::new(),
             change: vec![(unmanaged, new_source)],
         };
-        let err = reconcile_manifest_symlinks(apps.path(), &changes).unwrap_err();
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
         assert!(
             err.to_string().contains("refusing to touch"),
             "error explains the refusal: {err}",

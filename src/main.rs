@@ -240,8 +240,8 @@ fn run() -> Result<()> {
 
 use session::AgentConfig;
 
-fn post_apply(
-    desired_units: &apply::DesiredUnits,
+fn activate(
+    desired_units: &plan::DesiredUnits,
     changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
     apps_dir: &Path,
@@ -250,7 +250,7 @@ fn post_apply(
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
     // that these symlinks provide.
-    apply::reconcile_manifest_symlinks(apps_dir, &changes.symlinks)?;
+    apply::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
 
     let mut touched: Vec<&str> = Vec::new();
 
@@ -264,7 +264,7 @@ fn post_apply(
     // "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    let symlink_changes = apply::reconcile_symlinks(desired_units, apps_dir, unit_dir)?;
+    let symlink_changes = apply::reconcile_unit_symlinks(desired_units, apps_dir, unit_dir)?;
 
     // Only poke systemd when something actually changed on disk.
     let needs_reload = !symlink_changes.is_empty()
@@ -336,7 +336,7 @@ fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
         Box::new(move |desired_units, changes, emit| {
-            post_apply(desired_units, changes, emit, &apps_dir, &unit_dir)
+            activate(desired_units, changes, emit, &apps_dir, &unit_dir)
         }),
     )
 }

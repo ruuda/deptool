@@ -326,6 +326,39 @@ pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
     Ok(AppPlan { diff, system })
 }
 
+/// Map from unit filename to the absolute symlink target path.
+pub type DesiredUnits = BTreeMap<String, PathBuf>;
+
+/// Compute per-app diffs and the aggregate system diff for a host deploy.
+///
+/// Either commit can be None to represent an empty host (no apps).
+pub fn diff_host(
+    store: &Store,
+    host: &Hostname,
+    apps_dir: &Path,
+    current_commit: Option<Oid>,
+    target_commit: Option<Oid>,
+) -> std::result::Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>), StoreError> {
+    let get_apps = |oid| -> std::result::Result<BTreeMap<String, Oid>, StoreError> {
+        let tree = store.get_commit_tree(oid)?;
+        store.get_host_apps(&tree, host)
+    };
+    let current_apps = current_commit
+        .map(get_apps)
+        .transpose()?
+        .unwrap_or_default();
+    let target_apps = target_commit.map(get_apps).transpose()?.unwrap_or_default();
+    let app_diffs = diff_apps(&current_apps, &target_apps);
+
+    let mut system = SystemDiff::<PathBuf>::default();
+    for (app, change) in &app_diffs {
+        let mut resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
+        system.append(&mut resolved);
+    }
+
+    Ok((app_diffs, system))
+}
+
 /// Build a deployment plan by comparing main against each host's current ref.
 ///
 /// TODO: Currently this is based only on the repository state, which means we

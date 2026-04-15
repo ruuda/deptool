@@ -191,7 +191,7 @@ impl Store {
         commit_oid: Oid,
         host: &Hostname,
         apps_dir: &Path,
-    ) -> Result<crate::apply::DesiredUnits> {
+    ) -> Result<crate::plan::DesiredUnits> {
         let tree = self.get_commit_tree(commit_oid)?;
         let apps = self.get_host_apps(&tree, host)?;
         let mut units = BTreeMap::new();
