@@ -11,7 +11,7 @@ use git2::Oid;
 
 use parking_lot::Mutex;
 
-use crate::error::{Error, HostError, Result};
+use crate::error::{ApplyError, Error, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
@@ -26,9 +26,15 @@ pub enum HostState {
     Locked,
     Pushing,
     Applying,
+    RollingBack,
     Done,
     Stale,
     LockBusy(Option<String>),
+    RolledBack(ApplyError),
+    RollbackFailed {
+        apply_error: ApplyError,
+        rollback_error: ApplyError,
+    },
     Failed(HostError),
 }
 
@@ -36,7 +42,11 @@ impl HostState {
     pub fn is_failure(&self) -> bool {
         matches!(
             self,
-            HostState::Stale | HostState::LockBusy(_) | HostState::Failed(_)
+            HostState::Stale
+                | HostState::LockBusy(_)
+                | HostState::RolledBack(_)
+                | HostState::RollbackFailed { .. }
+                | HostState::Failed(_)
         )
     }
 }
@@ -51,10 +61,19 @@ impl std::fmt::Display for HostState {
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
+            HostState::RollingBack => f.write_str("rolling back"),
             HostState::Done => f.write_str("done"),
             HostState::Stale => f.write_str("stale"),
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
+            HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
+            HostState::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => write!(
+                f,
+                "failed: {apply_error}, rollback also failed: {rollback_error}"
+            ),
             HostState::Failed(err) => write!(f, "failed: {err}"),
         }
     }
@@ -422,6 +441,7 @@ fn push_and_apply_host(
     progress.update(host, HostState::Applying);
     conn.send_request(&Request::Apply {
         target_commit: plan.commit,
+        is_rollback_safe: plan.hosts[host].is_rollback_safe,
     })?;
     conn.close();
     let mut applied_commit = None;
@@ -429,6 +449,26 @@ fn push_and_apply_host(
         match &message {
             Message::ApplyComplete { commit, .. } => {
                 applied_commit = Some(*commit);
+            }
+            Message::RollingBack => {
+                progress.update(host, HostState::RollingBack);
+            }
+            Message::RolledBack { error } => {
+                progress.update(host, HostState::RolledBack(error.clone()));
+                return Ok(());
+            }
+            Message::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => {
+                progress.update(
+                    host,
+                    HostState::RollbackFailed {
+                        apply_error: apply_error.clone(),
+                        rollback_error: rollback_error.clone(),
+                    },
+                );
+                return Ok(());
             }
             Message::SystemdUnitStatus { output } => {
                 progress.log_message(host, output.trim_end());
@@ -646,6 +686,7 @@ mod tests {
                             apps: BTreeMap::new(),
                             expected_current: expected_current.clone(),
                             is_fast_forward: true,
+                            is_rollback_safe: true,
                         },
                     )
                 })
@@ -768,7 +809,7 @@ mod tests {
 
         // web2 should NOT have been modified despite being lockable.
         assert_eq!(
-            web2.get_current(),
+            web2.get_ref("refs/heads/current"),
             Some(commit_v1),
             "web2 should still be at v1"
         );
@@ -839,7 +880,7 @@ mod tests {
 
         // web1 should NOT have been modified.
         assert_eq!(
-            web1.get_current(),
+            web1.get_ref("refs/heads/current"),
             None,
             "web1 should not have been deployed to"
         );

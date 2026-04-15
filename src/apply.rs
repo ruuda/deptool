@@ -10,7 +10,7 @@ use git2::Oid;
 use crate::error::ApplyError;
 use crate::plan::{AppDiff, SymlinkChanges, SystemDiff, compute_system_diff};
 use crate::prim::Hostname;
-use crate::store::{self, Store};
+use crate::store::Store;
 
 type Result<T> = std::result::Result<T, ApplyError>;
 
@@ -26,29 +26,42 @@ fn oid_prefix(oid: Oid) -> String {
     buf
 }
 
+#[derive(Clone, Copy)]
+pub enum CheckoutMode {
+    /// Always re-checkout from the store (forward deploy).
+    Fresh,
+    /// Reuse existing version dir if present (rollback).
+    Reuse,
+}
+
 /// Check out an app and atomically swap the `current` symlink.
 ///
-/// The app tree is checked out into `<apps_dir>/<app>/<oid-prefix>/`.
-/// If that directory already exists (e.g. interrupted deploy), it is removed
-/// and re-checked out. Then `<apps_dir>/<app>/current` is atomically swapped
-/// to point to the new checkout.
-pub fn apply_app(
+/// In `Fresh` mode, any existing version directory is removed and
+/// re-checked out (it may be from an interrupted deploy). In `Reuse`
+/// mode, an existing directory is trusted and only the symlink is swapped.
+fn apply_app(
     store: &Store,
     commit_oid: Oid,
     host: &Hostname,
     app: &str,
     apps_dir: &Path,
+    mode: CheckoutMode,
 ) -> Result<()> {
     let prefix = oid_prefix(commit_oid);
     let app_dir = apps_dir.join(app);
     let version_dir = app_dir.join(&prefix);
 
-    // Remove and re-checkout to avoid trusting a potentially incomplete dir.
-    if version_dir.exists() {
-        fs::remove_dir_all(&version_dir)?;
+    let needs_checkout = match mode {
+        CheckoutMode::Fresh => true,
+        CheckoutMode::Reuse => !version_dir.exists(),
+    };
+    if needs_checkout {
+        if version_dir.exists() {
+            fs::remove_dir_all(&version_dir)?;
+        }
+        fs::create_dir_all(&version_dir)?;
+        store.checkout_app(commit_oid, host, app, &version_dir)?;
     }
-    fs::create_dir_all(&version_dir)?;
-    store.checkout_app(commit_oid, host, app, &version_dir)?;
 
     // Atomic symlink swap: create temp symlink, rename over `current`.
     let current = app_dir.join("current");
@@ -71,63 +84,60 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Apply a deployment to a host's filesystem.
+/// Compute per-app diffs and the aggregate system diff for a host deploy.
 ///
-/// Sets the target ref, diffs current vs target apps, checks out or removes
-/// each changed app, and computes the unit lifecycle and symlink actions.
-/// Does *not* reconcile symlinks or touch systemd -- the caller does that
-/// in the post-apply phase. Calls `on_app` for each changed app.
-pub fn apply_host(
+/// Either commit can be None to represent an empty host (no apps).
+pub fn diff_host(
     store: &Store,
-    commit_oid: Oid,
-    actual_current: Option<Oid>,
     host: &Hostname,
     apps_dir: &Path,
-    operator: &str,
-    mut on_app: impl FnMut(&str, &AppDiff),
-) -> Result<SystemDiff<PathBuf>> {
-    store.set_ref(
-        "refs/heads/target",
-        commit_oid,
-        store::RefUpdate::SetTarget { operator },
-    )?;
-
-    let target_tree = store.get_commit_tree(commit_oid)?;
-    let target_apps = store.get_host_apps(&target_tree, host)?;
-
-    let current_apps = match actual_current {
-        None => BTreeMap::new(),
-        Some(oid) => {
-            let tree = store.get_commit_tree(oid)?;
-            store.get_host_apps(&tree, host)?
-        }
+    current_commit: Option<Oid>,
+    target_commit: Option<Oid>,
+) -> Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>)> {
+    let get_apps = |oid| -> Result<BTreeMap<String, Oid>> {
+        let tree = store.get_commit_tree(oid)?;
+        Ok(store.get_host_apps(&tree, host)?)
     };
+    let current_apps = current_commit
+        .map(get_apps)
+        .transpose()?
+        .unwrap_or_default();
+    let target_apps = target_commit.map(get_apps).transpose()?.unwrap_or_default();
+    let app_diffs = crate::plan::diff_apps(&current_apps, &target_apps);
 
-    let diff = crate::plan::diff_apps(&current_apps, &target_apps);
-
-    // Checkout/remove each app and aggregate system-level side effects.
-    // Uses compute_system_diff (same as the plan), so display and apply agree.
     let mut system = SystemDiff::<PathBuf>::default();
-    for (app, change) in &diff {
+    for (app, change) in &app_diffs {
+        let mut resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
+        system.append(&mut resolved);
+    }
+
+    Ok((app_diffs, system))
+}
+
+/// Checkout or remove each changed app on the filesystem.
+///
+/// This is the only part of a deploy that mutates `apps_dir`. It does not
+/// touch refs, systemd, or host-level symlinks.
+pub fn apply_checkout(
+    store: &Store,
+    commit_oid: Option<Oid>,
+    app_diffs: &BTreeMap<String, AppDiff>,
+    host: &Hostname,
+    apps_dir: &Path,
+    mode: CheckoutMode,
+) -> Result<()> {
+    for (app, change) in app_diffs {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
-                apply_app(store, commit_oid, host, app, apps_dir)?;
+                let oid = commit_oid.expect("Add/Update requires a target commit");
+                apply_app(store, oid, host, app, apps_dir, mode)?;
             }
             AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
             }
         }
-        on_app(app, change);
-        let resolved = compute_system_diff(store, change)?.resolve_symlinks(app, apps_dir);
-        system.append(&mut { resolved });
     }
-
-    // We don't update refs/heads/current here. There is more to do (enabling
-    // and disabling systemd units), and if that fails, we don't want the
-    // `current` ref to say that the deploy was done while it was in fact
-    // unfinished. It's better for it to be behind than ahead.
-
-    Ok(system)
+    Ok(())
 }
 
 /// Reconcile unit symlinks: make unit_dir match desired.
@@ -329,17 +339,16 @@ mod tests {
 
     #[test]
     fn apply_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
-        let apps = TempDir::new("apps");
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
 
         let prefix = oid_prefix(c1);
-        let version_dir = apps.path().join("nginx").join(&prefix);
+        let version_dir = t.apps.path().join("nginx").join(&prefix);
         assert!(version_dir.join("nginx.conf").exists(), "checkout exists");
 
-        let current = apps.path().join("nginx/current");
+        let current = t.apps.path().join("nginx/current");
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), prefix);
 
@@ -348,18 +357,16 @@ mod tests {
 
     #[test]
     fn apply_app_replaces_existing_checkout() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-
-        let apps = TempDir::new("apps");
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         // Create a partial/corrupt checkout dir.
         let prefix = oid_prefix(c1);
-        let corrupt_dir = apps.path().join("nginx").join(&prefix);
+        let corrupt_dir = t.apps.path().join("nginx").join(&prefix);
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -367,40 +374,68 @@ mod tests {
     }
 
     #[test]
+    fn reuse_mode_preserves_existing_checkout() -> Result<()> {
+        use std::os::unix::fs::MetadataExt;
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+
+        let prefix = oid_prefix(c1);
+        let c1_conf = t.apps.path().join("nginx").join(prefix).join("nginx.conf");
+        let inode_before = fs::metadata(&c1_conf)?.ino();
+
+        // Reuse mode: repoints to c1 without re-checking out.
+        t.checkout("web1", "nginx", c1, CheckoutMode::Reuse)?;
+
+        let current = fs::read_link(t.apps.path().join("nginx/current"))?;
+        assert_eq!(current.to_str().expect("utf-8"), oid_prefix(c1));
+
+        // Same inode -- the file was not recreated.
+        assert_eq!(fs::metadata(&c1_conf)?.ino(), inode_before);
+
+        // Fresh mode re-checkouts even though the dir exists.
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        assert_ne!(fs::metadata(&c1_conf)?.ino(), inode_before);
+
+        Ok(())
+    }
+
+    #[test]
     fn apply_app_swaps_symlink_on_update() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
-        let apps = TempDir::new("apps");
-        let current = apps.path().join("nginx/current");
+        let current = t.apps.path().join("nginx/current");
 
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(&t.store, c2, &"web1".into(), "nginx", apps.path())?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
         // Both versions still exist on disk.
-        assert!(apps.path().join("nginx").join(oid_prefix(c1)).exists());
-        assert!(apps.path().join("nginx").join(oid_prefix(c2)).exists());
+        assert!(t.apps.path().join("nginx").join(oid_prefix(c1)).exists());
+        assert!(t.apps.path().join("nginx").join(oid_prefix(c2)).exists());
 
         Ok(())
     }
 
     #[test]
     fn remove_app_deletes_the_app_directory() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
-        let apps = TempDir::new("apps");
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
-        assert!(apps.path().join("nginx").exists());
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        assert!(t.apps.path().join("nginx").exists());
 
-        remove_app("nginx", apps.path())?;
-        assert!(!apps.path().join("nginx").exists());
+        remove_app("nginx", t.apps.path())?;
+        assert!(!t.apps.path().join("nginx").exists());
 
         Ok(())
     }
@@ -509,7 +544,7 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
-    /// Test harness for `apply_host` calls.
+    /// Test harness for `diff_host` + `apply_checkout` + `reconcile_symlinks`.
     struct ApplyTest {
         repo: TestRepo,
         apps: TempDir,
@@ -525,98 +560,57 @@ mod tests {
             }
         }
 
+        fn checkout(
+            &self,
+            host: &str,
+            app: &str,
+            commit: Oid,
+            mode: CheckoutMode,
+        ) -> std::result::Result<(), ApplyError> {
+            apply_app(
+                &self.repo.store,
+                commit,
+                &host.into(),
+                app,
+                self.apps.path(),
+                mode,
+            )
+        }
+
         fn apply(
             &self,
             commit: git2::Oid,
             current: Option<git2::Oid>,
-            on_app: impl FnMut(&str, &AppDiff),
         ) -> Result<SystemDiff<PathBuf>> {
             let host = &"web1".into();
-            let operator = "deckard@spinner";
-            let changes = apply_host(
+            let (app_diffs, system) = diff_host(
                 &self.repo.store,
-                commit,
-                current,
                 host,
                 self.apps.path(),
-                operator,
-                on_app,
+                current,
+                Some(commit),
             )?;
+            apply_checkout(
+                &self.repo.store,
+                Some(commit),
+                &app_diffs,
+                host,
+                self.apps.path(),
+                CheckoutMode::Fresh,
+            )?;
+
             // Reconcile here so tests that check unit symlinks still work.
             let desired = self
                 .repo
                 .store
                 .desired_units(commit, host, self.apps.path())?;
             reconcile_symlinks(&desired, self.apps.path(), self.units.path())?;
-            Ok(changes)
+            Ok(system)
         }
     }
 
     #[test]
-    fn apply_host_sets_target_ref() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
-
-        t.apply(c1, None, |_, _| {})?;
-
-        let target = t
-            .repo
-            .store
-            .repo
-            .find_reference("refs/heads/target")?
-            .peel_to_commit()?
-            .id();
-        assert_eq!(target, c1);
-
-        // The `current` ref is *not* updated by apply_host, it's only updated
-        // all the way at the end after other system mutations.
-        assert!(
-            t.repo
-                .store
-                .repo
-                .find_reference("refs/heads/current")
-                .is_err()
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn apply_host_writes_operator_to_reflog() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
-
-        t.apply(c1, None, |_, _| {})?;
-
-        let reflog = t.repo.store.repo.reflog("refs/heads/target")?;
-        let entry = reflog.get(0).expect("reflog has an entry");
-        let message = entry.message().expect("reflog message is valid utf-8");
-        assert!(
-            message.contains("deckard@spinner"),
-            "reflog message should contain operator: {message}",
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn apply_host_reports_per_app_changes() -> Result<()> {
-        let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-
-        let mut applied = Vec::new();
-        t.apply(c1, None, |app, diff| {
-            applied.push((app.to_string(), diff.clone()));
-        })?;
-
-        assert_eq!(applied.len(), 1);
-        assert_eq!(applied[0].0, "nginx");
-        assert!(matches!(applied[0].1, AppDiff::Add { .. }));
-        Ok(())
-    }
-
-    #[test]
-    fn apply_host_only_enables_units_from_systemd_json() -> Result<()> {
+    fn diff_host_only_enables_units_from_systemd_json() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
             ("web1/nginx/systemd/nginx.service", b"[Service]"),
@@ -627,7 +621,7 @@ mod tests {
             ),
         ]);
 
-        let changes = t.apply(c1, None, |_, _| {})?;
+        let changes = t.apply(c1, None)?;
 
         // Both units are symlinked (available).
         assert!(t.units.path().join("nginx.service").is_symlink());

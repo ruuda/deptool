@@ -140,6 +140,9 @@ impl Store {
             RefUpdate::SetCurrent { operator } => {
                 format!("deploy by {operator}: set current")
             }
+            RefUpdate::Rollback { operator } => {
+                format!("deploy by {operator}: rollback after failed apply")
+            }
             RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
             RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
         };
@@ -335,6 +338,7 @@ impl Store {
 pub enum RefUpdate<'a> {
     SetTarget { operator: &'a str },
     SetCurrent { operator: &'a str },
+    Rollback { operator: &'a str },
     ApplyComplete,
     FetchStale,
 }

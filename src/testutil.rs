@@ -10,6 +10,7 @@ use git2::{Oid, Repository};
 use crate::deploy::Connection;
 use crate::error::Result;
 use crate::protocol::{self, Hello, Message, Request};
+use crate::session::HostSession;
 use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -60,7 +61,7 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
 }
 
 /// Create a commit with the given files, without touching the filesystem.
-fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
+pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
     Ok(store
         .commit_tree(tree_oid)?
@@ -141,18 +142,31 @@ impl TestRepo {
 /// Wraps a `HostSession` and provides helpers for sending requests and
 /// collecting responses.
 pub struct TestHost {
-    pub session: crate::session::HostSession,
+    pub session: HostSession,
     _store: TempDir,
     apps: TempDir,
 }
 
 impl TestHost {
+    pub fn apps_path(&self) -> &Path {
+        self.apps.path()
+    }
+
+    /// Construct from pre-built parts.
+    pub fn from_parts(session: HostSession, store: TempDir, apps: TempDir) -> Self {
+        TestHost {
+            session,
+            _store: store,
+            apps,
+        }
+    }
+
     /// Create a new host with a fresh bare repo.
     pub fn new(hostname: &str) -> Self {
         let store = TempDir::new("store");
         let apps = TempDir::new("apps");
-        let repo = Repository::init_bare(store.path()).expect("repo is created");
-        let session = crate::session::HostSession::new_test(repo, hostname, apps.path());
+        let s = Store::open_or_init(store.path()).expect("store is created");
+        let session = HostSession::new_test(s.repo, hostname, apps.path());
         TestHost {
             session,
             _store: store,
@@ -182,18 +196,31 @@ impl TestHost {
             .expect("ref is set");
     }
 
-    /// The host-local `refs/heads/current` commit, if any.
-    pub fn get_current(&self) -> Option<Oid> {
+    /// The commit a ref points to, if the ref exists.
+    pub fn get_ref(&self, refname: &str) -> Option<Oid> {
         self.session
             .store
             .repo
-            .find_reference("refs/heads/current")
+            .find_reference(refname)
             .ok()
-            .map(|r| {
-                r.peel_to_commit()
-                    .expect("current ref points to a commit")
-                    .id()
+            .map(|r| r.peel_to_commit().expect("ref points to a commit").id())
+    }
+
+    /// Read the reflog as (new_oid, message) pairs, newest first.
+    pub fn reflog(&self, refname: &str) -> Vec<(Oid, String)> {
+        let reflog = self
+            .session
+            .store
+            .repo
+            .reflog(refname)
+            .expect("reflog exists");
+        (0..reflog.len())
+            .map(|i| {
+                let entry = reflog.get(i).expect("reflog entry exists");
+                let msg = entry.message().expect("valid utf-8").to_string();
+                (entry.id_new(), msg)
             })
+            .collect()
     }
 
     /// Send a request and collect all response messages.
@@ -234,7 +261,7 @@ impl TestHost {
         apps_path: &std::path::Path,
     ) -> Box<dyn Connection> {
         let repo = Repository::open(store_path).expect("repo is opened");
-        let session = crate::session::HostSession::new_test(repo, hostname, apps_path);
+        let session = HostSession::new_test(repo, hostname, apps_path);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             hostname: hostname.to_string(),
@@ -249,7 +276,7 @@ impl TestHost {
 
 /// In-memory connection that wraps a HostSession directly.
 struct LocalConnection {
-    session: crate::session::HostSession,
+    session: HostSession,
     hello: Hello,
     message_buffer: VecDeque<Message>,
 }
