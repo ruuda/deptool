@@ -391,6 +391,70 @@ mod tests {
     }
 
     #[test]
+    fn reuse_mode_preserves_existing_checkout() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+
+        let apps = TempDir::new("apps");
+
+        // Fresh checkout of c1, then c2.
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
+        apply_app(
+            &t.store,
+            c2,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
+
+        use std::os::unix::fs::MetadataExt;
+        let c1_conf = apps
+            .path()
+            .join("nginx")
+            .join(oid_prefix(c1))
+            .join("nginx.conf");
+        let inode_before = fs::metadata(&c1_conf)?.ino();
+
+        // Reuse mode: repoints to c1 without re-checking out.
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Reuse,
+        )?;
+
+        let current = fs::read_link(apps.path().join("nginx/current"))?;
+        assert_eq!(current.to_str().expect("utf-8"), oid_prefix(c1));
+
+        // Same inode -- the file was not recreated.
+        assert_eq!(fs::metadata(&c1_conf)?.ino(), inode_before);
+
+        // Fresh mode re-checkouts even though the dir exists.
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
+        assert_ne!(fs::metadata(&c1_conf)?.ino(), inode_before);
+
+        Ok(())
+    }
+
+    #[test]
     fn apply_app_swaps_symlink_on_update() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
