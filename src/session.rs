@@ -79,16 +79,17 @@ pub struct HostSession {
     pub hostname: Hostname,
     apps_dir: PathBuf,
     on_post_apply: OnPostApply,
-    /// Acquired during lock, held for the session lifetime.
-    lock: Option<DeployLock>,
+    state: SessionState,
 }
 
-struct DeployLock {
-    /// The flock is released when the file is dropped, so we hold it
-    /// for the session lifetime to prevent concurrent deploys.
-    _file: File,
-    /// Who initiated the deploy (e.g. "deckard@spinner").
-    operator: String,
+enum SessionState {
+    Unlocked,
+    Locked {
+        /// The flock is released when the file is dropped.
+        _file: File,
+        /// Who initiated the deploy (e.g. "deckard@spinner").
+        operator: String,
+    },
 }
 
 /// State known during an apply, gathered from the lock and the request.
@@ -111,7 +112,7 @@ impl HostSession {
             hostname,
             apps_dir,
             on_post_apply,
-            lock: None,
+            state: SessionState::Unlocked,
         }
     }
 
@@ -197,10 +198,10 @@ impl HostSession {
                 actual_commit: actual_current_commit,
             });
         } else {
-            self.lock = Some(DeployLock {
+            self.state = SessionState::Locked {
                 _file: file,
                 operator,
-            });
+            };
             emit_message(Message::Locked);
         }
     }
@@ -242,22 +243,24 @@ impl HostSession {
             Request::Apply {
                 target_commit,
                 is_rollback_safe,
-            } => {
-                let ctx = ApplyContext {
-                    operator: self
-                        .lock
-                        .as_ref()
-                        .expect("lock is held during apply")
-                        .operator
-                        .clone(),
-                    current_commit: self.current_commit(),
-                    target_commit,
-                    is_rollback_safe,
-                };
-                if let Err(err) = self.handle_apply(&ctx, emit_message) {
-                    emit_message(Message::Error(err));
+            } => match &self.state {
+                SessionState::Locked { operator, .. } => {
+                    let ctx = ApplyContext {
+                        operator: operator.clone(),
+                        current_commit: self.current_commit(),
+                        target_commit,
+                        is_rollback_safe,
+                    };
+                    if let Err(err) = self.handle_apply(&ctx, emit_message) {
+                        emit_message(Message::Error(err));
+                    }
                 }
-            }
+                SessionState::Unlocked => {
+                    emit_message(Message::Error(ApplyError::Store(
+                        "Apply request without Lock".into(),
+                    )));
+                }
+            },
         }
     }
 
