@@ -1,10 +1,10 @@
 //! Deptool: a declarative deployment tool.
 //!
 //! Operator-side modules: [`plan`], [`deploy`], [`display`], [`setup`].
-//! Agent-side modules: [`session`], [`apply`].
+//! Agent-side modules: [`session`], [`checkout`].
 //! Shared: [`store`], [`protocol`], [`error`], [`prim`].
 
-pub mod apply;
+pub mod checkout;
 pub mod deploy;
 pub mod display;
 pub mod error;
