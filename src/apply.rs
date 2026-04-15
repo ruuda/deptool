@@ -339,24 +339,16 @@ mod tests {
 
     #[test]
     fn apply_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
-        let apps = TempDir::new("apps");
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
 
         let prefix = oid_prefix(c1);
-        let version_dir = apps.path().join("nginx").join(&prefix);
+        let version_dir = t.apps.path().join("nginx").join(&prefix);
         assert!(version_dir.join("nginx.conf").exists(), "checkout exists");
 
-        let current = apps.path().join("nginx/current");
+        let current = t.apps.path().join("nginx/current");
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), prefix);
 
@@ -365,25 +357,16 @@ mod tests {
 
     #[test]
     fn apply_app_replaces_existing_checkout() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-
-        let apps = TempDir::new("apps");
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         // Create a partial/corrupt checkout dir.
         let prefix = oid_prefix(c1);
-        let corrupt_dir = apps.path().join("nginx").join(&prefix);
+        let corrupt_dir = t.apps.path().join("nginx").join(&prefix);
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -392,63 +375,29 @@ mod tests {
 
     #[test]
     fn reuse_mode_preserves_existing_checkout() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
-
-        let apps = TempDir::new("apps");
-
-        // Fresh checkout of c1, then c2.
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
-        apply_app(
-            &t.store,
-            c2,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
-
         use std::os::unix::fs::MetadataExt;
-        let c1_conf = apps
-            .path()
-            .join("nginx")
-            .join(oid_prefix(c1))
-            .join("nginx.conf");
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+
+        let prefix = oid_prefix(c1);
+        let c1_conf = t.apps.path().join("nginx").join(prefix).join("nginx.conf");
         let inode_before = fs::metadata(&c1_conf)?.ino();
 
         // Reuse mode: repoints to c1 without re-checking out.
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Reuse,
-        )?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Reuse)?;
 
-        let current = fs::read_link(apps.path().join("nginx/current"))?;
+        let current = fs::read_link(t.apps.path().join("nginx/current"))?;
         assert_eq!(current.to_str().expect("utf-8"), oid_prefix(c1));
 
         // Same inode -- the file was not recreated.
         assert_eq!(fs::metadata(&c1_conf)?.ino(), inode_before);
 
         // Fresh mode re-checkouts even though the dir exists.
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
         assert_ne!(fs::metadata(&c1_conf)?.ino(), inode_before);
 
         Ok(())
@@ -456,60 +405,37 @@ mod tests {
 
     #[test]
     fn apply_app_swaps_symlink_on_update() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
-        let apps = TempDir::new("apps");
-        let current = apps.path().join("nginx/current");
+        let current = t.apps.path().join("nginx/current");
 
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(
-            &t.store,
-            c2,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
         // Both versions still exist on disk.
-        assert!(apps.path().join("nginx").join(oid_prefix(c1)).exists());
-        assert!(apps.path().join("nginx").join(oid_prefix(c2)).exists());
+        assert!(t.apps.path().join("nginx").join(oid_prefix(c1)).exists());
+        assert!(t.apps.path().join("nginx").join(oid_prefix(c2)).exists());
 
         Ok(())
     }
 
     #[test]
     fn remove_app_deletes_the_app_directory() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
-        let apps = TempDir::new("apps");
-        apply_app(
-            &t.store,
-            c1,
-            &"web1".into(),
-            "nginx",
-            apps.path(),
-            CheckoutMode::Fresh,
-        )?;
-        assert!(apps.path().join("nginx").exists());
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        assert!(t.apps.path().join("nginx").exists());
 
-        remove_app("nginx", apps.path())?;
-        assert!(!apps.path().join("nginx").exists());
+        remove_app("nginx", t.apps.path())?;
+        assert!(!t.apps.path().join("nginx").exists());
 
         Ok(())
     }
@@ -632,6 +558,23 @@ mod tests {
                 apps: TempDir::new("apps"),
                 units: TempDir::new("units"),
             }
+        }
+
+        fn checkout(
+            &self,
+            host: &str,
+            app: &str,
+            commit: Oid,
+            mode: CheckoutMode,
+        ) -> std::result::Result<(), ApplyError> {
+            apply_app(
+                &self.repo.store,
+                commit,
+                &host.into(),
+                app,
+                self.apps.path(),
+                mode,
+            )
         }
 
         fn apply(
