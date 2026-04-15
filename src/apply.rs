@@ -72,22 +72,24 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 }
 
 /// Compute per-app diffs and the aggregate system diff for a host deploy.
+///
+/// Either commit can be None to represent an empty host (no apps).
 pub fn diff_host(
     store: &Store,
     host: &Hostname,
     apps_dir: &Path,
     current_commit: Option<Oid>,
-    target_commit: Oid,
+    target_commit: Option<Oid>,
 ) -> Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>)> {
-    let current_apps = match current_commit {
-        None => BTreeMap::new(),
-        Some(oid) => {
-            let tree = store.get_commit_tree(oid)?;
-            store.get_host_apps(&tree, host)?
-        }
+    let get_apps = |oid| -> Result<BTreeMap<String, Oid>> {
+        let tree = store.get_commit_tree(oid)?;
+        Ok(store.get_host_apps(&tree, host)?)
     };
-    let target_tree = store.get_commit_tree(target_commit)?;
-    let target_apps = store.get_host_apps(&target_tree, host)?;
+    let current_apps = current_commit
+        .map(get_apps)
+        .transpose()?
+        .unwrap_or_default();
+    let target_apps = target_commit.map(get_apps).transpose()?.unwrap_or_default();
     let app_diffs = crate::plan::diff_apps(&current_apps, &target_apps);
 
     let mut system = SystemDiff::<PathBuf>::default();
@@ -105,7 +107,7 @@ pub fn diff_host(
 /// touch refs, systemd, or host-level symlinks.
 pub fn apply_checkout(
     store: &Store,
-    commit_oid: Oid,
+    commit_oid: Option<Oid>,
     app_diffs: &BTreeMap<String, AppDiff>,
     host: &Hostname,
     apps_dir: &Path,
@@ -113,7 +115,8 @@ pub fn apply_checkout(
     for (app, change) in app_diffs {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
-                apply_app(store, commit_oid, host, app, apps_dir)?;
+                let oid = commit_oid.expect("Add/Update requires a target commit");
+                apply_app(store, oid, host, app, apps_dir)?;
             }
             AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
@@ -524,9 +527,20 @@ mod tests {
             current: Option<git2::Oid>,
         ) -> Result<SystemDiff<PathBuf>> {
             let host = &"web1".into();
-            let (app_diffs, system) =
-                diff_host(&self.repo.store, host, self.apps.path(), current, commit)?;
-            apply_checkout(&self.repo.store, commit, &app_diffs, host, self.apps.path())?;
+            let (app_diffs, system) = diff_host(
+                &self.repo.store,
+                host,
+                self.apps.path(),
+                current,
+                Some(commit),
+            )?;
+            apply_checkout(
+                &self.repo.store,
+                Some(commit),
+                &app_diffs,
+                host,
+                self.apps.path(),
+            )?;
 
             // Reconcile here so tests that check unit symlinks still work.
             let desired = self

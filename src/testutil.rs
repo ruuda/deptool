@@ -148,6 +148,10 @@ pub struct TestHost {
 }
 
 impl TestHost {
+    pub fn apps_path(&self) -> &Path {
+        self.apps.path()
+    }
+
     /// Construct from pre-built parts.
     pub fn from_parts(session: HostSession, store: TempDir, apps: TempDir) -> Self {
         TestHost {

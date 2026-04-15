@@ -1,5 +1,6 @@
 //! Host-side session logic: handles requests and applies changes.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -272,7 +273,7 @@ impl HostSession {
             &self.hostname,
             &self.apps_dir,
             ctx.current_commit,
-            ctx.target_commit,
+            Some(ctx.target_commit),
         )?;
 
         assert_eq!(
@@ -291,7 +292,7 @@ impl HostSession {
 
         apply_checkout(
             &self.store,
-            ctx.target_commit,
+            Some(ctx.target_commit),
             &app_diffs,
             &self.hostname,
             &self.apps_dir,
@@ -341,16 +342,9 @@ impl HostSession {
         ctx: &ApplyContext,
         emit_message: &mut impl FnMut(Message),
     ) -> std::result::Result<(), ApplyError> {
-        // TODO: support rollback to empty (first deploy) by making
-        // apply_checkout accept an optional target commit.
-        let good_commit = match ctx.current_commit {
-            None => unimplemented!("rollback to empty host"),
-            Some(commit) => commit,
-        };
-
         emit_message(Message::RollingBack);
 
-        if let Err(rollback_error) = self.try_rollback(good_commit, ctx, emit_message) {
+        if let Err(rollback_error) = self.try_rollback(ctx, emit_message) {
             emit_message(Message::RollbackFailed {
                 apply_error: error,
                 rollback_error,
@@ -364,7 +358,6 @@ impl HostSession {
 
     fn try_rollback(
         &self,
-        good_commit: Oid,
         ctx: &ApplyContext,
         emit_message: &mut impl FnMut(Message),
     ) -> std::result::Result<(), ApplyError> {
@@ -373,7 +366,7 @@ impl HostSession {
             &self.hostname,
             &self.apps_dir,
             Some(ctx.target_commit),
-            good_commit,
+            ctx.current_commit,
         )?;
 
         // TODO: Instead of reusing `apply_checkout`, which deletes the checkout
@@ -384,24 +377,33 @@ impl HostSession {
         // operators.
         apply_checkout(
             &self.store,
-            good_commit,
+            ctx.current_commit,
             &diffs,
             &self.hostname,
             &self.apps_dir,
         )?;
 
-        let desired_units =
-            self.store
-                .desired_units(good_commit, &self.hostname, &self.apps_dir)?;
+        let desired_units = match ctx.current_commit {
+            Some(oid) => self
+                .store
+                .desired_units(oid, &self.hostname, &self.apps_dir)?,
+            None => BTreeMap::new(),
+        };
         (self.on_post_apply)(&desired_units, &system_diff, emit_message)?;
 
-        self.store.set_ref(
-            "refs/heads/target",
-            good_commit,
-            RefUpdate::Rollback {
-                operator: &ctx.operator,
-            },
-        )?;
+        match ctx.current_commit {
+            Some(good) => self.store.set_ref(
+                "refs/heads/target",
+                good,
+                RefUpdate::Rollback {
+                    operator: &ctx.operator,
+                },
+            )?,
+            // First deploy: no commit to point target at. The ref was set
+            // to the failed target_commit earlier; leaving it is fine because
+            // current was never advanced, so the divergence is visible.
+            None => {}
+        }
         Ok(())
     }
 }
@@ -481,6 +483,22 @@ mod tests {
         drop(lock_holder);
     }
 
+    /// Build an OnPostApply that returns results from a list, one per call.
+    fn post_apply_sequence(
+        results: Vec<std::result::Result<(), ApplyError>>,
+    ) -> super::OnPostApply {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        Box::new(move |_, _, _| {
+            let i = calls.fetch_add(1, Ordering::SeqCst);
+            results
+                .get(i)
+                .expect("unexpected extra post_apply call")
+                .clone()
+        })
+    }
+
     /// Create a TestHost with a custom post_apply callback.
     fn test_host(
         hostname: &str,
@@ -540,18 +558,8 @@ mod tests {
 
     #[test]
     fn rollback_on_post_apply_failure() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        // Fail on first post_apply call, succeed on second (rollback).
-        let calls = Arc::new(AtomicUsize::new(0));
-        let on_post_apply: super::OnPostApply = {
-            let calls = calls.clone();
-            Box::new(move |_, _, _| match calls.fetch_add(1, Ordering::SeqCst) {
-                0 => Err(ApplyError::SystemdActivationFailed),
-                _ => Ok(()),
-            })
-        };
+        let on_post_apply =
+            post_apply_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
 
         // Two commits: c1 is the good state, c2 is the broken deploy.
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
@@ -619,19 +627,40 @@ mod tests {
     }
 
     #[test]
-    fn failed_rollback_reports_rollback_error_and_logs_original() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+    fn rollback_to_empty_on_first_deploy_failure() {
+        let on_post_apply =
+            post_apply_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
 
-        // Forward deploy fails with one error, rollback fails with another.
-        let calls = Arc::new(AtomicUsize::new(0));
-        let on_post_apply: super::OnPostApply = {
-            let calls = calls.clone();
-            Box::new(move |_, _, _| match calls.fetch_add(1, Ordering::SeqCst) {
-                0 => Err(ApplyError::SystemdActivationFailed),
-                _ => Err(ApplyError::Store("rollback IO error".into())),
-            })
-        };
+        // First deploy: no current_commit.
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
+        lock_and_push(&mut host, c1);
+
+        let msgs = host.interact(Request::Apply {
+            target_commit: c1,
+            is_rollback_safe: true,
+        });
+
+        assert!(matches!(
+            msgs.as_slice(),
+            [Message::RollingBack, Message::RolledBack { .. }],
+        ));
+
+        // After rollback, apps dir should be clean (no app dirs left).
+        let apps: Vec<_> = std::fs::read_dir(host.apps_path())
+            .expect("apps dir exists")
+            .collect();
+        assert!(
+            apps.is_empty(),
+            "apps dir should be empty after rollback to empty: {apps:?}"
+        );
+    }
+
+    #[test]
+    fn failed_rollback_reports_rollback_error_and_logs_original() {
+        let on_post_apply = post_apply_sequence(vec![
+            Err(ApplyError::SystemdActivationFailed),
+            Err(ApplyError::Store("rollback IO error".into())),
+        ]);
 
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_post_apply);
         host.set_current(c1);
