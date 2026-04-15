@@ -426,7 +426,7 @@ mod tests {
         let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         host.set_current(oid);
         let responses = host.interact(Request::Lock {
-            expected_current_commit: Some(oid.into()),
+            expected_current_commit: Some(oid),
             operator: "deckard@spinner".into(),
         });
         assert_eq!(responses, vec![Message::Locked]);
@@ -489,8 +489,7 @@ mod tests {
     ) -> (TestHost, Oid) {
         let store_dir = TempDir::new("store");
         let apps = TempDir::new("apps");
-        let repo = git2::Repository::init_bare(store_dir.path()).expect("repo is created");
-        let store = Store { repo };
+        let store = Store::open_or_init(store_dir.path()).expect("store is created");
         let oid = commit_files(&store, files).expect("commit succeeds");
         let session = HostSession::new(
             store,
@@ -533,8 +532,10 @@ mod tests {
         assert_eq!(host.get_ref("refs/heads/current"), Some(c1));
 
         // Reflog records the operator.
-        let msg = host.last_reflog_message("refs/heads/target");
-        assert!(msg.contains("deckard@spinner"), "reflog: {msg}");
+        match host.reflog("refs/heads/target").as_slice() {
+            [entry] => assert_eq!(*entry, (c1, "deploy by deckard@spinner: set target".into())),
+            other => panic!("unexpected target reflog: {other:?}"),
+        }
     }
 
     #[test]
@@ -577,6 +578,17 @@ mod tests {
             msgs.as_slice(),
             [Message::RollingBack, Message::RolledBack { .. }],
         ));
+
+        assert_eq!(host.get_ref("refs/heads/current"), Some(c1));
+        let expected_reflog = [
+            // Target was set to c2 for the deploy, then reset to c1 by rollback.
+            (
+                c1,
+                "deploy by deckard@spinner: rollback after failed apply".to_string(),
+            ),
+            (c2, "deploy by deckard@spinner: set target".to_string()),
+        ];
+        assert_eq!(host.reflog("refs/heads/target"), expected_reflog);
     }
 
     #[test]
@@ -650,5 +662,9 @@ mod tests {
                 },
             ],
         ));
+
+        // Target still points to the failed commit; current was never advanced.
+        assert_eq!(host.get_ref("refs/heads/target"), Some(c2));
+        assert_eq!(host.get_ref("refs/heads/current"), Some(c1));
     }
 }

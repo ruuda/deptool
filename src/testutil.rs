@@ -202,20 +202,21 @@ impl TestHost {
             .map(|r| r.peel_to_commit().expect("ref points to a commit").id())
     }
 
-    /// The most recent reflog message for a ref.
-    pub fn last_reflog_message(&self, refname: &str) -> String {
+    /// Read the reflog as (new_oid, message) pairs, newest first.
+    pub fn reflog(&self, refname: &str) -> Vec<(Oid, String)> {
         let reflog = self
             .session
             .store
             .repo
             .reflog(refname)
             .expect("reflog exists");
-        reflog
-            .get(0)
-            .expect("reflog has an entry")
-            .message()
-            .expect("reflog message is valid utf-8")
-            .to_string()
+        (0..reflog.len())
+            .map(|i| {
+                let entry = reflog.get(i).expect("reflog entry exists");
+                let msg = entry.message().expect("valid utf-8").to_string();
+                (entry.id_new(), msg)
+            })
+            .collect()
     }
 
     /// Send a request and collect all response messages.
