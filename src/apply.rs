@@ -34,11 +34,16 @@ pub enum CheckoutMode {
     Reuse,
 }
 
-/// Check out an app and atomically swap the `current` symlink.
+/// Check out an app and update the `current` and `previous` symlinks.
 ///
 /// In `Fresh` mode, any existing version directory is removed and
 /// re-checked out (it may be from an interrupted deploy). In `Reuse`
-/// mode, an existing directory is trusted and only the symlink is swapped.
+/// mode, an existing directory is trusted and only the symlinks are updated.
+///
+/// `previous` always points to whatever `current` pointed to before this
+/// call. After a normal deploy this is the last successful version. After
+/// a rollback this is the *failed* version (useful for debugging), not the
+/// previous successful one.
 fn apply_app(
     store: &Store,
     commit_oid: Oid,
@@ -63,13 +68,18 @@ fn apply_app(
         store.checkout_app(commit_oid, host, app, &version_dir)?;
     }
 
-    // Atomic symlink swap: create temp symlink, rename over `current`.
-    let current = app_dir.join("current");
     let next = app_dir.join("next");
-    if next.exists() {
+    let current = app_dir.join("current");
+
+    if next.symlink_metadata().is_ok() {
         fs::remove_file(&next)?;
     }
     unix_fs::symlink(&prefix, &next)?;
+
+    // Rotate current → previous before overwriting current.
+    if current.symlink_metadata().is_ok() {
+        fs::rename(&current, app_dir.join("previous"))?;
+    }
     fs::rename(&next, &current)?;
 
     Ok(())
@@ -409,19 +419,16 @@ mod tests {
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
-        let current = t.apps.path().join("nginx/current");
+        let nginx = t.apps.path().join("nginx");
 
         t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
-        let target = fs::read_link(&current)?;
-        assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
+        assert_eq!(fs::read_link(nginx.join("current"))?, Path::new(&oid_prefix(c1)));
+        // No previous on first deploy.
+        assert!(!nginx.join("previous").exists());
 
         t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
-        let target = fs::read_link(&current)?;
-        assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
-
-        // Both versions still exist on disk.
-        assert!(t.apps.path().join("nginx").join(oid_prefix(c1)).exists());
-        assert!(t.apps.path().join("nginx").join(oid_prefix(c2)).exists());
+        assert_eq!(fs::read_link(nginx.join("current"))?, Path::new(&oid_prefix(c2)));
+        assert_eq!(fs::read_link(nginx.join("previous"))?, Path::new(&oid_prefix(c1)));
 
         Ok(())
     }
