@@ -94,6 +94,54 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Remove old version directories from all apps under `apps_dir`.
+///
+/// Keeps only the directories that `current` and `previous` point to.
+/// Errors during cleanup are silently ignored -- a leftover directory is
+/// harmless and will be cleaned up on the next successful deploy.
+pub fn gc_old_checkouts(apps_dir: &Path) {
+    let entries = match fs::read_dir(apps_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        if entry.path().is_dir() {
+            gc_app_dir(&entry.path());
+        }
+    }
+}
+
+fn gc_app_dir(app_dir: &Path) {
+    let keep: BTreeSet<PathBuf> = ["current", "previous"]
+        .iter()
+        .filter_map(|name| fs::read_link(app_dir.join(name)).ok())
+        .map(|target| app_dir.join(target))
+        .collect();
+
+    let entries = match fs::read_dir(app_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        // Skip symlinks (current, previous, next) and kept version dirs.
+        if path.is_symlink() || keep.contains(&path) {
+            continue;
+        }
+        if path.is_dir() {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// Compute per-app diffs and the aggregate system diff for a host deploy.
 ///
 /// Either commit can be None to represent an empty host (no apps).
@@ -422,13 +470,49 @@ mod tests {
         let nginx = t.apps.path().join("nginx");
 
         t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
-        assert_eq!(fs::read_link(nginx.join("current"))?, Path::new(&oid_prefix(c1)));
+        assert_eq!(
+            fs::read_link(nginx.join("current"))?,
+            Path::new(&oid_prefix(c1))
+        );
         // No previous on first deploy.
         assert!(!nginx.join("previous").exists());
 
         t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
-        assert_eq!(fs::read_link(nginx.join("current"))?, Path::new(&oid_prefix(c2)));
-        assert_eq!(fs::read_link(nginx.join("previous"))?, Path::new(&oid_prefix(c1)));
+        assert_eq!(
+            fs::read_link(nginx.join("current"))?,
+            Path::new(&oid_prefix(c2))
+        );
+        assert_eq!(
+            fs::read_link(nginx.join("previous"))?,
+            Path::new(&oid_prefix(c1))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn gc_removes_old_version_dirs() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/conf", b"v2")]);
+        let c3 = t.repo.commit(&[("web1/nginx/conf", b"v3")]);
+
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("web1", "nginx", c3, CheckoutMode::Fresh)?;
+
+        // All three version dirs exist before GC.
+        let nginx = t.apps.path().join("nginx");
+        assert!(nginx.join(oid_prefix(c1)).exists());
+        assert!(nginx.join(oid_prefix(c2)).exists());
+        assert!(nginx.join(oid_prefix(c3)).exists());
+
+        gc_old_checkouts(t.apps.path());
+
+        // current=c3, previous=c2, c1 is gone.
+        assert!(!nginx.join(oid_prefix(c1)).exists());
+        assert!(nginx.join(oid_prefix(c2)).exists());
+        assert!(nginx.join(oid_prefix(c3)).exists());
 
         Ok(())
     }

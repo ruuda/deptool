@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
-use crate::apply::{CheckoutMode, DesiredUnits, apply_checkout, diff_host};
+use crate::apply::{self, CheckoutMode, DesiredUnits, apply_checkout, diff_host};
 use crate::error::ApplyError;
 use crate::plan::SystemDiff;
 use crate::prim::Hostname;
@@ -321,6 +321,8 @@ impl HostSession {
                 operator: &ctx.operator,
             },
         )?;
+
+        apply::gc_old_checkouts(&self.apps_dir);
 
         emit_message(Message::ApplyComplete {
             commit: ctx.target_commit,
