@@ -9,7 +9,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
-use crate::apply::{DesiredUnits, apply_checkout, diff_host};
+use crate::apply::{CheckoutMode, DesiredUnits, apply_checkout, diff_host};
 use crate::error::ApplyError;
 use crate::plan::SystemDiff;
 use crate::prim::Hostname;
@@ -296,6 +296,7 @@ impl HostSession {
             &app_diffs,
             &self.hostname,
             &self.apps_dir,
+            CheckoutMode::Fresh,
         )?;
 
         let desired_units =
@@ -369,18 +370,13 @@ impl HostSession {
             ctx.current_commit,
         )?;
 
-        // TODO: Instead of reusing `apply_checkout`, which deletes the checkout
-        // dir and recreates it if it already exists (which it does in this
-        // case), we can just update the app's `current` symlinks. That's fewer
-        // operations so less likely to fail, and it preserves the older ctimes
-        // on the existing checkout which can be valuable debugging signals for
-        // operators.
         apply_checkout(
             &self.store,
             ctx.current_commit,
             &diffs,
             &self.hostname,
             &self.apps_dir,
+            CheckoutMode::Reuse,
         )?;
 
         let desired_units = match ctx.current_commit {

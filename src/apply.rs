@@ -26,29 +26,42 @@ fn oid_prefix(oid: Oid) -> String {
     buf
 }
 
+#[derive(Clone, Copy)]
+pub enum CheckoutMode {
+    /// Always re-checkout from the store (forward deploy).
+    Fresh,
+    /// Reuse existing version dir if present (rollback).
+    Reuse,
+}
+
 /// Check out an app and atomically swap the `current` symlink.
 ///
-/// The app tree is checked out into `<apps_dir>/<app>/<oid-prefix>/`.
-/// If that directory already exists (e.g. interrupted deploy), it is removed
-/// and re-checked out. Then `<apps_dir>/<app>/current` is atomically swapped
-/// to point to the new checkout.
-pub fn apply_app(
+/// In `Fresh` mode, any existing version directory is removed and
+/// re-checked out (it may be from an interrupted deploy). In `Reuse`
+/// mode, an existing directory is trusted and only the symlink is swapped.
+fn apply_app(
     store: &Store,
     commit_oid: Oid,
     host: &Hostname,
     app: &str,
     apps_dir: &Path,
+    mode: CheckoutMode,
 ) -> Result<()> {
     let prefix = oid_prefix(commit_oid);
     let app_dir = apps_dir.join(app);
     let version_dir = app_dir.join(&prefix);
 
-    // Remove and re-checkout to avoid trusting a potentially incomplete dir.
-    if version_dir.exists() {
-        fs::remove_dir_all(&version_dir)?;
+    let needs_checkout = match mode {
+        CheckoutMode::Fresh => true,
+        CheckoutMode::Reuse => !version_dir.exists(),
+    };
+    if needs_checkout {
+        if version_dir.exists() {
+            fs::remove_dir_all(&version_dir)?;
+        }
+        fs::create_dir_all(&version_dir)?;
+        store.checkout_app(commit_oid, host, app, &version_dir)?;
     }
-    fs::create_dir_all(&version_dir)?;
-    store.checkout_app(commit_oid, host, app, &version_dir)?;
 
     // Atomic symlink swap: create temp symlink, rename over `current`.
     let current = app_dir.join("current");
@@ -111,12 +124,13 @@ pub fn apply_checkout(
     app_diffs: &BTreeMap<String, AppDiff>,
     host: &Hostname,
     apps_dir: &Path,
+    mode: CheckoutMode,
 ) -> Result<()> {
     for (app, change) in app_diffs {
         match change {
             AppDiff::Add { .. } | AppDiff::Update { .. } => {
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                apply_app(store, oid, host, app, apps_dir)?;
+                apply_app(store, oid, host, app, apps_dir, mode)?;
             }
             AppDiff::Remove { .. } => {
                 remove_app(app, apps_dir)?;
@@ -329,7 +343,14 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
 
         let prefix = oid_prefix(c1);
         let version_dir = apps.path().join("nginx").join(&prefix);
@@ -355,7 +376,14 @@ mod tests {
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -371,11 +399,25 @@ mod tests {
         let apps = TempDir::new("apps");
         let current = apps.path().join("nginx/current");
 
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c1));
 
-        apply_app(&t.store, c2, &"web1".into(), "nginx", apps.path())?;
+        apply_app(
+            &t.store,
+            c2,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
         let target = fs::read_link(&current)?;
         assert_eq!(target.to_str().expect("target is utf-8"), oid_prefix(c2));
 
@@ -392,7 +434,14 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
 
         let apps = TempDir::new("apps");
-        apply_app(&t.store, c1, &"web1".into(), "nginx", apps.path())?;
+        apply_app(
+            &t.store,
+            c1,
+            &"web1".into(),
+            "nginx",
+            apps.path(),
+            CheckoutMode::Fresh,
+        )?;
         assert!(apps.path().join("nginx").exists());
 
         remove_app("nginx", apps.path())?;
@@ -540,6 +589,7 @@ mod tests {
                 &app_diffs,
                 host,
                 self.apps.path(),
+                CheckoutMode::Fresh,
             )?;
 
             // Reconcile here so tests that check unit symlinks still work.
