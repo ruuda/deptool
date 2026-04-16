@@ -1,4 +1,4 @@
-//! Host-side session logic: handles requests and applies changes.
+//! Agent-side session: handles requests from the driver and applies changes.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -74,7 +74,7 @@ type OnActivate = Box<
         + Sync,
 >;
 
-pub struct HostSession {
+pub struct AgentSession {
     pub store: Store,
     pub hostname: Hostname,
     apps_dir: PathBuf,
@@ -100,14 +100,14 @@ struct ApplyContext {
     is_rollback_safe: bool,
 }
 
-impl HostSession {
+impl AgentSession {
     pub fn new(
         store: Store,
         hostname: Hostname,
         apps_dir: PathBuf,
         on_activate: OnActivate,
     ) -> Self {
-        HostSession {
+        AgentSession {
             store,
             hostname,
             apps_dir,
@@ -120,7 +120,7 @@ impl HostSession {
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
         let on_activate: OnActivate = Box::new(|_, _, _| Ok(()));
-        HostSession::new(
+        AgentSession::new(
             Store { repo },
             hostname.into(),
             apps_dir.to_path_buf(),
@@ -508,7 +508,7 @@ mod tests {
         let apps = TempDir::new("apps");
         let store = Store::open_or_init(store_dir.path()).expect("store is created");
         let oid = commit_files(&store, files).expect("commit succeeds");
-        let session = HostSession::new(
+        let session = AgentSession::new(
             store,
             hostname.into(),
             apps.path().to_path_buf(),

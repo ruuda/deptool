@@ -1,4 +1,4 @@
-//! Request and response types for the host session protocol.
+//! Request and response types for the driver-agent protocol.
 
 use git2::Oid;
 use serde::{Deserialize, Serialize};

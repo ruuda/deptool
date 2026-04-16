@@ -238,7 +238,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-use session::AgentConfig;
+use agent::AgentConfig;
 
 fn activate(
     desired_units: &plan::DesiredUnits,
@@ -328,10 +328,10 @@ fn systemctl_ok(args: &[&str]) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-fn make_host_session(store: Store, config: &AgentConfig) -> session::HostSession {
+fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
     let apps_dir = config.apps_dir.clone();
     let unit_dir = config.unit_dir.clone();
-    session::HostSession::new(
+    agent::AgentSession::new(
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
@@ -357,7 +357,7 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
 
             let store = Store::open_or_init(&store)?;
             let config = AgentConfig::from_env();
-            let mut session = make_host_session(store, &config);
+            let mut session = make_agent_session(store, &config);
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
 

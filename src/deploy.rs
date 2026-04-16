@@ -1,4 +1,4 @@
-//! Execute a deployment plan by driving remote host sessions.
+//! Execute a deployment plan by driving remote agents.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -144,10 +144,7 @@ pub trait Connection: Send {
     fn close(&mut self);
 }
 
-// TODO: Maybe we should rename "session" to "agent" after all. Then this can be
-// AgentSession or something, the thing on the controller/initiator/operator
-// side that enables us to talk to the agent.
-// TODO: This struct needs a docstring that documents its purpose.
+/// Driver-side handle for talking to a remote agent over SSH.
 pub struct RemoteSession {
     // Drop order is declaration order: close stdin first so the child can
     // finish, then close our reader, then reap the child process.
@@ -827,7 +824,7 @@ mod tests {
         let lock_path = target.session.store.get_lock_file_path();
         let lock_holder = std::fs::File::create(&lock_path).expect("lock file is created");
         assert!(
-            crate::session::try_flock_exclusive(&lock_holder).expect("flock succeeds"),
+            crate::agent::try_flock_exclusive(&lock_holder).expect("flock succeeds"),
             "lock is acquired",
         );
 

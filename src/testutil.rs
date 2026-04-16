@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use git2::{Oid, Repository};
 
+use crate::agent::AgentSession;
 use crate::deploy::Connection;
 use crate::error::Result;
 use crate::protocol::{self, Hello, Message, Request};
-use crate::session::HostSession;
 use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -139,10 +139,10 @@ impl TestRepo {
 
 /// A host-side test environment: a bare repo with an apps directory.
 ///
-/// Wraps a `HostSession` and provides helpers for sending requests and
+/// Wraps a `AgentSession` and provides helpers for sending requests and
 /// collecting responses.
 pub struct TestHost {
-    pub session: HostSession,
+    pub session: AgentSession,
     _store: TempDir,
     apps: TempDir,
 }
@@ -153,7 +153,7 @@ impl TestHost {
     }
 
     /// Construct from pre-built parts.
-    pub fn from_parts(session: HostSession, store: TempDir, apps: TempDir) -> Self {
+    pub fn from_parts(session: AgentSession, store: TempDir, apps: TempDir) -> Self {
         TestHost {
             session,
             _store: store,
@@ -166,7 +166,7 @@ impl TestHost {
         let store = TempDir::new("store");
         let apps = TempDir::new("apps");
         let s = Store::open_or_init(store.path()).expect("store is created");
-        let session = HostSession::new_test(s.repo, hostname, apps.path());
+        let session = AgentSession::new_test(s.repo, hostname, apps.path());
         TestHost {
             session,
             _store: store,
@@ -261,7 +261,7 @@ impl TestHost {
         apps_path: &std::path::Path,
     ) -> Box<dyn Connection> {
         let repo = Repository::open(store_path).expect("repo is opened");
-        let session = HostSession::new_test(repo, hostname, apps_path);
+        let session = AgentSession::new_test(repo, hostname, apps_path);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             hostname: hostname.to_string(),
@@ -274,9 +274,9 @@ impl TestHost {
     }
 }
 
-/// In-memory connection that wraps a HostSession directly.
+/// In-memory connection that wraps a AgentSession directly.
 struct LocalConnection {
-    session: HostSession,
+    session: AgentSession,
     hello: Hello,
     message_buffer: VecDeque<Message>,
 }
