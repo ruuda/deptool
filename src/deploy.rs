@@ -468,7 +468,8 @@ fn push_and_apply_host(
                 return Ok(());
             }
             Message::SystemdUnitStatus { output } => {
-                progress.log_message(host, output.trim_end());
+                let filtered = filter_systemd_status(output.trim_end());
+                progress.log_message(host, &filtered);
             }
             Message::Error(apply_err) => {
                 return Err(HostError::Apply(apply_err.clone()));
@@ -626,6 +627,38 @@ pub fn run_deploy(
             "encountered errors on {n} host(s)"
         ))),
     }
+}
+
+/// Strip noise from `systemctl status` output.
+///
+/// The full output includes CGroup trees, memory stats, CPU time, etc.
+/// that bury the signal (is it running? why did it fail?) in noise. We
+/// keep only the header, Loaded, Active, Process, Main PID, and journal
+/// log lines.
+fn filter_systemd_status(output: &str) -> String {
+    const DROP_PREFIXES: &[&str] = &[
+        " Invocation:",
+        "TriggeredBy:",
+        "   Duration:",
+        "      Tasks:",
+        "     Memory:",
+        "   Mem peak:",
+        "        CPU:",
+        "     CGroup:",
+        "    Drop-In:",
+    ];
+
+    output
+        .lines()
+        .filter(|line| {
+            // Drop CGroup tree and Drop-In continuation lines.
+            if line.contains('├') || line.contains('└') {
+                return false;
+            }
+            !DROP_PREFIXES.iter().any(|p| line.starts_with(p))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]
@@ -945,5 +978,62 @@ mod tests {
 
         assert!(result.is_err(), "push should fail on bad pack");
         Ok(())
+    }
+
+    #[test]
+    fn filter_systemd_status_failed_unit() {
+        let input = "\
+× nginx.service - The NGINX HTTP and reverse proxy server
+     Loaded: loaded (/etc/systemd/system/nginx.service; enabled; preset: disabled)
+     Active: failed (Result: exit-code) since Thu 2026-04-16 18:56:59 UTC; 324ms ago
+   Duration: 20h 53min 33.037s
+ Invocation: 25802412ac844cd0b033e563b28a5881
+    Process: 77498 ExecStartPre=/usr/bin/nginx -T (code=exited, status=1/FAILURE)
+   Mem peak: 10.2M
+        CPU: 31ms
+
+Apr 16 18:56:59 host systemd[1]: Starting nginx.service...
+Apr 16 18:56:59 host nginx[77498]: [emerg] unknown directive \"intentional_error\"
+Apr 16 18:56:59 host systemd[1]: Failed to start nginx.service.";
+
+        assert_eq!(
+            filter_systemd_status(input),
+            "\
+× nginx.service - The NGINX HTTP and reverse proxy server
+     Loaded: loaded (/etc/systemd/system/nginx.service; enabled; preset: disabled)
+     Active: failed (Result: exit-code) since Thu 2026-04-16 18:56:59 UTC; 324ms ago
+    Process: 77498 ExecStartPre=/usr/bin/nginx -T (code=exited, status=1/FAILURE)
+
+Apr 16 18:56:59 host systemd[1]: Starting nginx.service...
+Apr 16 18:56:59 host nginx[77498]: [emerg] unknown directive \"intentional_error\"
+Apr 16 18:56:59 host systemd[1]: Failed to start nginx.service.",
+        );
+    }
+
+    #[test]
+    fn filter_systemd_status_running_unit() {
+        let input = "\
+● nginx.service - The NGINX HTTP and reverse proxy server
+     Loaded: loaded (/etc/systemd/system/nginx.service; enabled; preset: disabled)
+     Active: active (running) since Thu 2026-04-16 18:57:00 UTC; 313ms ago
+ Invocation: e88314b8d6584b7a93d0aed6522e5af3
+    Process: 77587 ExecStartPre=/usr/bin/nginx -T (code=exited, status=0/SUCCESS)
+   Main PID: 77595 (nginx)
+      Tasks: 2 (limit: 2912)
+     Memory: 11.1M (peak: 11.8M)
+        CPU: 73ms
+     CGroup: /system.slice/nginx.service
+             ├─77595 \"nginx: master process /usr/bin/nginx\"
+             └─77601 \"nginx: worker process\"";
+
+        assert_eq!(
+            filter_systemd_status(input),
+            "\
+● nginx.service - The NGINX HTTP and reverse proxy server
+     Loaded: loaded (/etc/systemd/system/nginx.service; enabled; preset: disabled)
+     Active: active (running) since Thu 2026-04-16 18:57:00 UTC; 313ms ago
+    Process: 77587 ExecStartPre=/usr/bin/nginx -T (code=exited, status=0/SUCCESS)
+   Main PID: 77595 (nginx)",
+        );
     }
 }
