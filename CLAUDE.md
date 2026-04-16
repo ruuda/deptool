@@ -59,6 +59,15 @@ Specific checks:
  - Is it obvious to a reader with little context? Can it be made more obvious?
  - Did I preserve all why-comments from the original code? Grep for them before and after rewrites.
 
+Post-generation checklist (run after writing code, before presenting):
+ - For each doc comment: does it explain *why* this exists, not just *what* it does? Would a reader learn something they can't see from the signature?
+ - For each inline comment: does the next line of code already say the same thing? If so, delete the comment.
+ - For each error path: what does the operator/user actually see? Trace it to the display.
+ - For each new function: are the arguments in the right order (stable before varying, old before new)?
+ - For each `replace_all` edit: will it corrupt import lines?
+ - For each deleted test: where is that behavior tested now?
+ - For each match on a mode/flag: does the test verify *both* branches produce distinct behavior?
+
 ## Working with Git
 
  - Git is available.
