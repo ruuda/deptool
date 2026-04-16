@@ -66,6 +66,20 @@ deploy the newer config. If it's not an ancestor, something is wrong (possibly
 the operator is running from an outdated store), and deployment against this
 machine should abort.
 
+## Building
+
+Debug builds use the default host target:
+
+    cargo build
+
+Static release binary (for deployment to target hosts):
+
+    make release
+
+This requires the `x86_64-unknown-linux-musl` target (`rustup target add
+x86_64-unknown-linux-musl`). All C dependencies (libgit2, zlib) are vendored
+and built from source.
+
 ## Future work
 
  - Error handling still feels clunky and verbose in code, and the messages are
