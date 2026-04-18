@@ -10,11 +10,17 @@ edition = "2024"
 hmac-sha256 = { version = "1", features = ["opt_size"] }
 bpaf = { version = "0.9", features = ["derive"] }
 base64 = "0.22"
-git2 = { version = "0.20", default-features = false }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 parking_lot = "0.12"
 serde_json = "1"
+
+# In `git2 0.20.0`, the `url` dependency pulls in many transitive dependencies,
+# which were more than half of the dependencies of Deptool. In the revision
+# pinned here, that dependency was made optional. [1]. We can switch back to
+# crates.io when there is a release.
+# [1]: https://github.com/rust-lang/git2-rs/pull/1168
+git2 = { default-features = false, git = "https://github.com/rust-lang/git2-rs.git", revision = "3db61ebe85bb26be3f694b63081b5bcefa3edef1" }
 
 [profile.release]
 # In release, optimize for size. We need to install the binary on the target
