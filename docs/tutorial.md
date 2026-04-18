@@ -230,7 +230,7 @@ Let’s commit and deploy it:
 
 The plan tells us a few things:
 
- * We’re going to modify the app `caddy` on host `webserver`.
+ * We’re going to deploy to host `webserver`, where we modify the `caddy` app.
  * The files `manifest.json` and `systemd/caddy.service` are going to be
    newly created inside the app directory.
  * A symlink to `caddy.service` is going to be placed in `/etc/systemd/system`.
@@ -256,3 +256,161 @@ details of rollback later, for now this is not important. Press `y` to accept.
 When an app contains enabled systemd units, Deptool prints the status of the
 unit, so you can see that it activated correctly — or when it didn’t, to help
 you diagnose why it failed.
+
+## Restarting systemd units
+
+Let’s update our Caddy configuration again, and deploy:
+
+    $ vim deptool_config/webserver/caddy/Caddyfile
+    $ deptool commit deptool_config
+    45946822c7835b66bd8bfaac4722ae60364575f2
+
+    $ deptool deploy
+    webserver
+      ~ caddy
+          ~ Caddyfile
+          restart caddy.service
+
+    Auto-rollback if deploy fails.
+    Apply to 1 host? [y/N/d]
+
+This time the plan tells us:
+
+ * The `Caddyfile` in the `caddy` app will change. Press `d` to view the diff.
+ * The systemd unit `caddy.service` will be restarted.
+ * Rollback is available.
+
+The change to Caddyfile is intentional, it’s the change we are trying to deploy.
+When a deployment changes an app in any way, Deptool also restarts all of the
+systemd units that are listed as enabled it the app’s manifest.[^5] Rollback
+means that if `caddy.service` fails to start (for example, because we introduced
+a syntax error in the Caddyfile), then Deptool will point the `current` symlink
+back at the previous revision again, and restart systemd units once more so they
+pick up the previous known-good configuration. This ensures that we don’t leave
+`caddy.service` in a failed state, with no webserver running. Let’s accept:
+
+    Apply to 1 host? [y/N/d] y
+
+    webserver:
+    ● caddy.service - Caddy webserver
+         Loaded: loaded (/etc/systemd/system/caddy.service; enabled; preset: disabled)
+         Active: active (running) since Sat 2026-04-18 21:17:48 UTC; 308ms ago
+       Main PID: 1174 (caddy)
+
+    Apr 18 21:17:48 webserver caddy[1174]: {"level":"info","ts":1776547068.4650128,"msg":"serving initial configuration"}
+    Apr 18 21:17:48 webserver caddy[1174]: {"level":"info","ts":1776547068.468667,"logger":"tls","msg":"storage cleaning happened too recently; skipping for now","storage":"FileStorage:./caddy","instance":"25b86653-5307-42de-a4a7-de691f59428a","try_again":1776633468.4686666,"try_again_in":86399.999999798}
+    Apr 18 21:17:48 webserver caddy[1174]: {"level":"info","ts":1776547068.468865,"logger":"tls","msg":"finished cleaning storage units"}
+    Apr 18 21:17:48 webserver caddy[1174]: ...
+
+      webserver: done
+
+[^5]: While many applications can reload configuration, Deptool opts to keep
+      things simple, so it always restarts all affected systemd units.
+
+## Creating symlinks
+
+When we control the configuration files and we write the systemd units, we can
+put all the files we need in `/var/lib/deptool/apps`. Sometimes though, we need
+manage files at prescribed locations in the filesystem, and we don’t get to
+choose the path. For example, we may need to add files in `/etc/sudoers.d` or
+`/etc/tmpfiles.d`. To handle this, Deptool can create symlinks at arbitrary
+filesystem locations, that point to files in `/var/lib/deptool`. Let’s add a
+tmpfiles entry.
+
+    $ echo 'd /var/lib/caddy 0700 caddy caddy - -' > deptool_config/webserver/caddy/tmpfiles.conf
+
+Next we update `manifest.json` to include a `symlinks` section:
+
+```yaml
+{
+  "systemd": {
+    "units_enabled": ["caddy.service"]
+  },
+  "symlinks": {
+    "/etc/tmpfiles.d/caddy.conf": "tmpfiles.conf"
+  }
+}
+```
+
+Commit and deploy this:
+
+    $ deptool commit deptool_config
+    1f85ab59c9325a012d2633bbc2b26c8321836352
+
+    $ deptool deploy
+    webserver (rollback unavailable)
+      ~ caddy
+          ~ manifest.json
+          + tmpfiles.conf
+          restart caddy.service
+          link /etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
+
+    Rollback unavailable for some hosts.
+    Apply to 1 host? [y/N/d]
+
+This time the plan includes the new file `tmpfiles.conf`, and the new symlink
+at `/etc/tmpfiles.d/caddy.conf`. This symlink points through `current`:
+
+    root@webserver $ readlink /etc/tmpfiles.d/caddy.conf
+    /var/lib/deptool/apps/caddy/current/tmpfiles.conf
+
+This means that if we make another change, the symlink will not change, only the
+target file. For example, let’s change the group owner from `caddy` to `www`:
+
+    $ echo 'd /var/lib/caddy 0770 caddy www - -' > deptool_config/webserver/caddy/tmpfiles.conf
+
+    $ deptool commit deptool_config
+    eea7260abd64ae5e02938800f0e7995b59fa0e2d
+
+    $ deptool deploy
+    webserver
+      ~ caddy
+          ~ tmpfiles.conf
+          restart caddy.service
+
+    Auto-rollback if deploy fails.
+    Apply to 1 host? [y/N/d]
+
+This time the plan does not mention the `/etc/tmpfiles.d/caddy.conf`, because
+it does not need to change. Press `d` to double-check the diff, then `y` to
+accept.
+
+If we remove this symlink again from the manifest (in fact, we can remove the
+entire `symlinks` section), Deptool will remove the symlink from the host:
+
+    $ rm deptool_config/webserver/caddy/tmpfiles.conf
+    $ vim deptool_config/webserver/caddy/manifest.json
+    $ deptool commit deptool_config
+    20f6bd1dc32ba0e85725c08150ff88a7463df508
+
+    $ deptool deploy
+    webserver
+      ~ caddy
+          ~ manifest.json
+          - tmpfiles.conf
+          restart caddy.service
+          unlink /etc/tmpfiles.d/caddy.conf
+
+    Auto-rollback if deploy fails.
+    Apply to 1 host? [y/N/d]
+
+This time the plan says:
+
+ * There was a change to the manifest.
+ * The file `tmpfiles.conf` will be removed.
+ * The unit `caddy.service` will be restarted, since there is a change to the
+   app and Deptool can’t tell that a restart is _not_ needed.
+ * The symlink `/etc/tmpfiles.d/caddy.conf` will be removed.
+
+Because Deptool knows exactly which files it manages and what is currently
+deployed, it can clean up after itself and delete symlinks that are no longer
+included in a new revision of the configuration. As an additional safeguard,
+it will only remove symlinks that point into `/var/lib/deptool`.
+
+## Conclusion
+
+In this tutorial we deployed configuration for a single app on a single host.
+The cluster configuration resides in a directory tree, which we can commit to
+the store with `deptool commit`. Then `deptool deploy` applies the new
+configuration against the cluster. To add more hosts and more apps, simply
+create more directories in the configuration directory.
