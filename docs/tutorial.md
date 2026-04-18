@@ -62,9 +62,9 @@ Let’s deploy this to our 1-host cluster!
     webserver
       + caddy
           + Caddyfile
-    
+
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d] 
+    Apply to 1 host? [y/N/d]
 
 Before even connecting to a host, Deptool shows us the _plan_. In this case, the
 plan is to add a new app `caddy` on host `webserver`, which contains a new file
@@ -80,7 +80,7 @@ bad, this should all happen within a second:
 
 
     Apply to 1 host? [y/N/d] y
-    
+
       webserver: done      
 
 This created a directory `/var/lib/deptool` on the target host:
@@ -115,3 +115,144 @@ This created a directory `/var/lib/deptool` on the target host:
 
 That’s our first deployment completed! The Caddyfile is now managed by Deptool,
 and we can find the latest version at `/var/lib/deptool/apps/caddy/current/Caddyfile`.
+
+## Making changes
+
+Back on the operator machine, let’s make a change to our Caddyfile and commit
+again:
+
+    $ vim deptool_config/webserver/caddy/Caddyfile
+    $ deptool commit deptool_config
+    e87dcde346e2056455f10da95da9ca7bd59880ec
+
+When we deploy this, Deptool indicates that the file `Caddyfile`, part of app
+`caddy` on host `webserver`, has changes:
+
+    $ deptool deploy
+    webserver
+      ~ caddy
+          ~ Caddyfile
+    
+    Auto-rollback if deploy fails.
+    Apply to 1 host? [y/N/d] 
+
+Press `d` to diff the contents of Caddyfile, `y` to deploy.
+
+    Apply to 1 host? [y/N/d] y
+    
+      webserver: done
+
+On the target host, the `caddy` directory has changed:
+
+    root@webserver ~ $ tree /var/lib/deptool/apps/caddy
+    /var/lib/deptool/apps/caddy
+    ├── 8bb051121b
+    │   └── Caddyfile
+    ├── e87dcde346
+    │   └── Caddyfile
+    ├── current -> e87dcde346
+    └── previous -> 8bb051121b
+
+The `current` symlink now points to directory `e87…`, the new commit that we
+just created. The previous version is still around for debugging purposes.
+
+## Adding a systemd unit
+
+So far we’ve been managing files in `/var/lib/deptool/apps`. That’s nice and
+self-contained — just dropping files there can’t do damage to the rest of your
+system — but it’s also fairly limited. We still need to somehow tell Caddy to
+load its configuration from `/var/lib/deptool/apps/caddy/current`, and how do
+we manage _that_ configuration?
+
+One answer is to run Caddy under systemd, with a unit much like this one:
+
+```systemd
+[Unit]
+Description=Caddy webserver
+After=network-online.target nss-lookup.target
+
+[Service]
+ExecStart=/bin/caddy run --config /var/lib/deptool/apps/caddy/current/Caddyfile
+# Other configuration keys omitted here for brevity.
+
+[Install]
+WantedBy=multi-user.target
+```
+
+We can manage this systemd unit with Deptool as well. If we place it in the
+`systemd` subdirectory of the `caddy` app, then Deptool will automatically make
+this unit available by creating a symlink to it in `/etc/systemd/system`. That
+means systemd knows about this unit, but it doesn’t yet _activate_ it.[^3] We
+want Caddy to run, so we also _enable_ the unit by adding the following
+`manifest.json`[^4] to the app:
+
+<!-- Pygments highlights `yaml` but not `json` for some reason! -->
+```yaml
+{
+  "systemd": {
+    "units_enabled": ["caddy.service"]
+  }
+}
+```
+
+[^3]: Deptool does not automatically activate all available units, because some
+      units are not meant to be activated directly. For example, a unit may be
+      activated through socket activation instead, or by a timer.
+
+[^4]: The manifest is a json file, and not a yaml or toml file, because in
+      larger cluster configurations it’s supposed to be _generated_, not written
+      by hand.
+
+Our `deptool_config` directory now looks like this:
+
+    webserver
+    └── caddy
+        ├── Caddyfile
+        ├── manifest.json
+        └── systemd
+            └── caddy.service
+
+Let’s commit and deploy it:
+
+    $ deptool commit deptool_config
+    d8febcd2b3f5559e20990ff65423276b91974a5f
+
+    $ deptool deploy
+    webserver (rollback unavailable)
+      ~ caddy
+          + manifest.json
+          + systemd/caddy.service
+          link caddy.service
+          enable caddy.service
+
+    Rollback unavailable for some hosts.
+    Apply to 1 host? [y/N/d]
+
+The plan tells us a few things:
+
+ * We’re going to modify the app `caddy` on host `webserver`.
+ * The files `manifest.json` and `systemd/caddy.service` are going to be
+   newly created inside the app directory.
+ * A symlink to `caddy.service` is going to be placed in `/etc/systemd/system`.
+ * The unit `caddy.service` is going to be enabled.
+
+Furthermore, Deptool warns that rollback is not available. We’ll dive into the
+details of rollback later, for now this is not important. Press `y` to accept.
+
+    Apply to 1 host? [y/N/d] y
+
+    webserver:
+    ● caddy.service - Caddy webserver
+         Loaded: loaded (/etc/systemd/system/caddy.service; enabled; preset: disabled)
+         Active: active (running) since Sat 2026-04-18 20:51:02 UTC; 307ms ago
+       Main PID: 1040 (caddy)
+
+    Apr 18 20:51:02 webserver caddy[1040]: {"level":"info","ts":1776545462.829505,"msg":"serving initial configuration"}
+    Apr 18 20:51:02 webserver caddy[1040]: {"level":"info","ts":1776545462.8388124,"logger":"tls","msg":"cleaning storage unit","storage":"FileStorage:./caddy"}
+    Apr 18 20:51:02 webserver caddy[1040]: ...
+
+      webserver: done
+
+When an app contains enabled systemd units, Deptool prints the status of the
+unit, so you can see that it activated correctly — or when it didn’t, to help
+you diagnose why it failed.
