@@ -302,7 +302,7 @@ fn activate(
     // Force color: systemctl won't color because stdout is a pipe,
     // but the output is forwarded to the operator's terminal.
     let output = match std::process::Command::new("systemctl")
-        .arg("status")
+        .args(&["status", "--lines=5"])
         .args(&touched)
         .env("SYSTEMD_COLORS", "true")
         .output()
