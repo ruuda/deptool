@@ -24,9 +24,12 @@ data.
 
 When the plan is approved, we lock all hosts before making any changes.
 
- * For each host in the plan (in asciibetical order, to prevent deadlock), open
-   an agent session over SSH and send a `Lock` request. The lock includes the
-   commit we expect the host's `current` ref to point to.
+ * For each host in the plan, open an agent session over SSH and send a `Lock`
+   request in parallel. The lock includes the commit we expect the host's
+   `current` ref to point to. Deadlock is not possible because agents never wait
+   to take a lock. If we don’t acquire all locks, then the deployment aborts and
+   all locks are released. This means that two operators doing a concurrent
+   deploy can create a live-lock, but never a deadlock.
  * The agent acquires an exclusive file lock (`flock`) on a lockfile in the
    store. Then it compares its `current` ref to what the operator expected.
  * If it matches: respond `Locked`. The agent holds the flock for the lifetime
