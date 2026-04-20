@@ -57,9 +57,10 @@ directories define _apps_. For example:
             └── nginx.service
 
 Per host, Deptool materializes the app directories in `/var/lib/deptool/apps`.
-It then manages systemd units, and it can create symlinks into `/var/lib/deptool`
-on the filesystem as defined in the manifest, `manifest.json`. See also the
-[directory layout](directory_layout.md) and [manifests](manifests.md) reference.
+It then manages systemd units, and it can create symlinks on the filesystem that
+point into `/var/lib/deptool`, as defined in the manifest, `manifest.json`. See
+also the [directory layout](directory_layout.md) and [manifests](manifests.md)
+reference.
 
 On the operator machine, Deptool keeps a remote-tracking ref per target host.
 This way it knows what is deployed on that host, and whether a new commit

@@ -71,7 +71,7 @@ plan is to add a new app `caddy` on host `webserver`, which contains a new file
 `Caddyfile`. Press `d` to see the full diff, and then `y` to deploy.
 
 Because we haven’t connected to this host before, the first thing Deptool will
-do is copy the `deptool` binary to the host into `/var/lib/webserver/bin`. Then
+do is copy the `deptool` binary to the host into `/var/lib/deptool/bin`. Then
 it executes `deptool agent` on the remote host over an <abbr>SSH</abbr> connection.
 The agent is short-lived: it runs only during our deployment. It provides a
 channel through which `deptool deploy` can send data and commands to the host
@@ -81,7 +81,7 @@ bad, this should all happen within a second:
 
     Apply to 1 host? [y/N/d] y
 
-      webserver: done      
+      webserver: done
 
 This created a directory `/var/lib/deptool` on the target host:
 
@@ -282,7 +282,7 @@ This time the plan tells us:
 
 The change to Caddyfile is intentional, it’s the change we are trying to deploy.
 When a deployment changes an app in any way, Deptool also restarts all of the
-systemd units that are listed as enabled it the app’s manifest.[^5] Rollback
+systemd units that are listed as enabled in the app’s manifest.[^5] Rollback
 means that if `caddy.service` fails to start (for example, because we introduced
 a syntax error in the Caddyfile), then Deptool will point the `current` symlink
 back at the previous revision again, and restart systemd units once more so they
@@ -311,7 +311,7 @@ pick up the previous known-good configuration. This ensures that we don’t leav
 
 When we control the configuration files and we write the systemd units, we can
 put all the files we need in `/var/lib/deptool/apps`. Sometimes though, we need
-manage files at prescribed locations in the filesystem, and we don’t get to
+to manage files at prescribed locations in the filesystem, and we don’t get to
 choose the path. For example, we may need to add files in `/etc/sudoers.d` or
 `/etc/tmpfiles.d`. To handle this, Deptool can create symlinks at arbitrary
 filesystem locations, that point to files in `/var/lib/deptool`. Let’s add a
