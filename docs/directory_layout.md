@@ -1,12 +1,17 @@
 # Directory layout
 
-Deptool expects cluster configuration in a two-tier directory structure.
+Deptool deploys _apps_: collections of related configuration files. Usually they
+are related to a single application such as Postgres or Prometheus, but in
+principle a Deptool app is just a collection of files deployed atomically. Apps
+get deployed to _hosts_, and the collection of hosts is called a _cluster_.
 
- * Top-level directories are hosts.
- * Second-level directories are apps.
+Cluster configuration is defined by a _config tree_. A config tree is a two-tier
+directory structure that defines the hosts, and apps per host. You materialize
+this config tree on your filesystem, then commit it to the _store_ with `deptool
+commit`, and finally `deptool deploy` applies it to the cluster.
 
-For example, the configuration below defines two _hosts_, `dns01` and `web01`, 
-and each host contains one _app_ — `nsd` and `nginx` respectively.
+The example config tree below defines two hosts, `dns01` and `web01`, and each
+host contains one app — `nsd` and `nginx` respectively.
 
     dns01
     └── nsd
@@ -23,24 +28,32 @@ and each host contains one _app_ — `nsd` and `nginx` respectively.
         └── systemd
             └── nginx.service
 
-## Deployment
+## Hosts
 
-For a given app, the full directory tree below it gets deployed to
+The name of a host in the config tree must be a hostname that is reachable
+through `ssh <host>`. Either because it has a <abbr>DNS</abbr> name, or because
+the host is defined in your `~/.ssh/config`. As an additional safeguard,
+Deptool verifies that the contents of `/etc/hostname` on the target host match
+the hostname used to initiate the connection.
+
+## Apps
+
+The full directory tree of an app gets deployed to
 `/var/lib/deptool/apps/<appname>/current` on the target host.
-
-## Special paths
-
-Within an app directory, the following paths have special meaning. Their special
-meaning does not prevent them from being deployed to the target host into the
-app directory.
+Within an app directory, the paths below have special meaning. Their special
+meaning does not prevent them from being deployed to the target host.
 
 ### manifest.json
 
-The app’s _manifest_ specifies additional properties beyond the files to deploy.
-See the [manifests chapter](manifests.md) for the full format.
+Besides putting files on hosts, Deptool can manage daemon and runtime state,
+like enabling and starting systemd units. This is specified in an optional
+_manifest_. See the [manifests reference](manifests.md) for the full format.
 
 ### systemd/
 
 This directory contains _available_ systemd units. For every file in this
-directory, Deptool will create a symlink in `/etc/systemd/system`. Units need
-to be enabled separately, see [`units_enabled`](manifests.md#systemdunits_enabled).
+directory, Deptool will create a symlink in `/etc/systemd/system` that points to
+it. The symlink points through the app’s `current` symlink. While placing units
+in this directory makes them available to systemd, they need to be
+activated/enabled separately, see
+[`units_enabled`](manifests.md#systemdunits_enabled) in the manifest.
