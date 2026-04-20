@@ -328,25 +328,23 @@ pub fn connect_and_lock(
     install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
     progress: &DeployProgress,
 ) -> LockResult {
-    let mut result = LockResult {
+    let result = Mutex::new(LockResult {
         locked: BTreeMap::new(),
         stale: BTreeMap::new(),
-    };
-
-    enum Outcome {
-        Locked(Box<dyn Connection>),
-        Stale(StaleHost),
-    }
+    });
 
     std::thread::scope(|s| {
-        let mut handles = Vec::new();
         for (host, host_plan) in &plan.hosts {
             let lock_request = Request::Lock {
                 expected_current_commit: host_plan.expected_current,
                 operator: operator.to_string(),
             };
-            let handle = s.spawn(move || {
-                let mut conn = try_connect(host, connect, install, progress)?;
+            let result = &result;
+            s.spawn(move || {
+                let mut conn = match try_connect(host, connect, install, progress) {
+                    Some(c) => c,
+                    None => return,
+                };
                 let msg = match conn.send_request(&lock_request) {
                     Ok(()) => conn.read_message(),
                     Err(err) => Err(err),
@@ -354,22 +352,24 @@ pub fn connect_and_lock(
                 match msg {
                     Ok(Some(Message::Locked)) => {
                         progress.update(host, HostState::Locked);
-                        Some(Outcome::Locked(conn))
+                        result.lock().locked.insert(host.clone(), conn);
                     }
                     Ok(Some(Message::LockStale {
                         expected_commit,
                         actual_commit,
                     })) => {
                         progress.update(host, HostState::Stale);
-                        Some(Outcome::Stale(StaleHost {
-                            expected_commit,
-                            actual_commit,
-                            connection: conn,
-                        }))
+                        result.lock().stale.insert(
+                            host.clone(),
+                            StaleHost {
+                                expected_commit,
+                                actual_commit,
+                                connection: conn,
+                            },
+                        );
                     }
                     Ok(Some(Message::LockBusy { held_by })) => {
                         progress.update(host, HostState::LockBusy(held_by));
-                        None
                     }
                     Ok(other) => {
                         progress.update(
@@ -378,30 +378,16 @@ pub fn connect_and_lock(
                                 "unexpected lock response: {other:?}"
                             )),
                         );
-                        None
                     }
                     Err(err) => {
                         progress.update(host, err);
-                        None
                     }
                 }
             });
-            handles.push((host, handle));
-        }
-        for (host, handle) in handles {
-            match handle.join().expect("connect/lock thread panicked") {
-                Some(Outcome::Locked(conn)) => {
-                    result.locked.insert(host.clone(), conn);
-                }
-                Some(Outcome::Stale(stale)) => {
-                    result.stale.insert(host.clone(), stale);
-                }
-                None => {}
-            }
         }
     });
 
-    result
+    result.into_inner()
 }
 
 /// Push pack and apply on a single host.
