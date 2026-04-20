@@ -54,6 +54,7 @@ For each locked host:
  * Send an `Apply` request with the target commit.
  * The agent sets `refs/heads/target` to the target commit.
  * Check out changed apps into new directories.
+ * Reconcile manifest symlinks (e.g. config files in `/etc`).
  * Reconcile systemd unit symlinks, then `daemon-reload` and
    `enable`/`disable`/`restart` as needed.
  * Set `refs/heads/current` to the target commit.

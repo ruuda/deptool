@@ -64,8 +64,10 @@ whether they point into `/var/lib/deptool/`. This makes the operation
 convergent: it does not matter what state the system was in before. Crashed
 mid-deploy, manually tampered with, fresh boot — the result is the same.
 
-After all per-app checkouts and symlink swaps are done, the systemd phase
-runs in this order:
+After all per-app checkouts and symlink swaps are done, manifest symlinks
+(e.g. config files in `/etc`) are reconciled first -- units may depend on
+paths that these symlinks provide. Then the systemd phase runs in this
+order:
 
  1. `systemctl disable --now` for units that should no longer be enabled.
  2. Reconcile unit symlinks: scan `/etc/systemd/system/` for symlinks

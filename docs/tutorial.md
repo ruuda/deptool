@@ -342,8 +342,8 @@ Commit and deploy this:
       ~ caddy
           ~ manifest.json
           + tmpfiles.conf
-          restart caddy.service
           link /etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
+          restart caddy.service
 
     Rollback unavailable for some hosts.
     Apply to 1 host? [y/N/d]
@@ -388,8 +388,8 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
       ~ caddy
           ~ manifest.json
           - tmpfiles.conf
-          restart caddy.service
           unlink /etc/tmpfiles.d/caddy.conf
+          restart caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d]

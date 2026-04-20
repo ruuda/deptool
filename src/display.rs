@@ -96,8 +96,8 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
-            write_unit_actions(out, &app_plan.system.units, color)?;
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
+            write_unit_actions(out, &app_plan.system.units, color)?;
         }
     }
     Ok(())
@@ -244,9 +244,7 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
     Ok(())
 }
 
-/// Print pre-computed symlink actions: removals first, then additions.
-///
-/// Changes are shown as unlink + link.
+/// Print symlink actions in execution order: removes, changes, creates.
 fn write_symlink_actions(
     out: &mut impl Write,
     changes: &SymlinkChanges<String>,
@@ -255,10 +253,11 @@ fn write_symlink_actions(
     for link in &changes.remove {
         writeln!(out, "      {} {link}", color.red("unlink"))?;
     }
-    for (link, _) in &changes.change {
+    for (link, source) in &changes.change {
         writeln!(out, "      {} {link}", color.red("unlink"))?;
+        writeln!(out, "      {} {link} -> {source}", color.green("link"))?;
     }
-    for (link, source) in changes.change.iter().chain(&changes.create) {
+    for (link, source) in &changes.create {
         writeln!(out, "      {} {link} -> {source}", color.green("link"))?;
     }
     Ok(())
@@ -807,6 +806,92 @@ web1
       + manifest.json
       + nginx.conf
       link /etc/nginx/nginx.conf -> nginx.conf
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn symlink_actions_printed_before_unit_actions() -> Result<()> {
+        let t = TestRepo::new();
+        let manifest = br#"{
+            "systemd": {"units_enabled": ["nginx.service"]},
+            "symlinks": {"/etc/nginx/nginx.conf": "nginx.conf"}
+        }"#;
+        let c1 = t.commit(&[
+            ("web1/nginx/nginx.conf", b"server {}"),
+            ("web1/nginx/manifest.json", manifest),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
+                    expected_current: None,
+                    is_fast_forward: true,
+                    is_rollback_safe: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  + nginx
+      + manifest.json
+      + nginx.conf
+      link /etc/nginx/nginx.conf -> nginx.conf
+      enable nginx.service
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn changed_symlink_shows_unlink_then_link_paired() -> Result<()> {
+        let t = TestRepo::new();
+        let m1 = br#"{"symlinks": {"/etc/nginx/nginx.conf": "old.conf"}}"#;
+        let m2 = br#"{"symlinks": {"/etc/nginx/nginx.conf": "new.conf"}}"#;
+        let c1 = t.commit(&[
+            ("web1/nginx/old.conf", b"v1"),
+            ("web1/nginx/manifest.json", m1),
+        ]);
+        let c2 = t.commit(&[
+            ("web1/nginx/new.conf", b"v2"),
+            ("web1/nginx/manifest.json", m2),
+        ]);
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
+        let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
+        let plan = Plan {
+            commit: c2,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([(
+                        "nginx".into(),
+                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
+                    )]),
+                    expected_current: Some(c1),
+                    is_fast_forward: true,
+                    is_rollback_safe: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+  ~ nginx
+      ~ manifest.json
+      + new.conf
+      - old.conf
+      unlink /etc/nginx/nginx.conf
+      link /etc/nginx/nginx.conf -> new.conf
 ",
         );
         Ok(())
