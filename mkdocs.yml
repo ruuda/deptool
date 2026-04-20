@@ -21,6 +21,7 @@ nav:
       # - TODO: How to guide, deploying a simple app.
       # - TODO: How to guide, managing system users with systemd-sysusers.
   - "Reference":
+      - "Config trees": "config_trees.md"
       - "Directory layout": "directory_layout.md"
       - "Manifests": "manifests.md"
   #     - "Deployment phases": "deployment_phases.md"

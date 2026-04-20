@@ -1,13 +1,8 @@
 # Manifests
 
-Deptool deploys _apps_, a collection of related configuration files, usually
-related to a single application such as Postgres or Prometheus, but in principle
-a Deptool app is just a collection of files deployed atomically.
-
-Putting files on target hosts is not sufficient though, Deptool also needs to
-manage some daemon and runtime state, like enabling and starting systemd units.
-This is specified through a _manifest_ (`manifest.json`) that is tracked in the
-[store](store.md).
+Besides putting files on target hosts, Deptool can manage some daemon and
+runtime state, like enabling and starting systemd units. This is specified
+through a _manifest_, stored in [`manifest.json`](directory_layout.md#manifestjson).
 
 ## Format
 
@@ -24,7 +19,7 @@ This is specified through a _manifest_ (`manifest.json`) that is tracked in the
 
 All sections are optional and default to empty.
 
-### systemd
+### systemd.units_enabled
 
 Lists which units from the app's `systemd/` directory should be enabled. All
 units in `systemd/` are symlinked into the unit directory, but only those listed
@@ -34,8 +29,7 @@ here receive `systemctl enable --now`.
 
 Maps absolute paths on the target host to relative paths inside the app's
 checkout. Deptool creates symlinks at the specified paths, pointing through
-`<app>/current/` so they survive reboots and always resolve to the active
-version.
+`<app>/current/` so they always resolve to the active version.
 
 ## Incremental adoption
 

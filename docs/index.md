@@ -40,9 +40,10 @@ Deptool is not:
 ## Workflow
 
 Deptool expects configuration for your entire cluster materialized in a
-directory, by convention `deptool_config`. You can maintain this directory tree
-by hand, but for more complex configurations, you probably want to generate it
-using an external tool. Deployment is then a two-stage process:
+directory, the _config tree_. By convention this directory is named
+`deptool_config`. You can maintain this directory tree by hand, but for more
+complex configurations, you probably want to generate it using an external tool.
+Deployment is then a two-stage process:
 
  * `deptool commit` records the contents of `deptool_config` into the _store_
    as a new cluster configuraton that can be deployed.
@@ -75,8 +76,7 @@ directories define _apps_. For example:
 Per host, Deptool materializes the app directories in `/var/lib/deptool/apps`.
 It then manages systemd units, and it can create symlinks on the filesystem that
 point into `/var/lib/deptool`, as defined in the manifest, `manifest.json`. See
-also the [directory layout](directory_layout.md) and [manifests](manifests.md)
-reference.
+also the [config tree reference](config_trees.md).
 
 On the operator machine, Deptool keeps a remote-tracking ref per target host.
 This way it knows what is deployed on that host, and whether a new commit
