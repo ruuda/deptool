@@ -16,6 +16,7 @@
  - Don't fabricate capabilities. Verify tool availability before claiming you can use something.
  - When the compiler warns, it's right. Investigate instead of suppressing.
  - Verify subagent work: check that agents committed on the right branch with actual changes.
+ - Never use `find` or `grep` to navigate the repo, they waste context on untracked files. Use `git grep` and `git ls-files` instead.
 
 ## Project details
 
