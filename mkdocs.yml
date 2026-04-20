@@ -20,9 +20,9 @@ nav:
       - "Tutorial": "tutorial.md"
       # - TODO: How to guide, deploying a simple app.
       # - TODO: How to guide, managing system users with systemd-sysusers.
-  # - "Reference":
-  #     - "Directory layout": "directory_layout.md"
-  #     - "Manifests": "manifests.md"
+  - "Reference":
+      - "Directory layout": "directory_layout.md"
+      - "Manifests": "manifests.md"
   #     - "Deployment phases": "deployment_phases.md"
   # - "Internals":
   #     - "The store": "store.md"
