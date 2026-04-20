@@ -19,7 +19,12 @@
             "Cargo.lock"
             "Cargo.toml"
           ];
-          cargoLock = { lockFile = ./Cargo.lock; };
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            outputHashes = {
+              "git2-0.21.0" = "sha256-y+uOGVQEEotOKWXxx7NOIDo4HiGoqcNJXLEv5cow2eA=";
+            };
+          };
           nativeBuildInputs = [ pkgs.pkg-config ];
           buildInputs = with pkgs; [
             libgit2
