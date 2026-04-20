@@ -9,12 +9,18 @@
     let
       name = "deptool";
       version = "0.1.0";
-      pkgs = (import nixpkgs { system = "x86_64-linux" ; }).pkgsStatic;
+      pkgs = (import nixpkgs { system = "x86_64-linux" ; });
+      pkgss = pkgs.pkgsStatic;
     in
       {
-        packages.x86_64-linux.default = pkgs.rustPlatform.buildRustPackage rec {
+        devShells.x86_64-linux.default = pkgs.mkShell {
+          inherit name;
+          nativeBuildInputs = [ pkgs.mkdocs ];
+        };
+
+        packages.x86_64-linux.default = pkgss.rustPlatform.buildRustPackage rec {
           inherit name version;
-          src = pkgs.lib.sourceFilesBySuffices ./. [
+          src = pkgss.lib.sourceFilesBySuffices ./. [
             ".rs"
             "Cargo.lock"
             "Cargo.toml"
@@ -25,8 +31,8 @@
               "git2-0.21.0" = "sha256-y+uOGVQEEotOKWXxx7NOIDo4HiGoqcNJXLEv5cow2eA=";
             };
           };
-          nativeBuildInputs = [ pkgs.pkg-config ];
-          buildInputs = with pkgs; [
+          nativeBuildInputs = [ pkgss.pkg-config ];
+          buildInputs = with pkgss; [
             libgit2
             libssh2
             openssl
