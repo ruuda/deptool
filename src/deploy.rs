@@ -315,97 +315,79 @@ fn try_connect(
     Some(conn)
 }
 
-/// Open sessions to all hosts in parallel.
+/// Connect to all hosts and lock them, in parallel.
 ///
-/// Hosts that fail to connect are reported via progress and omitted
-/// from the result.
-fn connect_hosts(
+/// Each host connects and immediately locks without waiting for other
+/// hosts. Deadlock is not possible because agents use non-blocking
+/// try-locks (returning `LockBusy` immediately if held). Tries every
+/// host even if some fail, so the caller gets all stale info in one pass.
+pub fn connect_and_lock(
     plan: &Plan,
+    operator: &str,
     connect: &(impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync),
     install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
     progress: &DeployProgress,
-) -> BTreeMap<Hostname, Box<dyn Connection>> {
-    let mut connections = BTreeMap::new();
-    std::thread::scope(|s| {
-        let mut handles = Vec::new();
-        for host in plan.hosts.keys() {
-            handles.push((
-                host,
-                s.spawn(|| try_connect(host, connect, install, progress)),
-            ));
-        }
-        for (host, handle) in handles {
-            if let Some(conn) = handle.join().expect("connect thread panicked") {
-                connections.insert(host.clone(), conn);
-            }
-        }
-    });
-    connections
-}
-
-/// Acquire deploy locks on connected hosts.
-///
-/// Hosts are locked in the order provided (which should be asciibetical,
-/// matching plan iteration order) to avoid deadlocks in case of concurrent
-/// deploys. Tries every host even if some fail, so the caller gets all
-/// stale info in one pass.
-pub fn lock_hosts(
-    plan: &Plan,
-    operator: &str,
-    connections: BTreeMap<Hostname, Box<dyn Connection>>,
-    progress: &DeployProgress,
 ) -> LockResult {
-    let mut result = LockResult {
+    let result = Mutex::new(LockResult {
         locked: BTreeMap::new(),
         stale: BTreeMap::new(),
-    };
+    });
 
-    for (host, mut conn) in connections {
-        let host_plan = &plan.hosts[&host];
-        let lock_request = Request::Lock {
-            expected_current_commit: host_plan.expected_current,
-            operator: operator.to_string(),
-        };
-        if let Err(err) = conn.send_request(&lock_request) {
-            progress.update(&host, err);
-            continue;
-        }
-
-        match conn.read_message() {
-            Ok(Some(Message::Locked)) => {
-                progress.update(&host, HostState::Locked);
-                result.locked.insert(host, conn);
-            }
-            Ok(Some(Message::LockStale {
-                expected_commit,
-                actual_commit,
-            })) => {
-                progress.update(&host, HostState::Stale);
-                result.stale.insert(
-                    host,
-                    StaleHost {
+    std::thread::scope(|s| {
+        for (host, host_plan) in &plan.hosts {
+            let lock_request = Request::Lock {
+                expected_current_commit: host_plan.expected_current,
+                operator: operator.to_string(),
+            };
+            let result = &result;
+            s.spawn(move || {
+                let mut conn = match try_connect(host, connect, install, progress) {
+                    Some(c) => c,
+                    None => return,
+                };
+                let msg = match conn.send_request(&lock_request) {
+                    Ok(()) => conn.read_message(),
+                    Err(err) => Err(err),
+                };
+                match msg {
+                    Ok(Some(Message::Locked)) => {
+                        progress.update(host, HostState::Locked);
+                        result.lock().locked.insert(host.clone(), conn);
+                    }
+                    Ok(Some(Message::LockStale {
                         expected_commit,
                         actual_commit,
-                        connection: conn,
-                    },
-                );
-            }
-            Ok(Some(Message::LockBusy { held_by })) => {
-                // We continue to the next host rather than aborting early.
-                // This risks deadlock if two deploys lock hosts in different
-                // orders, but our alphabetical ordering prevents that.
-                progress.update(&host, HostState::LockBusy(held_by));
-            }
-            other => {
-                progress.update(
-                    &host,
-                    HostError::ProtocolError(format!("unexpected lock response: {other:?}")),
-                );
-            }
+                    })) => {
+                        progress.update(host, HostState::Stale);
+                        result.lock().stale.insert(
+                            host.clone(),
+                            StaleHost {
+                                expected_commit,
+                                actual_commit,
+                                connection: conn,
+                            },
+                        );
+                    }
+                    Ok(Some(Message::LockBusy { held_by })) => {
+                        progress.update(host, HostState::LockBusy(held_by));
+                    }
+                    Ok(other) => {
+                        progress.update(
+                            host,
+                            HostError::ProtocolError(format!(
+                                "unexpected lock response: {other:?}"
+                            )),
+                        );
+                    }
+                    Err(err) => {
+                        progress.update(host, err);
+                    }
+                }
+            });
         }
-    }
+    });
 
-    result
+    result.into_inner()
 }
 
 /// Push pack and apply on a single host.
@@ -573,18 +555,12 @@ fn fetch_from_stale_host(
     Ok(())
 }
 
-/// Run a full deployment: lock all hosts, push packs, and apply.
+/// Run a full deployment: connect+lock all hosts, push packs, and apply.
 ///
-/// Connect and push+apply are parallel. Locking is sequential (to avoid
-/// deadlocks with concurrent deploys) and waits for all connects to
-/// finish before starting. We tried pipelining connect and lock (locking
-/// each host as soon as it connects, while later hosts are still
-/// connecting) but measured only ~20ms improvement on a 3-host cluster
-/// -- not worth the extra synchronization complexity.
-///
-/// If any host fails to lock (stale, busy, or connection error), fetches
-/// objects from stale hosts and aborts without pushing or applying to any
-/// host.
+/// Connect and lock run together per-host in parallel threads. Push+apply
+/// also runs in parallel after all locks succeed. If any host fails to
+/// lock (stale, busy, or connection error), fetches objects from stale
+/// hosts and aborts without pushing or applying to any host.
 pub fn run_deploy(
     store: &Store,
     plan: &Plan,
@@ -593,8 +569,7 @@ pub fn run_deploy(
     install: impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync,
     progress: &DeployProgress,
 ) -> Result<()> {
-    let connections = connect_hosts(plan, &connect, &install, progress);
-    let mut lock_result = lock_hosts(plan, operator, connections, progress);
+    let mut lock_result = connect_and_lock(plan, operator, &connect, &install, progress);
 
     if lock_result.locked.len() < plan.hosts.len() {
         // Fetch objects from stale hosts so we have the data for the next plan.
