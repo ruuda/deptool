@@ -65,7 +65,7 @@ Post-generation checklist (run after writing code, before presenting):
  - For each inline comment: does the next line of code already say the same thing? If so, delete the comment.
  - For each error path: what does the operator/user actually see? Trace it to the display.
  - For each new function: are the arguments in the right order (stable before varying, old before new)?
- - For each `replace_all` edit: will it corrupt import lines?
+ - For each `replace_all` edit: will it match inside longer lines at different indentation levels? When in doubt, edit distinct groups separately.
  - For each deleted test: where is that behavior tested now?
  - For each match on a mode/flag: does the test verify *both* branches produce distinct behavior?
 
@@ -93,7 +93,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()` when the ok-path is the important one -- `if let Err` buries the function call after the error handling keyword.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
- - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem.
+ - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem. When an optimization forces complexity on callers (new type bounds, split borrows, wrapper functions), the cure is worse than the disease.
  - Don't overengineer. The right design emerges by subtraction. Justify with the current problem, not hypothetical future needs.
  - When analogous code already exists, mirror its structure. Symmetry signals good design.
  - Place code in the module that owns the concept, not wherever it's called from.
@@ -111,6 +111,13 @@ Post-generation checklist (run after writing code, before presenting):
  - Error construction stays where the error is detected. Checks belong inside the function that has the state, not in the caller.
  - Doc comments should have a 1-line summary that fits in 80-ish columns, then optionally a body separated by a blank line.
  - Comments start with a capital and use regular punctuation. Use *stars* for emphasis, not ALL CAPS. Write em-dashes as -- in comments.
+
+## User-facing output (logs, plan display, errors)
+
+ - Write for someone who has never seen the source code and does not know the tool's internals.
+ - Prefer words over symbols. Symbols can be ambiguous or invisible in certain fonts.
+ - Log near the mutation, not near the planning. If the plan and the execution are separate phases, log during execution.
+ - One event, one message. Don't have different strings for the log and the protocol for the same error.
 
 ## Writing documentation
 
