@@ -98,6 +98,7 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
             }
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
             write_unit_actions(out, &app_plan.system.units, color)?;
+            writeln!(out)?;
         }
     }
     Ok(())
@@ -121,8 +122,6 @@ pub enum Decision {
 /// `d` shows the full file diff for all hosts in a single pager, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
 pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
-    println!();
-
     let all_rollback_safe = plan.hosts.values().all(|h| h.is_rollback_safe);
     if all_rollback_safe {
         println!("Auto-rollback if deploy fails.");
@@ -472,6 +471,7 @@ mod tests {
 web1
   add nginx
     + nginx.conf
+
 ",
         );
         Ok(())
@@ -511,6 +511,7 @@ web1
     + manifest.json
     + nginx.conf
     enable nginx.service
+
 ",
         );
         Ok(())
@@ -556,6 +557,7 @@ web1
     link nginx-reload.timer
     link nginx.service
     enable nginx.service
+
 ",
         );
         Ok(())
@@ -596,6 +598,7 @@ web1
     disable nginx.service
     unlink nginx-reload.timer
     unlink nginx.service
+
 ",
         );
         Ok(())
@@ -633,6 +636,7 @@ web1
 web1
   remove nginx
     disable nginx.service
+
 ",
         );
         Ok(())
@@ -666,6 +670,7 @@ web1
 web1
   update nginx
     ~ nginx.conf
+
 ",
         );
         Ok(())
@@ -707,6 +712,7 @@ web1
   update nginx
     ~ nginx.conf
     restart nginx.service
+
 ",
         );
         Ok(())
@@ -738,6 +744,7 @@ web1
 web1 (diverged)
   add nginx
     + nginx.conf
+
 ",
         );
         Ok(())
@@ -769,6 +776,7 @@ web1 (diverged)
 web1 (rollback unavailable)
   add nginx
     + nginx.conf
+
 ",
         );
         Ok(())
@@ -806,6 +814,7 @@ web1
     + manifest.json
     + nginx.conf
     link /etc/nginx/nginx.conf -> nginx.conf
+
 ",
         );
         Ok(())
@@ -847,6 +856,7 @@ web1
     + nginx.conf
     link /etc/nginx/nginx.conf -> nginx.conf
     enable nginx.service
+
 ",
         );
         Ok(())
@@ -892,6 +902,7 @@ web1
     - old.conf
     unlink /etc/nginx/nginx.conf
     link /etc/nginx/nginx.conf -> new.conf
+
 ",
         );
         Ok(())
@@ -927,6 +938,7 @@ web1
 web1
   remove nginx
     unlink /etc/nginx/nginx.conf
+
 ",
         );
         Ok(())
