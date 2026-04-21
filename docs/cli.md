@@ -37,7 +37,7 @@ Both paths can be overridden with `--store` and `--remote-store`.
 ## Confirmation UX
 
 The confirmation prompt shows a Git-style diffstat before asking to proceed.
-Apps are listed per host with `+`/`~`/`-` prefixes; changed apps list the
+Apps are listed per host as `add`/`update`/`remove`; changed apps list the
 affected filenames. Systemd actions use imperative verbs (enable, disable,
 restart) because that is what the machine will actually do.
 

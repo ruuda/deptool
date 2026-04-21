@@ -81,16 +81,16 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
         for (app, app_plan) in &host_plan.apps {
             match &app_plan.diff {
                 AppDiff::Add { new_tree } => {
-                    writeln!(out, "  {} {app}", color.green("+"))?;
+                    writeln!(out, "  {} {app}", color.green("add"))?;
                     for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
                 }
                 AppDiff::Remove { .. } => {
-                    writeln!(out, "  {} {app}", color.red("-"))?;
+                    writeln!(out, "  {} {app}", color.red("remove"))?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
-                    writeln!(out, "  {} {app}", color.yellow("~"))?;
+                    writeln!(out, "  {} {app}", color.yellow("update"))?;
                     for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
                         writeln!(out, "      {} {file}", color_prefix(color, prefix))?;
                     }
@@ -447,7 +447,7 @@ mod tests {
     }
 
     #[test]
-    fn added_app_shows_plus_prefix_with_filenames() -> Result<()> {
+    fn added_app_lists_filenames() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}\n")]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
@@ -470,7 +470,7 @@ mod tests {
             render(&t.store, &plan)?,
             "\
 web1
-  + nginx
+  add nginx
       + nginx.conf
 ",
         );
@@ -507,7 +507,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  + nginx
+  add nginx
       + manifest.json
       + nginx.conf
       enable nginx.service
@@ -548,7 +548,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  + nginx
+  add nginx
       + manifest.json
       + nginx.conf
       + systemd/nginx-reload.timer
@@ -592,7 +592,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  - nginx
+  remove nginx
       disable nginx.service
       unlink nginx-reload.timer
       unlink nginx.service
@@ -602,7 +602,7 @@ web1
     }
 
     #[test]
-    fn removed_app_shows_minus_prefix_with_disable_action() -> Result<()> {
+    fn removed_app_shows_disable_action() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[
             ("web1/nginx/nginx.conf", b"server {}\n"),
@@ -631,7 +631,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  - nginx
+  remove nginx
       disable nginx.service
 ",
         );
@@ -639,7 +639,7 @@ web1
     }
 
     #[test]
-    fn updated_app_shows_tilde_prefix_with_changed_files() -> Result<()> {
+    fn updated_app_shows_changed_files() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
@@ -664,7 +664,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  ~ nginx
+  update nginx
       ~ nginx.conf
 ",
         );
@@ -704,7 +704,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  ~ nginx
+  update nginx
       ~ nginx.conf
       restart nginx.service
 ",
@@ -736,7 +736,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1 (diverged)
-  + nginx
+  add nginx
       + nginx.conf
 ",
         );
@@ -767,7 +767,7 @@ web1 (diverged)
             render(&t.store, &plan)?,
             "\
 web1 (rollback unavailable)
-  + nginx
+  add nginx
       + nginx.conf
 ",
         );
@@ -802,7 +802,7 @@ web1 (rollback unavailable)
             render(&t.store, &plan)?,
             "\
 web1
-  + nginx
+  add nginx
       + manifest.json
       + nginx.conf
       link /etc/nginx/nginx.conf -> nginx.conf
@@ -842,7 +842,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  + nginx
+  add nginx
       + manifest.json
       + nginx.conf
       link /etc/nginx/nginx.conf -> nginx.conf
@@ -886,7 +886,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  ~ nginx
+  update nginx
       ~ manifest.json
       + new.conf
       - old.conf
@@ -925,7 +925,7 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  - nginx
+  remove nginx
       unlink /etc/nginx/nginx.conf
 ",
         );

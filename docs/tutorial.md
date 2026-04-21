@@ -60,7 +60,7 @@ Let’s deploy this to our 1-host cluster!
 
     $ deptool deploy
     webserver
-      + caddy
+      add caddy
           + Caddyfile
 
     Auto-rollback if deploy fails.
@@ -130,7 +130,7 @@ When we deploy this, Deptool indicates that the file `Caddyfile`, part of app
 
     $ deptool deploy
     webserver
-      ~ caddy
+      update caddy
           ~ Caddyfile
     
     Auto-rollback if deploy fails.
@@ -219,7 +219,7 @@ Let’s commit and deploy it:
 
     $ deptool deploy
     webserver (rollback unavailable)
-      ~ caddy
+      update caddy
           + manifest.json
           + systemd/caddy.service
           link caddy.service
@@ -267,7 +267,7 @@ Let’s update our Caddy configuration again, and deploy:
 
     $ deptool deploy
     webserver
-      ~ caddy
+      update caddy
           ~ Caddyfile
           restart caddy.service
 
@@ -339,7 +339,7 @@ Commit and deploy this:
 
     $ deptool deploy
     webserver (rollback unavailable)
-      ~ caddy
+      update caddy
           ~ manifest.json
           + tmpfiles.conf
           link /etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
@@ -364,7 +364,7 @@ target file. For example, let’s change the group owner from `caddy` to `www`:
 
     $ deptool deploy
     webserver
-      ~ caddy
+      update caddy
           ~ tmpfiles.conf
           restart caddy.service
 
@@ -385,7 +385,7 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
 
     $ deptool deploy
     webserver
-      ~ caddy
+      update caddy
           ~ manifest.json
           - tmpfiles.conf
           unlink /etc/tmpfiles.d/caddy.conf
