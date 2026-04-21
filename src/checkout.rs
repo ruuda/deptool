@@ -94,25 +94,37 @@ pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
 /// Remove old version directories from all apps under `apps_dir`.
 ///
 /// Keeps only the directories that `current` and `previous` point to.
-/// Errors during cleanup are silently ignored -- a leftover directory is
-/// harmless and will be cleaned up on the next successful deploy.
-pub fn gc_old_checkouts(apps_dir: &Path) {
+/// A leftover directory is harmless and will be cleaned up on the next
+/// successful deploy.
+pub fn gc_old_checkouts(apps_dir: &Path, mut log: impl FnMut(std::fmt::Arguments<'_>)) {
     let entries = match fs::read_dir(apps_dir) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(err) => {
+            log(format_args!(
+                "gc: failed to read {}: {err}",
+                apps_dir.display()
+            ));
+            return;
+        }
     };
     for entry in entries {
         let entry = match entry {
             Ok(entry) => entry,
-            Err(_) => continue,
+            Err(err) => {
+                log(format_args!(
+                    "gc: entry error in {}: {err}",
+                    apps_dir.display()
+                ));
+                continue;
+            }
         };
         if entry.path().is_dir() {
-            gc_app_dir(&entry.path());
+            gc_app_dir(&entry.path(), &mut log);
         }
     }
 }
 
-fn gc_app_dir(app_dir: &Path) {
+fn gc_app_dir(app_dir: &Path, log: &mut impl FnMut(std::fmt::Arguments<'_>)) {
     let keep: BTreeSet<PathBuf> = ["current", "previous"]
         .iter()
         .filter_map(|name| fs::read_link(app_dir.join(name)).ok())
@@ -121,7 +133,13 @@ fn gc_app_dir(app_dir: &Path) {
 
     let entries = match fs::read_dir(app_dir) {
         Ok(entries) => entries,
-        Err(_) => return,
+        Err(err) => {
+            log(format_args!(
+                "gc: failed to read {}: {err}",
+                app_dir.display()
+            ));
+            return;
+        }
     };
     for entry in entries {
         let entry = match entry {
@@ -134,7 +152,12 @@ fn gc_app_dir(app_dir: &Path) {
             continue;
         }
         if path.is_dir() {
-            let _ = fs::remove_dir_all(&path);
+            if let Err(err) = fs::remove_dir_all(&path) {
+                log(format_args!(
+                    "gc: failed to remove {}: {err}",
+                    path.display()
+                ));
+            }
         }
     }
 }
@@ -471,7 +494,8 @@ mod tests {
         assert!(nginx.join(oid_prefix(c2)).exists());
         assert!(nginx.join(oid_prefix(c3)).exists());
 
-        gc_old_checkouts(t.apps.path());
+        let ignore_log = |_: std::fmt::Arguments<'_>| {};
+        gc_old_checkouts(t.apps.path(), ignore_log);
 
         // current=c3, previous=c2, c1 is gone.
         assert!(!nginx.join(oid_prefix(c1)).exists());

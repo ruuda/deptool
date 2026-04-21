@@ -11,7 +11,8 @@ use git2::Oid;
 
 use crate::checkout::{self, CheckoutMode, checkout};
 use crate::error::ApplyError;
-use crate::plan::{DesiredUnits, SystemDiff, diff_host};
+use crate::log::FileLog;
+use crate::plan::{AppDiff, DesiredUnits, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -79,7 +80,14 @@ pub struct AgentSession {
     pub hostname: Hostname,
     apps_dir: PathBuf,
     on_activate: OnActivate,
+    log: LogState,
     state: SessionState,
+}
+
+enum LogState {
+    Disabled,
+    Pending(PathBuf),
+    Active(FileLog),
 }
 
 enum SessionState {
@@ -106,12 +114,18 @@ impl AgentSession {
         hostname: Hostname,
         apps_dir: PathBuf,
         on_activate: OnActivate,
+        log_path: Option<PathBuf>,
     ) -> Self {
+        let log = match log_path {
+            Some(path) => LogState::Pending(path),
+            None => LogState::Disabled,
+        };
         AgentSession {
             store,
             hostname,
             apps_dir,
             on_activate,
+            log,
             state: SessionState::Unlocked,
         }
     }
@@ -125,7 +139,14 @@ impl AgentSession {
             hostname.into(),
             apps_dir.to_path_buf(),
             on_activate,
+            None,
         )
+    }
+
+    fn log(&self, msg: std::fmt::Arguments<'_>) {
+        if let LogState::Active(log) = &self.log {
+            log.log(msg);
+        }
     }
 
     fn current_commit(&self) -> Option<Oid> {
@@ -198,6 +219,13 @@ impl AgentSession {
                 actual_commit: actual_current_commit,
             });
         } else {
+            // Open the log file now that we hold the lock exclusively.
+            if let LogState::Pending(path) = &self.log {
+                if let Ok(file_log) = FileLog::open(path) {
+                    self.log = LogState::Active(file_log);
+                }
+            }
+            self.log(format_args!("lock: acquired by {operator}"));
             self.state = SessionState::Locked {
                 _file: file,
                 operator,
@@ -210,9 +238,11 @@ impl AgentSession {
         let bytes = BASE64.decode(pack_data).expect("pack_data is valid base64");
         match self.store.write_pack(&bytes) {
             Ok(()) => emit_message(Message::PackReceived),
-            Err(err) => emit_message(Message::Error(ApplyError::Store(format!(
-                "failed to write pack: {err}",
-            )))),
+            Err(err) => {
+                let msg = format!("failed to write pack: {err}");
+                self.log(format_args!("{msg}"));
+                emit_message(Message::Error(ApplyError::Store(msg)));
+            }
         }
     }
 
@@ -235,9 +265,11 @@ impl AgentSession {
                     Ok(bytes) => emit_message(Message::SendPack {
                         pack_data: BASE64.encode(&bytes),
                     }),
-                    Err(err) => emit_message(Message::Error(ApplyError::Store(format!(
-                        "failed to create pack: {err}",
-                    )))),
+                    Err(err) => {
+                        let msg = format!("failed to create pack: {err}");
+                        self.log(format_args!("{msg}"));
+                        emit_message(Message::Error(ApplyError::Store(msg)));
+                    }
                 }
             }
             Request::Apply {
@@ -252,6 +284,7 @@ impl AgentSession {
                         is_rollback_safe,
                     };
                     if let Err(err) = self.handle_apply(&ctx, emit_message) {
+                        self.log(format_args!("apply: failed: {err}"));
                         emit_message(Message::Error(err));
                     }
                 }
@@ -269,6 +302,12 @@ impl AgentSession {
         ctx: &ApplyContext,
         emit_message: &mut impl FnMut(Message),
     ) -> std::result::Result<(), ApplyError> {
+        self.log(format_args!(
+            "apply: current={}, target={}",
+            format_opt_oid(ctx.current_commit),
+            ctx.target_commit,
+        ));
+
         // Compute all diffs before any mutations, same as the driver's
         // make_plan but aggregated per-host.
         let (app_diffs, system_diff) = diff_host(
@@ -279,12 +318,15 @@ impl AgentSession {
             Some(ctx.target_commit),
         )?;
 
+        self.log(format_args!("apply: {}", format_diffs(&app_diffs)));
+
         assert_eq!(
             system_diff.is_rollback_safe(),
             ctx.is_rollback_safe,
             "agent and driver disagree on rollback safety",
         );
 
+        self.log(format_args!("apply: setting target ref"));
         self.store.set_ref(
             "refs/heads/target",
             ctx.target_commit,
@@ -293,6 +335,7 @@ impl AgentSession {
             },
         )?;
 
+        self.log(format_args!("apply: checkout"));
         checkout(
             &self.store,
             Some(ctx.target_commit),
@@ -302,6 +345,7 @@ impl AgentSession {
             CheckoutMode::Fresh,
         )?;
 
+        self.log(format_args!("apply: activating"));
         let desired_units =
             self.store
                 .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?;
@@ -309,11 +353,18 @@ impl AgentSession {
         match (self.on_activate)(&desired_units, &system_diff, emit_message) {
             Ok(()) => {}
             Err(err) if system_diff.is_rollback_safe() => {
+                self.log(format_args!(
+                    "apply: activation failed, rolling back: {err}"
+                ));
                 return self.handle_rollback(err, ctx, emit_message);
             }
-            Err(err) => return Err(err),
+            Err(err) => {
+                self.log(format_args!("apply: activation failed: {err}"));
+                return Err(err);
+            }
         }
 
+        self.log(format_args!("apply: setting current ref"));
         self.store.set_ref(
             "refs/heads/current",
             ctx.target_commit,
@@ -322,8 +373,13 @@ impl AgentSession {
             },
         )?;
 
-        checkout::gc_old_checkouts(&self.apps_dir);
+        self.log(format_args!("apply: gc"));
+        checkout::gc_old_checkouts(&self.apps_dir, |msg| self.log(msg));
 
+        self.log(format_args!(
+            "apply: complete, commit={}",
+            ctx.target_commit
+        ));
         emit_message(Message::ApplyComplete {
             commit: ctx.target_commit,
             enabled_units: system_diff.units.enable,
@@ -348,9 +404,11 @@ impl AgentSession {
         ctx: &ApplyContext,
         emit_message: &mut impl FnMut(Message),
     ) -> std::result::Result<(), ApplyError> {
+        self.log(format_args!("apply: rolling back"));
         emit_message(Message::RollingBack);
 
         if let Err(rollback_error) = self.try_rollback(ctx, emit_message) {
+            self.log(format_args!("apply: rollback failed: {rollback_error}"));
             emit_message(Message::RollbackFailed {
                 apply_error: error,
                 rollback_error,
@@ -358,6 +416,7 @@ impl AgentSession {
             return Ok(());
         }
 
+        self.log(format_args!("apply: rollback complete"));
         emit_message(Message::RolledBack { error });
         Ok(())
     }
@@ -407,6 +466,29 @@ impl AgentSession {
         }
         Ok(())
     }
+}
+
+fn format_opt_oid(oid: Option<Oid>) -> String {
+    match oid {
+        Some(oid) => oid.to_string(),
+        None => "(none)".to_string(),
+    }
+}
+
+fn format_diffs(diffs: &BTreeMap<String, AppDiff>) -> String {
+    if diffs.is_empty() {
+        return "no changes".to_string();
+    }
+    let mut parts = Vec::with_capacity(diffs.len());
+    for (app, diff) in diffs {
+        let label = match diff {
+            AppDiff::Add { .. } => "add",
+            AppDiff::Remove { .. } => "remove",
+            AppDiff::Update { .. } => "update",
+        };
+        parts.push(format!("{app}={label}"));
+    }
+    parts.join(", ")
 }
 
 #[cfg(test)]
@@ -513,6 +595,7 @@ mod tests {
             hostname.into(),
             apps.path().to_path_buf(),
             on_activate,
+            None,
         );
         let host = TestHost::from_parts(session, store_dir, apps);
         (host, oid)

@@ -331,6 +331,11 @@ fn systemctl_ok(args: &[&str]) -> bool {
 fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
     let apps_dir = config.apps_dir.clone();
     let unit_dir = config.unit_dir.clone();
+    let log_dir = config
+        .apps_dir
+        .parent()
+        .unwrap_or(Path::new("/var/lib/deptool"));
+    let log_path = log_dir.join("agent.log");
     agent::AgentSession::new(
         store,
         prim::Hostname(config.hostname.clone()),
@@ -338,6 +343,7 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
         Box::new(move |desired_units, changes, emit| {
             activate(desired_units, changes, emit, &apps_dir, &unit_dir)
         }),
+        Some(log_path),
     )
 }
 
