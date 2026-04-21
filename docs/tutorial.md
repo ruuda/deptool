@@ -60,8 +60,8 @@ Let’s deploy this to our 1-host cluster!
 
     $ deptool deploy
     webserver
-      add caddy
-        + Caddyfile
+        add caddy
+            + Caddyfile
 
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d]
@@ -130,8 +130,8 @@ When we deploy this, Deptool indicates that the file `Caddyfile`, part of app
 
     $ deptool deploy
     webserver
-      update caddy
-        ~ Caddyfile
+        update caddy
+            ~ Caddyfile
     
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d] 
@@ -219,11 +219,11 @@ Let’s commit and deploy it:
 
     $ deptool deploy
     webserver (rollback unavailable)
-      update caddy
-        + manifest.json
-        + systemd/caddy.service
-        link caddy.service
-        enable caddy.service
+        update caddy
+            + manifest.json
+            + systemd/caddy.service
+            link caddy.service
+            enable caddy.service
 
     Rollback unavailable for some hosts.
     Apply to 1 host? [y/N/d]
@@ -267,9 +267,9 @@ Let’s update our Caddy configuration again, and deploy:
 
     $ deptool deploy
     webserver
-      update caddy
-        ~ Caddyfile
-        restart caddy.service
+        update caddy
+            ~ Caddyfile
+            restart caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d]
@@ -339,11 +339,11 @@ Commit and deploy this:
 
     $ deptool deploy
     webserver (rollback unavailable)
-      update caddy
-        ~ manifest.json
-        + tmpfiles.conf
-        link/etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
-        restart caddy.service
+        update caddy
+            ~ manifest.json
+            + tmpfiles.conf
+            link/etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
+            restart caddy.service
 
     Rollback unavailable for some hosts.
     Apply to 1 host? [y/N/d]
@@ -364,9 +364,9 @@ target file. For example, let’s change the group owner from `caddy` to `www`:
 
     $ deptool deploy
     webserver
-      update caddy
-        ~ tmpfiles.conf
-        restart caddy.service
+        update caddy
+            ~ tmpfiles.conf
+            restart caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d]
@@ -385,11 +385,11 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
 
     $ deptool deploy
     webserver
-      update caddy
-        ~ manifest.json
-        - tmpfiles.conf
-        unlink/etc/tmpfiles.d/caddy.conf
-        restart caddy.service
+        update caddy
+            ~ manifest.json
+            - tmpfiles.conf
+            unlink/etc/tmpfiles.d/caddy.conf
+            restart caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host? [y/N/d]

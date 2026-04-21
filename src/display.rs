@@ -81,18 +81,18 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
         for (app, app_plan) in &host_plan.apps {
             match &app_plan.diff {
                 AppDiff::Add { new_tree } => {
-                    writeln!(out, "  {} {app}", color.green("add"))?;
+                    writeln!(out, "    {} {app}", color.green("add"))?;
                     for (prefix, file) in diff_files(&store.repo, empty_tree_oid(), *new_tree)? {
-                        writeln!(out, "    {} {file}", color_prefix(color, prefix))?;
+                        writeln!(out, "        {} {file}", color_prefix(color, prefix))?;
                     }
                 }
                 AppDiff::Remove { .. } => {
-                    writeln!(out, "  {} {app}", color.red("remove"))?;
+                    writeln!(out, "    {} {app}", color.red("remove"))?;
                 }
                 AppDiff::Update { old_tree, new_tree } => {
-                    writeln!(out, "  {} {app}", color.yellow("update"))?;
+                    writeln!(out, "    {} {app}", color.yellow("update"))?;
                     for (prefix, file) in diff_files(&store.repo, *old_tree, *new_tree)? {
-                        writeln!(out, "    {} {file}", color_prefix(color, prefix))?;
+                        writeln!(out, "        {} {file}", color_prefix(color, prefix))?;
                     }
                 }
             }
@@ -226,19 +226,19 @@ fn empty_tree_oid() -> Oid {
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.
 fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
     for unit in &units.disable {
-        writeln!(out, "    {} {unit}", color.red("disable"))?;
+        writeln!(out, "        {} {unit}", color.red("disable"))?;
     }
     for unit in &units.unlink {
-        writeln!(out, "    {} {unit}", color.red("unlink"))?;
+        writeln!(out, "        {} {unit}", color.red("unlink"))?;
     }
     for unit in &units.link {
-        writeln!(out, "    {} {unit}", color.green("link"))?;
+        writeln!(out, "        {} {unit}", color.green("link"))?;
     }
     for unit in &units.enable {
-        writeln!(out, "    {} {unit}", color.green("enable"))?;
+        writeln!(out, "        {} {unit}", color.green("enable"))?;
     }
     for unit in &units.restart {
-        writeln!(out, "    {} {unit}", color.yellow("restart"))?;
+        writeln!(out, "        {} {unit}", color.yellow("restart"))?;
     }
     Ok(())
 }
@@ -250,14 +250,14 @@ fn write_symlink_actions(
     color: UseColor,
 ) -> Result<()> {
     for link in &changes.remove {
-        writeln!(out, "    {} {link}", color.red("unlink"))?;
+        writeln!(out, "        {} {link}", color.red("unlink"))?;
     }
     for (link, source) in &changes.change {
-        writeln!(out, "    {} {link}", color.red("unlink"))?;
-        writeln!(out, "    {} {link} -> {source}", color.green("link"))?;
+        writeln!(out, "        {} {link}", color.red("unlink"))?;
+        writeln!(out, "        {} {link} -> {source}", color.green("link"))?;
     }
     for (link, source) in &changes.create {
-        writeln!(out, "    {} {link} -> {source}", color.green("link"))?;
+        writeln!(out, "        {} {link} -> {source}", color.green("link"))?;
     }
     Ok(())
 }
@@ -469,8 +469,8 @@ mod tests {
             render(&t.store, &plan)?,
             "\
 web1
-  add nginx
-    + nginx.conf
+    add nginx
+        + nginx.conf
 
 ",
         );
@@ -507,10 +507,10 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  add nginx
-    + manifest.json
-    + nginx.conf
-    enable nginx.service
+    add nginx
+        + manifest.json
+        + nginx.conf
+        enable nginx.service
 
 ",
         );
@@ -549,14 +549,14 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  add nginx
-    + manifest.json
-    + nginx.conf
-    + systemd/nginx-reload.timer
-    + systemd/nginx.service
-    link nginx-reload.timer
-    link nginx.service
-    enable nginx.service
+    add nginx
+        + manifest.json
+        + nginx.conf
+        + systemd/nginx-reload.timer
+        + systemd/nginx.service
+        link nginx-reload.timer
+        link nginx.service
+        enable nginx.service
 
 ",
         );
@@ -594,10 +594,10 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  remove nginx
-    disable nginx.service
-    unlink nginx-reload.timer
-    unlink nginx.service
+    remove nginx
+        disable nginx.service
+        unlink nginx-reload.timer
+        unlink nginx.service
 
 ",
         );
@@ -634,8 +634,8 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  remove nginx
-    disable nginx.service
+    remove nginx
+        disable nginx.service
 
 ",
         );
@@ -668,8 +668,8 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  update nginx
-    ~ nginx.conf
+    update nginx
+        ~ nginx.conf
 
 ",
         );
@@ -709,9 +709,9 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  update nginx
-    ~ nginx.conf
-    restart nginx.service
+    update nginx
+        ~ nginx.conf
+        restart nginx.service
 
 ",
         );
@@ -742,8 +742,8 @@ web1
             render(&t.store, &plan)?,
             "\
 web1 (diverged)
-  add nginx
-    + nginx.conf
+    add nginx
+        + nginx.conf
 
 ",
         );
@@ -774,8 +774,8 @@ web1 (diverged)
             render(&t.store, &plan)?,
             "\
 web1 (rollback unavailable)
-  add nginx
-    + nginx.conf
+    add nginx
+        + nginx.conf
 
 ",
         );
@@ -810,10 +810,10 @@ web1 (rollback unavailable)
             render(&t.store, &plan)?,
             "\
 web1
-  add nginx
-    + manifest.json
-    + nginx.conf
-    link /etc/nginx/nginx.conf -> nginx.conf
+    add nginx
+        + manifest.json
+        + nginx.conf
+        link /etc/nginx/nginx.conf -> nginx.conf
 
 ",
         );
@@ -851,11 +851,11 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  add nginx
-    + manifest.json
-    + nginx.conf
-    link /etc/nginx/nginx.conf -> nginx.conf
-    enable nginx.service
+    add nginx
+        + manifest.json
+        + nginx.conf
+        link /etc/nginx/nginx.conf -> nginx.conf
+        enable nginx.service
 
 ",
         );
@@ -896,12 +896,12 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  update nginx
-    ~ manifest.json
-    + new.conf
-    - old.conf
-    unlink /etc/nginx/nginx.conf
-    link /etc/nginx/nginx.conf -> new.conf
+    update nginx
+        ~ manifest.json
+        + new.conf
+        - old.conf
+        unlink /etc/nginx/nginx.conf
+        link /etc/nginx/nginx.conf -> new.conf
 
 ",
         );
@@ -936,8 +936,8 @@ web1
             render(&t.store, &plan)?,
             "\
 web1
-  remove nginx
-    unlink /etc/nginx/nginx.conf
+    remove nginx
+        unlink /etc/nginx/nginx.conf
 
 ",
         );
