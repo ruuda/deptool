@@ -254,11 +254,8 @@ fn activate(
     // TODO: log individual symlink changes.
     checkout::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
 
-    let mut touched: Vec<&str> = Vec::new();
-
     for unit in &changes.units.disable {
         log(&format!("disabling {unit}"));
-        touched.push(unit);
         systemctl_ok(&["disable", "--now", unit]);
     }
 
@@ -270,14 +267,13 @@ fn activate(
     let symlink_changes = checkout::reconcile_unit_symlinks(desired_units, apps_dir, unit_dir)?;
 
     // Only poke systemd when something actually changed on disk.
-    let needs_reload = !symlink_changes.is_empty()
-        || !touched.is_empty()
-        || !changes.units.enable.is_empty()
-        || !changes.units.restart.is_empty();
+    let needs_reload = !symlink_changes.is_empty() || !changes.units.is_empty();
     if needs_reload {
         log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
     }
+
+    let mut touched: Vec<&str> = Vec::new();
 
     for unit in &changes.units.enable {
         log(&format!("enabling {unit}"));
@@ -300,10 +296,8 @@ fn activate(
     std::thread::sleep(std::time::Duration::from_millis(300));
 
     let mut is_active_cmd = vec!["is-active"];
-    for unit in changes.units.enable.iter().chain(&changes.units.restart) {
-        is_active_cmd.push(unit);
-    }
-    let all_active = is_active_cmd.len() == 1 || systemctl_ok(&is_active_cmd);
+    is_active_cmd.extend(&touched);
+    let all_active = systemctl_ok(&is_active_cmd);
 
     // Force color: systemctl won't color because stdout is a pipe,
     // but the output is forwarded to the operator's terminal.
