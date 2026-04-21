@@ -244,17 +244,20 @@ fn activate(
     desired_units: &plan::DesiredUnits,
     changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
+    log: &mut dyn FnMut(&str),
     apps_dir: &Path,
     unit_dir: &Path,
 ) -> std::result::Result<(), ApplyError> {
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
     // that these symlinks provide.
+    // TODO: log individual symlink changes.
     checkout::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
 
     let mut touched: Vec<&str> = Vec::new();
 
     for unit in &changes.units.disable {
+        log(&format!("disabling {unit}"));
         touched.push(unit);
         systemctl_ok(&["disable", "--now", unit]);
     }
@@ -272,14 +275,17 @@ fn activate(
         || !changes.units.enable.is_empty()
         || !changes.units.restart.is_empty();
     if needs_reload {
+        log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
     }
 
     for unit in &changes.units.enable {
+        log(&format!("enabling {unit}"));
         touched.push(unit);
         systemctl_ok(&["enable", "--now", unit]);
     }
     for unit in &changes.units.restart {
+        log(&format!("restarting {unit}"));
         touched.push(unit);
         systemctl_ok(&["restart", unit]);
     }
@@ -340,9 +346,11 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        Box::new(move |desired_units, changes, emit| {
-            activate(desired_units, changes, emit, &apps_dir, &unit_dir)
-        }),
+        Box::new(
+            move |desired_units, changes, emit, log: &mut dyn FnMut(&str)| {
+                activate(desired_units, changes, emit, log, &apps_dir, &unit_dir)
+            },
+        ),
         Some(log_path),
     )
 }

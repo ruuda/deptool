@@ -16,8 +16,8 @@ type Result<T> = std::result::Result<T, ApplyError>;
 
 const OID_PREFIX_LEN: usize = 10;
 
-/// Truncate an oid to a short prefix for use in directory names.
-fn oid_prefix(oid: Oid) -> String {
+/// Truncate an oid to a short prefix for use in directory names and logs.
+pub fn oid_prefix(oid: Oid) -> String {
     let mut buf = oid.to_string();
     buf.truncate(OID_PREFIX_LEN);
     buf
@@ -152,11 +152,12 @@ fn gc_app_dir(app_dir: &Path, log: &mut impl FnMut(std::fmt::Arguments<'_>)) {
             continue;
         }
         if path.is_dir() {
-            if let Err(err) = fs::remove_dir_all(&path) {
-                log(format_args!(
+            match fs::remove_dir_all(&path) {
+                Ok(()) => log(format_args!("gc: removed {}", path.display())),
+                Err(err) => log(format_args!(
                     "gc: failed to remove {}: {err}",
                     path.display()
-                ));
+                )),
             }
         }
     }
@@ -173,14 +174,22 @@ pub fn checkout(
     host: &Hostname,
     apps_dir: &Path,
     mode: CheckoutMode,
+    mut log: impl FnMut(std::fmt::Arguments<'_>),
 ) -> Result<()> {
     for (app, change) in app_diffs {
         match change {
-            AppDiff::Add { .. } | AppDiff::Update { .. } => {
+            AppDiff::Add { .. } => {
+                log(format_args!("adding app {app}"));
+                let oid = commit_oid.expect("Add/Update requires a target commit");
+                checkout_app(store, oid, host, app, apps_dir, mode)?;
+            }
+            AppDiff::Update { .. } => {
+                log(format_args!("updating app {app}"));
                 let oid = commit_oid.expect("Add/Update requires a target commit");
                 checkout_app(store, oid, host, app, apps_dir, mode)?;
             }
             AppDiff::Remove { .. } => {
+                log(format_args!("removing app {app}"));
                 remove_app(app, apps_dir)?;
             }
         }
@@ -669,6 +678,7 @@ mod tests {
                 current,
                 Some(commit),
             )?;
+            let ignore_log = |_: std::fmt::Arguments<'_>| {};
             checkout(
                 &self.repo.store,
                 Some(commit),
@@ -676,6 +686,7 @@ mod tests {
                 host,
                 self.apps.path(),
                 CheckoutMode::Fresh,
+                ignore_log,
             )?;
 
             // Reconcile here so tests that check unit symlinks still work.
