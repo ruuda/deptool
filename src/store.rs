@@ -73,7 +73,12 @@ impl Store {
 
     /// Recursively build a Git tree from a directory on disk.
     pub fn build_tree(&self, dir: &Path) -> Result<Oid> {
-        build_tree_recursive(&self.repo, dir)
+        // An entirely empty config directory is valid (no hosts configured),
+        // so fall back to writing an empty tree.
+        match build_tree_recursive(&self.repo, dir)? {
+            Some(oid) => Ok(oid),
+            None => Ok(self.repo.treebuilder(None)?.write()?),
+        }
     }
 
     /// Commit a tree to `refs/heads/main`.
@@ -354,7 +359,10 @@ pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
     entries
 }
 
-fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
+/// Build a git tree from a directory. Returns `None` when the subtree
+/// contains no files (only empty directories), because empty trees have
+/// no meaning in git and would suppress Remove diffs in deptool.
+fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Option<Oid>> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
@@ -366,8 +374,9 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
 
         match entry.file_type()? {
             ft if ft.is_dir() => {
-                let oid = build_tree_recursive(repo, &entry.path())?;
-                tb.insert(name, oid, 0o040000)?;
+                if let Some(oid) = build_tree_recursive(repo, &entry.path())? {
+                    tb.insert(name, oid, 0o040000)?;
+                }
             }
             ft if ft.is_file() => {
                 let contents = fs::read(entry.path())?;
@@ -378,7 +387,13 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Oid> {
         }
     }
 
-    Ok(tb.write()?)
+    let oid = tb.write()?;
+    let tree = repo.find_tree(oid)?;
+    if tree.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(oid))
+    }
 }
 
 #[cfg(test)]
@@ -502,5 +517,35 @@ mod tests {
         ]);
 
         t.store.validate(t.get_commit_tree_oid(oid))
+    }
+
+    #[test]
+    fn build_tree_prunes_directories_with_no_files() -> Result<()> {
+        let dir = crate::testutil::TempDir::new("config");
+        let host_dir = dir.path().join("host");
+
+        // nsd/ contains only empty subdirectories -- the entire subtree
+        // should be pruned, not just the leaf directories.
+        fs::create_dir_all(host_dir.join("nsd/systemd"))?;
+        fs::create_dir_all(host_dir.join("nsd/zones"))?;
+        fs::write(host_dir.join("kept.conf"), b"data")?;
+
+        let t = TestRepo::new();
+        let oid = t.store.build_tree(dir.path())?;
+        let tree = t.store.repo.find_tree(oid)?;
+        let host_tree = t
+            .store
+            .repo
+            .find_tree(tree.get_name("host").expect("host entry exists").id())?;
+
+        assert!(
+            host_tree.get_name("nsd").is_none(),
+            "directory with only empty subdirectories should be pruned",
+        );
+        assert!(
+            host_tree.get_name("kept.conf").is_some(),
+            "non-empty entries should be kept",
+        );
+        Ok(())
     }
 }
