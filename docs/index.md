@@ -43,14 +43,12 @@ Deptool expects configuration for your entire cluster materialized in a
 directory, the _config tree_. By convention this directory is named
 `deptool_config`. You can maintain this directory tree by hand, but for more
 complex configurations, you probably want to generate it using an external tool.
-Deployment is then a two-stage process:
 
- * `deptool commit` records the contents of `deptool_config` into the _store_
-   as a new cluster configuraton that can be deployed.
- * `deptool deploy` deploys the latest commit. It determines which hosts are
-   affected and computes a deployment plan (completely offline). After
-   you accept the plan, Deptool connects to affected hosts and applies the new
-   state there.
+To deploy, run `deptool deploy deptool_config`. This commits the desired cluster
+state into Deptool’s _store_. From the store it determines which hosts are
+affectped and computes a deployment plan, completely offline. After you accept
+this plan, Deptool connects to the affected hosts and applies the new state
+there.
 
 ## How it works
 
