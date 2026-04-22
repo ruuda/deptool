@@ -342,7 +342,7 @@ Commit and deploy this:
         update caddy
             ~ manifest.json
             + tmpfiles.conf
-            link/etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
+            link /etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
             restart caddy.service
 
     Rollback unavailable for some hosts.
