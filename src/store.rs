@@ -81,20 +81,11 @@ impl Store {
         }
     }
 
-    /// Commit a tree to `refs/heads/main`.
+    /// Create a commit on top of `refs/heads/main` without advancing the ref.
     ///
-    /// Returns `None` if the tree is identical to the current head.
-    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Option<Oid>> {
-        let tree = self.repo.find_tree(tree_oid)?;
-
-        // Use the ambient Git author metadata if configured, fall back to
-        // hard-coded credentials otherwise. This is mostly relevant in tests when
-        // they run in e.g. an isolated Nix build environment.
-        let author_sig = match self.repo.signature() {
-            Ok(sig) => sig,
-            Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
-        };
-
+    /// If the tree is identical to the current head, returns the existing
+    /// commit -- hosts may still need to catch up.
+    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Oid> {
         let parent = self
             .repo
             .find_reference("refs/heads/main")
@@ -102,20 +93,32 @@ impl Store {
             .map(|r| r.peel_to_commit())
             .transpose()?;
 
-        if parent.as_ref().is_some_and(|c| c.tree_id() == tree_oid) {
-            return Ok(None);
+        if let Some(ref p) = parent {
+            if p.tree_id() == tree_oid {
+                return Ok(p.id());
+            }
         }
 
+        let tree = self.repo.find_tree(tree_oid)?;
+        let author_sig = match self.repo.signature() {
+            Ok(sig) => sig,
+            Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
+        };
         let parents: Vec<&Commit> = parent.iter().collect();
 
-        Ok(Some(self.repo.commit(
-            Some("refs/heads/main"),
+        Ok(self.repo.commit(
+            None,
             &author_sig,
             &author_sig,
             "Update config",
             &tree,
             &parents,
-        )?))
+        )?)
+    }
+
+    /// Advance `refs/heads/main` to the given commit.
+    pub fn advance_main(&self, commit_oid: Oid) -> Result<()> {
+        self.set_ref("refs/heads/main", commit_oid, RefUpdate::AdvanceMain)
     }
 
     /// Check out a subtree (host/app) from a commit into a target directory.
@@ -150,6 +153,7 @@ impl Store {
             }
             RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
             RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
+            RefUpdate::AdvanceMain => "deploy: advance main".to_string(),
         };
         let force = true;
         self.repo.reference(refname, oid, force, &reflog_msg)?;
@@ -346,6 +350,7 @@ pub enum RefUpdate<'a> {
     Rollback { operator: &'a str },
     ApplyComplete,
     FetchStale,
+    AdvanceMain,
 }
 
 /// Get the tree entries (name -> oid) one level deep.
@@ -415,12 +420,12 @@ mod tests {
     }
 
     #[test]
-    fn commit_tree_returns_none_when_unchanged() {
+    fn commit_tree_reuses_existing_commit_when_unchanged() {
         let t = TestRepo::new();
         let oid = t.commit(&[("web1/app/config", b"v1")]);
         let tree_oid = t.get_commit_tree_oid(oid);
 
-        assert!(t.store.commit_tree(tree_oid).unwrap().is_none());
+        assert_eq!(t.store.commit_tree(tree_oid).unwrap(), oid);
     }
 
     #[test]

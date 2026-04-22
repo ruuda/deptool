@@ -44,16 +44,6 @@ enum PushMode {
 
 #[derive(Debug, Clone, Bpaf)]
 enum Cmd {
-    /// Record a directory as a new commit in the store.
-    #[bpaf(command)]
-    Commit {
-        /// Path to the local store (default: ./deptool_store).
-        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
-        store: PathBuf,
-        /// Directory to commit.
-        #[bpaf(positional("DIR"))]
-        dir: PathBuf,
-    },
     /// Plan and apply changes to all hosts.
     #[bpaf(command)]
     Deploy {
@@ -80,6 +70,9 @@ enum Cmd {
         push_mode: PushMode,
         #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote), hide)]
         mode: DeployMode,
+        /// Directory containing the cluster config to deploy.
+        #[bpaf(positional("DIR"))]
+        dir: PathBuf,
     },
     /// Commands that run on target hosts (used internally over SSH).
     #[bpaf(command)]
@@ -98,14 +91,17 @@ struct Args {
 
 fn run_deploy(
     store: PathBuf,
+    dir: PathBuf,
     remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
     push_mode: PushMode,
     mode: DeployMode,
 ) -> Result<()> {
-    let repo = Store::open(&store)?;
-    let plan = plan::make_plan(&repo)?;
+    let repo = Store::open_or_init(&store)?;
+    let tree_oid = repo.build_tree(&dir)?;
+    let commit = repo.commit_tree(tree_oid)?;
+    let plan = plan::make_plan(&repo, commit)?;
 
     if plan.hosts.is_empty() {
         eprintln!("All hosts are up to date.");
@@ -208,17 +204,9 @@ fn run() -> Result<()> {
     let args = args().run();
 
     match args.cmd {
-        Cmd::Commit { store, dir } => {
-            let store = Store::open_or_init(&store)?;
-            let tree_oid = store.build_tree(&dir)?;
-            store.validate(tree_oid)?;
-            match store.commit_tree(tree_oid)? {
-                Some(commit_oid) => println!("{commit_oid}"),
-                None => println!("No changes."),
-            }
-        }
         Cmd::Deploy {
             store,
+            dir,
             remote_store,
             plan_only,
             confirm_mode,
@@ -226,6 +214,7 @@ fn run() -> Result<()> {
             mode,
         } => run_deploy(
             store,
+            dir,
             remote_store,
             plan_only,
             confirm_mode,

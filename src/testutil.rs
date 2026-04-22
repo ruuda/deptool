@@ -60,12 +60,12 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
     Ok(builder.write()?)
 }
 
-/// Create a commit with the given files, without touching the filesystem.
+/// Create a commit with the given files and advance main.
 pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
-    Ok(store
-        .commit_tree(tree_oid)?
-        .expect("test commit has changes"))
+    let oid = store.commit_tree(tree_oid)?;
+    store.advance_main(oid)?;
+    Ok(oid)
 }
 
 /// A bare Git repository backed by a temporary directory.

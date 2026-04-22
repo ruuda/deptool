@@ -580,6 +580,10 @@ pub fn run_deploy(
         )));
     }
 
+    // All hosts are locked -- we are committed to deploying this tree.
+    // Advance main so that the next plan uses this commit as the base.
+    store.advance_main(plan.commit)?;
+
     let packs = build_packs(store, plan)?;
     let store_path = store.path();
 

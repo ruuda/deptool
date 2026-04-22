@@ -359,29 +359,23 @@ pub fn diff_host(
     Ok((app_diffs, system))
 }
 
-/// Build a deployment plan by comparing main against each host's current ref.
+/// Build a deployment plan by comparing a target commit against each host's
+/// `current` ref.
 ///
 /// TODO: Currently this is based only on the repository state, which means we
 /// need to fetch the remote refs ahead of time. We should split this into two
 /// stages: first eliminate hosts that we definitely do not need to touch based
 /// on current refs. Then for hosts that do need touching we refresh their refs,
 /// and plan again. We could just use the same plan function for that though.
-pub fn make_plan(store: &Store) -> Result<Plan> {
-    let main_commit = store
-        .repo
-        .find_reference("refs/heads/main")?
-        .peel_to_commit()?;
-    let commit = main_commit.id();
-    let main_tree = main_commit.tree()?;
-
-    store.validate(main_tree.id())?;
-
+pub fn make_plan(store: &Store, commit: Oid) -> Result<Plan> {
+    let target_tree = store.get_commit_tree(commit)?;
+    store.validate(target_tree.id())?;
     let mut hosts = BTreeMap::new();
 
-    for entry in main_tree.iter() {
+    for entry in target_tree.iter() {
         let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
 
-        let target_apps = store.get_host_apps(&main_tree, &host)?;
+        let target_apps = store.get_host_apps(&target_tree, &host)?;
 
         let (expected_current, current_apps) = match store
             .repo
@@ -434,9 +428,9 @@ mod tests {
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
         let t = TestRepo::new();
-        t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
+        let c = t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c)?;
         assert_eq!(plan.hosts.len(), 1);
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 2);
@@ -451,9 +445,9 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
         t.set_host_tracking_ref("web1", c1);
 
-        t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["nginx"].diff, AppDiff::Update { .. }));
@@ -466,9 +460,9 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
         t.set_host_tracking_ref("web1", c1);
 
-        t.commit(&[("web1/nginx/conf", b"a")]);
+        let c2 = t.commit(&[("web1/nginx/conf", b"a")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["rofld"].diff, AppDiff::Remove { .. }));
@@ -481,9 +475,9 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
         t.set_host_tracking_ref("web1", c1);
 
-        t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
+        let c2 = t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         assert!(!plan.hosts.contains_key(&"web1".into()));
         let apps = &plan.hosts[&"web2".into()].apps;
         assert_eq!(apps.len(), 1);
@@ -497,7 +491,7 @@ mod tests {
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
         t.set_host_tracking_ref("web1", c1);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c1)?;
         assert!(plan.hosts.is_empty());
         Ok(())
     }
@@ -507,8 +501,8 @@ mod tests {
         let t = TestRepo::new();
         let c1 = t.commit(before);
         t.set_host_tracking_ref("web1", c1);
-        t.commit(after);
-        let plan = make_plan(&t.store)?;
+        let c2 = t.commit(after);
+        let plan = make_plan(&t.store, c2)?;
         let host = plan.hosts.into_values().next().expect("plan has one host");
         let app = host.apps.into_values().next().expect("host has one app");
         Ok(app.system)
@@ -631,9 +625,9 @@ mod tests {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         t.set_host_tracking_ref("web1", c1);
-        t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         assert!(plan.hosts[&"web1".into()].is_rollback_safe);
         Ok(())
     }
@@ -643,9 +637,9 @@ mod tests {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
         t.set_host_tracking_ref("web1", c1);
-        t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         assert!(plan.hosts[&"web1".into()].is_rollback_safe);
         Ok(())
     }
@@ -655,7 +649,7 @@ mod tests {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
         t.set_host_tracking_ref("web1", c1);
-        t.commit(&[
+        let c2 = t.commit(&[
             ("web1/nginx/conf", b"v2"),
             (
                 "web1/nginx/manifest.json",
@@ -664,7 +658,7 @@ mod tests {
             ("web1/rofld/conf", b"v1"),
         ]);
 
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c2)?;
         assert!(!plan.hosts[&"web1".into()].is_rollback_safe);
         Ok(())
     }
@@ -685,10 +679,10 @@ mod tests {
         // abuse FetchStale here.
         t.store
             .set_ref("refs/heads/main", c1, crate::store::RefUpdate::FetchStale)?;
-        t.commit(&[("web1/nginx/conf", b"v3")]);
+        let c3 = t.commit(&[("web1/nginx/conf", b"v3")]);
 
         // The new commit descends from c1, but the host has c2. Not a fast-forward.
-        let plan = make_plan(&t.store)?;
+        let plan = make_plan(&t.store, c3)?;
         assert!(!plan.hosts[&"web1".into()].is_fast_forward);
         Ok(())
     }
