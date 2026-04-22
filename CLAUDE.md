@@ -68,6 +68,9 @@ Post-generation checklist (run after writing code, before presenting):
  - For each `replace_all` edit: will it match inside longer lines at different indentation levels? When in doubt, edit distinct groups separately.
  - For each deleted test: where is that behavior tested now?
  - For each match on a mode/flag: does the test verify *both* branches produce distinct behavior?
+ - For each new parameter: is this data already available through another parameter (e.g. a field of a struct already being passed)?
+ - For each new ref/file/IO operation: is there an existing function or pattern in the codebase that already does this? Use it.
+ - For each `true`/`false`/numeric literal at a call site: would a reader know what it means? Extract to a named variable.
 
 ## Working with Git
 
