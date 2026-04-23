@@ -104,13 +104,6 @@ struct ProgressInner {
 }
 
 impl DeployProgress {
-    /// Create a progress tracker that prints status to the terminal.
-    pub fn with_status_printer(hosts: Vec<Hostname>) -> Self {
-        use crate::display::{StatusPrinter, UseColor};
-        let printer = StatusPrinter::new(UseColor::from_env());
-        Self::new(hosts, Box::new(printer))
-    }
-
     pub fn new(hosts: Vec<Hostname>, observer: Box<dyn DeployObserver>) -> Self {
         let states = hosts.into_iter().map(|h| (h, HostState::Pending)).collect();
         Self {
@@ -588,48 +581,7 @@ fn filter_systemd_status(output: &str) -> String {
 mod tests {
     use super::*;
     use crate::plan::HostPlan;
-    use crate::testutil::{TestHost, TestRepo};
-
-    struct NoopObserver;
-    impl DeployObserver for NoopObserver {
-        fn state_changed(&mut self, _: &BTreeMap<Hostname, HostState>) {}
-        fn log_message(&mut self, _: &BTreeMap<Hostname, HostState>, _: &Hostname, _: &str) {}
-    }
-
-    fn test_progress(hosts: &[&str]) -> DeployProgress {
-        let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
-        DeployProgress::new(hosts, Box::new(NoopObserver))
-    }
-
-    /// In-memory connector for tests, using pre-built connection factories.
-    struct TestConnector {
-        factories: BTreeMap<Hostname, Box<dyn Fn() -> Box<dyn Connection> + Send + Sync>>,
-    }
-
-    fn test_connector(hosts: &[&TestHost]) -> TestConnector {
-        let mut factories = BTreeMap::new();
-        for host in hosts {
-            let hostname = host.session.hostname.clone();
-            let factory: Box<dyn Fn() -> _ + Send + Sync> = Box::new(host.connector());
-            factories.insert(hostname, factory);
-        }
-        TestConnector { factories }
-    }
-
-    impl HostConnector for TestConnector {
-        fn connect(&self, host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
-            let factory = self.factories.get(host).ok_or_else(|| {
-                HostError::ConnectionFailed(format!(
-                    "ssh: connect to host {host}: Connection timed out"
-                ))
-            })?;
-            Ok(factory())
-        }
-
-        fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {
-            panic!("install not expected in tests")
-        }
-    }
+    use crate::testutil::{TestHost, TestRepo, test_connector, test_progress};
 
     /// Run a deploy through run_deploy using in-memory connections.
     fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {

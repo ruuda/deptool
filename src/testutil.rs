@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use git2::{Oid, Repository};
 
 use crate::agent::AgentSession;
-use crate::deploy::Connection;
-use crate::error::Result;
+use crate::deploy::{Connection, DeployObserver, DeployProgress, HostState};
+use crate::error::{HostError, Result};
+use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
+use crate::setup::HostConnector;
 use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -366,4 +368,48 @@ fn collect_files(base: &Path, dir: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
             out.insert(rel.to_string_lossy().to_string(), content);
         }
     }
+}
+
+/// Observer that discards all progress updates.
+pub struct NoopObserver;
+
+impl DeployObserver for NoopObserver {
+    fn state_changed(&mut self, _: &BTreeMap<Hostname, HostState>) {}
+    fn log_message(&mut self, _: &BTreeMap<Hostname, HostState>, _: &Hostname, _: &str) {}
+}
+
+/// In-memory connector for tests, using pre-built connection factories.
+pub struct TestConnector {
+    factories: BTreeMap<Hostname, Box<dyn Fn() -> Box<dyn Connection> + Send + Sync>>,
+}
+
+pub fn test_connector(hosts: &[&TestHost]) -> TestConnector {
+    let mut factories = BTreeMap::new();
+    for host in hosts {
+        let hostname = host.session.hostname.clone();
+        let factory: Box<dyn Fn() -> Box<dyn Connection> + Send + Sync> =
+            Box::new(host.connector());
+        factories.insert(hostname, factory);
+    }
+    TestConnector { factories }
+}
+
+impl HostConnector for TestConnector {
+    fn connect(&self, host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
+        let factory = self.factories.get(host).ok_or_else(|| {
+            HostError::ConnectionFailed(format!(
+                "ssh: connect to host {host}: Connection timed out"
+            ))
+        })?;
+        Ok(factory())
+    }
+
+    fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {
+        panic!("install not expected in tests")
+    }
+}
+
+pub fn test_progress(hosts: &[&str]) -> DeployProgress {
+    let hosts = hosts.iter().map(|h| Hostname::from(*h)).collect();
+    DeployProgress::new(hosts, Box::new(NoopObserver))
 }

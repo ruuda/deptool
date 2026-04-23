@@ -236,7 +236,8 @@ fn run_deploy(
     let operator = format!("{user}@{hostname}");
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
-    let progress = deploy::DeployProgress::with_status_printer(hosts);
+    let observer = display::StatusPrinter::new(display::UseColor::from_env());
+    let progress = deploy::DeployProgress::new(hosts, Box::new(observer));
 
     deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress)
 }
@@ -261,7 +262,8 @@ fn run() -> Result<()> {
         } => {
             let store = Store::open_or_init(&store)?;
             let connector = RemoteConnector::new(&remote_store)?;
-            sync::run_sync(&store, &dir, &connector, mode)?;
+            let observer = display::StatusPrinter::new(display::UseColor::from_env());
+            sync::run_sync(&store, &dir, &connector, mode, Box::new(observer))?;
         }
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }

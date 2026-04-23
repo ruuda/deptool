@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::deploy::{self, Connection, DeployProgress, HostState, StaleHost};
+use crate::deploy::{self, Connection, DeployObserver, DeployProgress, HostState, StaleHost};
 use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
@@ -31,6 +31,7 @@ pub fn run_sync(
     dir: &Path,
     connector: &dyn HostConnector,
     mode: SyncMode,
+    observer: Box<dyn DeployObserver>,
 ) -> Result<()> {
     let tree_oid = store.build_tree(dir)?;
     let config_hosts = store.host_trees(tree_oid)?;
@@ -53,11 +54,10 @@ pub fn run_sync(
         eprintln!("All hosts are up to date.");
         return Ok(());
     }
-    let progress = DeployProgress::with_status_printer(hosts_to_sync.clone());
+    let progress = &DeployProgress::new(hosts_to_sync.clone(), observer);
 
     // Connect to all hosts in parallel, checking Hello for staleness.
     let stale: Mutex<Vec<(Hostname, Oid, Box<dyn Connection>)>> = Mutex::new(Vec::new());
-    let progress = &progress;
     std::thread::scope(|s| {
         for host in &hosts_to_sync {
             let stale = &stale;
@@ -158,4 +158,46 @@ fn fetch_from_stale_host(
     )?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Result;
+    use crate::testutil::{NoopObserver, TempDir, TestHost, TestRepo, test_connector};
+
+    #[test]
+    fn sync_updates_stale_tracking_ref() -> Result<()> {
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c2 = driver.commit(&[("web1/app/conf", b"v2")]);
+
+        // Host has c2 deployed, but the driver only knows about c1.
+        let host = TestHost::new("web1");
+        let pack = driver.store.create_pack(c2, None)?;
+        host.session.store.write_pack(&pack)?;
+        host.set_current(c2);
+        driver.set_host_tracking_ref("web1", c1);
+
+        // Create a config dir with changes so the host looks affected.
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
+        std::fs::write(config.path().join("web1/app/conf"), b"v3").unwrap();
+
+        let connector = test_connector(&[&host]);
+        run_sync(
+            &driver.store,
+            config.path(),
+            &connector,
+            SyncMode::OnlyAffectedHosts,
+            Box::new(NoopObserver),
+        )?;
+
+        assert_eq!(
+            driver.get_host_tracking_ref("web1"),
+            Some(c2),
+            "tracking ref updated to host's current commit",
+        );
+        Ok(())
+    }
 }
