@@ -32,6 +32,7 @@
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
  - For large tasks, run `git diff` at the end and review your own work. It is very unlikely that you got a perfect version on your very first iteration, usually there are substantial things to change.
+ - Before presenting code to the user, run the post-generation checklist below and fix what you find. Do not skip this step. Do not say "the code looks good" without having run `git diff` and walked every checklist item.
  - I will review your changes afterwards, so optimize for small reviewable diffs. Do not change comments or code without a good reason.
  - If it gets complex, typecheck at intermediate points with `cargo check --quiet`.
  - If the changes touch a test or code covered by tests, confirm with `cargo test --quiet`.
@@ -67,10 +68,14 @@ Post-generation checklist (run after writing code, before presenting):
  - For each new function: are the arguments in the right order (stable before varying, old before new)?
  - For each `replace_all` edit: will it match inside longer lines at different indentation levels? When in doubt, edit distinct groups separately.
  - For each deleted test: where is that behavior tested now?
+ - For each deleted or moved piece of code: what invariant or purpose did it serve at its original location? Is that still enforced?
+ - For each bug fix: does the same bug exist in a shared function that this code calls? Fix it at the root, not the leaf.
  - For each match on a mode/flag: does the test verify *both* branches produce distinct behavior?
  - For each new parameter: is this data already available through another parameter (e.g. a field of a struct already being passed)?
  - For each new ref/file/IO operation: is there an existing function or pattern in the codebase that already does this? Use it.
  - For each `true`/`false`/numeric literal at a call site: would a reader know what it means? Extract to a named variable.
+ - For each `replace_all` on a word: will it match inside a longer word (e.g. "started" inside "restarted")? Use more context or targeted edits.
+ - For each doc comment on changed code: does it still match the current signature and behavior? Re-read it after every refactor.
 
 ## Working with Git
 
