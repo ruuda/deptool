@@ -57,3 +57,5 @@ it. The symlink points through the app’s `current` symlink. While placing unit
 in this directory makes them available to systemd, they need to be
 activated/enabled separately, see
 [`units_enabled`](manifests.md#systemdunits_enabled) in the manifest.
+
+<!-- TODO(ruuda): Document sysusers/ directory, analogous to systemd/ but for /etc/sysusers.d/. -->

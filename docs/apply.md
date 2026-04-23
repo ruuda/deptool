@@ -11,6 +11,7 @@ The oid prefix is the first 10 hex digits of the commit oid. Each checkout
 is an immutable directory. We never mutate a checkout in place. Old
 checkouts are small (just config files) and are kept indefinitely.
 
+<!-- TODO(ruuda): Update tree to include sysusers/ alongside systemd/. -->
 A typical app directory:
 
     /var/lib/deptool/apps/nginx/current/
@@ -64,6 +65,7 @@ whether they point into `/var/lib/deptool/`. This makes the operation
 convergent: it does not matter what state the system was in before. Crashed
 mid-deploy, manually tampered with, fresh boot — the result is the same.
 
+<!-- TODO(ruuda): Document the sysusers phase (between manifest symlinks and systemd units). -->
 After all per-app checkouts and symlink swaps are done, manifest symlinks
 (e.g. config files in `/etc`) are reconciled first -- units may depend on
 paths that these symlinks provide. Then the systemd phase runs in this
