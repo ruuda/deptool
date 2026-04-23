@@ -74,6 +74,7 @@ Post-generation checklist (run after writing code, before presenting):
  - For each new parameter: is this data already available through another parameter (e.g. a field of a struct already being passed)?
  - For each new ref/file/IO operation: is there an existing function or pattern in the codebase that already does this? Use it.
  - For each `true`/`false`/numeric literal at a call site: would a reader know what it means? Extract to a named variable.
+ - For each new `bool` parameter: use an enum instead. `frobnicate(true)` is meaningless; `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
  - For each `replace_all` on a word: will it match inside a longer word (e.g. "started" inside "restarted")? Use more context or targeted edits.
  - For each doc comment on changed code: does it still match the current signature and behavior? Re-read it after every refactor.
 
