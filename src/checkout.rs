@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::os::unix::fs as unix_fs;
+use std::os::unix::fs::{self as unix_fs, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use git2::Oid;
@@ -220,6 +220,7 @@ pub fn reconcile_managed_symlinks(
     // system). Create it on first use rather than requiring provisioning.
     if !desired.is_empty() && !target_dir.exists() {
         fs::create_dir_all(target_dir)?;
+        fs::set_permissions(target_dir, fs::Permissions::from_mode(0o755))?;
     }
 
     for (name, desired_target) in desired {
