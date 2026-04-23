@@ -406,6 +406,20 @@ impl Store {
                         "app {app} symlink target {target} is not an absolute path",
                     )));
                 }
+                // Manifest symlinks must not target directories that are
+                // managed by reconcile_managed_symlinks, because that
+                // function removes any symlink pointing into apps_dir
+                // that isn't in its desired set -- it can't distinguish
+                // manifest symlinks from managed ones.
+                for managed_dir in ["/etc/systemd/system", "/etc/sysusers.d"] {
+                    if target.starts_with(&format!("{managed_dir}/")) {
+                        return Err(StoreError::InvalidConfig(format!(
+                            "app {app} symlink targets {managed_dir}/ which is \
+                             managed automatically; use the systemd/ or sysusers/ \
+                             app directory instead",
+                        )));
+                    }
+                }
                 if app_tree.get_path(Path::new(source)).is_err() {
                     return Err(StoreError::InvalidConfig(format!(
                         "app {app} symlink source {source} does not exist in the app tree",
@@ -631,6 +645,38 @@ mod tests {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("not an absolute path"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_symlink_into_unit_dir() {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/systemd/system/nginx.service": "nginx.service"}}"#;
+        let oid = t.commit(&[
+            ("host/nginx/manifest.json", manifest),
+            ("host/nginx/nginx.service", b"[Service]"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("/etc/systemd/system/"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_symlink_into_sysusers_dir() {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/sysusers.d/myapp.conf": "myapp.conf"}}"#;
+        let oid = t.commit(&[
+            ("host/myapp/manifest.json", manifest),
+            ("host/myapp/myapp.conf", b"u myapp -"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("/etc/sysusers.d/"), "{msg}");
     }
 
     #[test]
