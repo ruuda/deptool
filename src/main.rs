@@ -25,7 +25,7 @@ enum AgentCmd {
 }
 
 #[derive(Debug, Clone, Copy)]
-enum DeployMode {
+enum ConnectMode {
     Local,
     Remote,
 }
@@ -59,8 +59,8 @@ enum Cmd {
             flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
         )]
         confirm_mode: ConfirmMode,
-        #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote), hide)]
-        mode: DeployMode,
+        #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
+        mode: ConnectMode,
         /// Directory containing the cluster config to deploy.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
@@ -81,7 +81,9 @@ enum Cmd {
             long("all"),
             flag(sync::SyncMode::AllHosts, sync::SyncMode::OnlyAffectedHosts)
         )]
-        mode: sync::SyncMode,
+        sync_mode: sync::SyncMode,
+        #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
+        connect_mode: ConnectMode,
         /// Directory containing the cluster config.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
@@ -99,6 +101,20 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
+}
+
+fn make_connector(mode: ConnectMode, remote_store: &Path) -> Result<Box<dyn setup::HostConnector>> {
+    match mode {
+        ConnectMode::Remote => Ok(Box::new(RemoteConnector::new(remote_store)?)),
+        ConnectMode::Local => {
+            let remote_store = remote_store
+                .to_str()
+                .expect("remote store path is valid UTF-8");
+            Ok(Box::new(LocalConnector {
+                remote_store: remote_store.to_string(),
+            }))
+        }
+    }
 }
 
 fn is_shell_safe(s: &str) -> bool {
@@ -191,7 +207,7 @@ fn run_deploy(
     remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
-    mode: DeployMode,
+    mode: ConnectMode,
 ) -> Result<()> {
     let repo = Store::open_or_init(&store)?;
     let tree_oid = repo.build_tree(&dir)?;
@@ -219,17 +235,7 @@ fn run_deploy(
         return Ok(());
     }
 
-    let connector: Box<dyn setup::HostConnector> = match mode {
-        DeployMode::Remote => Box::new(RemoteConnector::new(&remote_store)?),
-        DeployMode::Local => {
-            let remote_store = remote_store
-                .to_str()
-                .expect("remote store path is valid UTF-8");
-            Box::new(LocalConnector {
-                remote_store: remote_store.to_string(),
-            })
-        }
-    };
+    let connector = make_connector(mode, &remote_store)?;
 
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let hostname = prim::read_hostname();
@@ -257,13 +263,14 @@ fn run() -> Result<()> {
         Cmd::Sync {
             store,
             remote_store,
-            mode,
+            sync_mode,
+            connect_mode,
             dir,
         } => {
             let store = Store::open_or_init(&store)?;
-            let connector = RemoteConnector::new(&remote_store)?;
+            let connector = make_connector(connect_mode, &remote_store)?;
             let observer = display::StatusPrinter::new(display::UseColor::from_env());
-            sync::run_sync(&store, &dir, &connector, mode, Box::new(observer))?;
+            sync::run_sync(&store, &dir, &*connector, sync_mode, Box::new(observer))?;
         }
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }
