@@ -74,6 +74,18 @@ impl Store {
         self.repo.path()
     }
 
+    /// Read the host-local `refs/heads/current` commit, if it exists.
+    pub fn current_commit(&self) -> Option<Oid> {
+        self.repo
+            .find_reference("refs/heads/current")
+            .ok()
+            .map(|r| {
+                r.peel_to_commit()
+                    .expect("current ref points to a commit")
+                    .id()
+            })
+    }
+
     /// Get the tree for a commit.
     pub fn get_commit_tree(&self, commit_oid: Oid) -> Result<Tree<'_>> {
         Ok(self.repo.find_commit(commit_oid)?.tree()?)

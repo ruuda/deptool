@@ -151,12 +151,7 @@ impl AgentSession {
     }
 
     fn current_commit(&self) -> Option<Oid> {
-        self.store
-            .repo
-            .find_reference("refs/heads/current")
-            .ok()
-            .map(|r| r.peel_to_commit().expect("current ref points to a commit"))
-            .map(|c| c.id())
+        self.store.current_commit()
     }
 
     fn handle_lock(

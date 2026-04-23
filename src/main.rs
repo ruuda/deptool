@@ -327,14 +327,15 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
 
             let store = Store::open_or_init(&store)?;
             let config = AgentConfig::from_env();
+            let current_commit = store.current_commit();
+            let hello = protocol::Hello {
+                version: protocol::VERSION.to_string(),
+                hostname: config.hostname.clone(),
+                current_commit,
+            };
             let mut session = make_agent_session(store, &config);
             let stdin = std::io::stdin().lock();
             let mut stdout = std::io::stdout().lock();
-
-            let hello = protocol::Hello {
-                version: protocol::VERSION.to_string(),
-                hostname: config.hostname,
-            };
             serde_json::to_writer(&mut stdout, &hello)?;
             writeln!(stdout)?;
             stdout.flush()?;

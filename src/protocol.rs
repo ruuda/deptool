@@ -39,6 +39,8 @@ pub enum Request {
 pub struct Hello {
     pub version: String,
     pub hostname: String,
+    #[serde(default, with = "crate::prim::ser::oid_option")]
+    pub current_commit: Option<Oid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

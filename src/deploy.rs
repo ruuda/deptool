@@ -919,6 +919,7 @@ mod tests {
                 Ok(Box::new(Conn(Hello {
                     version: protocol::VERSION.to_string(),
                     hostname: "spinner".to_string(),
+                    current_commit: None,
                 })))
             },
             &|_| panic!("install not expected"),
