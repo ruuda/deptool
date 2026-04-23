@@ -4,8 +4,15 @@ use std::path::Path;
 use std::process::Command;
 use std::time::SystemTime;
 
+use crate::deploy::Connection;
 use crate::error::{HostError, Result};
 use crate::prim::Hostname;
+
+/// How to connect to and install the agent on a host.
+pub trait HostConnector: Send + Sync {
+    fn connect(&self, host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError>;
+    fn install(&self, host: &Hostname) -> std::result::Result<(), HostError>;
+}
 
 pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 

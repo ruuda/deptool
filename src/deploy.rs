@@ -15,7 +15,9 @@ use crate::error::{ApplyError, Error, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
+use crate::setup::HostConnector;
 use crate::store::{RefUpdate, Store};
+use crate::sync;
 
 #[derive(Debug)]
 pub enum HostState {
@@ -102,6 +104,13 @@ struct ProgressInner {
 }
 
 impl DeployProgress {
+    /// Create a progress tracker that prints status to the terminal.
+    pub fn with_status_printer(hosts: Vec<Hostname>) -> Self {
+        use crate::display::{StatusPrinter, UseColor};
+        let printer = StatusPrinter::new(UseColor::from_env());
+        Self::new(hosts, Box::new(printer))
+    }
+
     pub fn new(hosts: Vec<Hostname>, observer: Box<dyn DeployObserver>) -> Self {
         let states = hosts.into_iter().map(|h| (h, HostState::Pending)).collect();
         Self {
@@ -271,22 +280,21 @@ pub struct LockResult {
 }
 
 /// Connect to a host, installing the agent if needed.
-fn try_connect(
+pub fn try_connect(
     host: &Hostname,
-    connect: &(impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync),
-    install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
+    connector: &dyn HostConnector,
     progress: &DeployProgress,
 ) -> Option<Box<dyn Connection>> {
     progress.update(host, HostState::Connecting);
-    let conn = match connect(host) {
+    let conn = match connector.connect(host) {
         Ok(c) => c,
         Err(HostError::AgentNotInstalled) => {
             progress.update(host, HostState::InstallingAgent);
-            if let Err(err) = install(host) {
+            if let Err(err) = connector.install(host) {
                 progress.update(host, err);
                 return None;
             }
-            match connect(host) {
+            match connector.connect(host) {
                 Ok(c) => c,
                 Err(err) => {
                     progress.update(host, err);
@@ -324,8 +332,7 @@ fn try_connect(
 pub fn connect_and_lock(
     plan: &Plan,
     operator: &str,
-    connect: &(impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync),
-    install: &(impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync),
+    connector: &dyn HostConnector,
     progress: &DeployProgress,
 ) -> LockResult {
     let result = Mutex::new(LockResult {
@@ -335,15 +342,15 @@ pub fn connect_and_lock(
 
     std::thread::scope(|s| {
         for (host, host_plan) in &plan.hosts {
-            let lock_request = Request::Lock {
-                expected_current_commit: host_plan.expected_current,
-                operator: operator.to_string(),
-            };
             let result = &result;
             s.spawn(move || {
-                let mut conn = match try_connect(host, connect, install, progress) {
+                let mut conn = match try_connect(host, connector, progress) {
                     Some(c) => c,
                     None => return,
+                };
+                let lock_request = Request::Lock {
+                    expected_current_commit: host_plan.expected_current,
+                    operator: operator.to_string(),
                 };
                 let msg = match conn.send_request(&lock_request) {
                     Ok(()) => conn.read_message(),
@@ -494,67 +501,6 @@ pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, S
     Ok(packs)
 }
 
-/// Fetch objects from stale hosts over their still-open sessions.
-///
-/// For each stale host whose actual commit we don't already have, sends
-/// `RequestObjects` and receives a packfile. Updates the local tracking
-/// ref for each host. Reports per-host errors via progress.
-pub fn fetch_stale_objects(
-    store: &Store,
-    stale: &mut BTreeMap<Hostname, StaleHost>,
-    progress: &DeployProgress,
-) {
-    for (host, info) in stale.iter_mut() {
-        match fetch_from_stale_host(store, host, info) {
-            Ok(()) => {}
-            Err(err) => progress.update(host, err),
-        }
-    }
-}
-
-fn fetch_from_stale_host(
-    store: &Store,
-    host: &Hostname,
-    info: &mut StaleHost,
-) -> std::result::Result<(), HostError> {
-    let actual_commit = match info.actual_commit {
-        Some(c) => c,
-        None => return Ok(()),
-    };
-
-    // Fetch the pack if we don't already have this commit.
-    if store.repo.find_commit(actual_commit).is_err() {
-        info.connection.send_request(&Request::RequestObjects {
-            have_commit: info.expected_commit,
-        })?;
-
-        match info.connection.read_message()? {
-            Some(Message::SendPack { pack_data }) => {
-                let bytes = BASE64
-                    .decode(&pack_data)
-                    .expect("SendPack contains valid base64");
-                store.write_pack(&bytes)?;
-            }
-            Some(Message::Error(apply_err)) => {
-                return Err(HostError::Apply(apply_err));
-            }
-            other => {
-                return Err(HostError::ProtocolError(format!(
-                    "unexpected response to RequestObjects: {other:?}"
-                )));
-            }
-        }
-    }
-
-    store.set_ref(
-        &format!("refs/remotes/{host}/current"),
-        actual_commit,
-        RefUpdate::FetchStale,
-    )?;
-
-    Ok(())
-}
-
 /// Run a full deployment: connect+lock all hosts, push packs, and apply.
 ///
 /// Connect and lock run together per-host in parallel threads. Push+apply
@@ -565,15 +511,14 @@ pub fn run_deploy(
     store: &Store,
     plan: &Plan,
     operator: &str,
-    connect: impl Fn(&Hostname) -> std::result::Result<Box<dyn Connection>, HostError> + Sync,
-    install: impl Fn(&Hostname) -> std::result::Result<(), HostError> + Sync,
+    connector: &dyn HostConnector,
     progress: &DeployProgress,
 ) -> Result<()> {
-    let mut lock_result = connect_and_lock(plan, operator, &connect, &install, progress);
+    let mut lock_result = connect_and_lock(plan, operator, connector, progress);
 
     if lock_result.locked.len() < plan.hosts.len() {
         // Fetch objects from stale hosts so we have the data for the next plan.
-        fetch_stale_objects(store, &mut lock_result.stale, progress);
+        sync::fetch_stale_objects(store, &mut lock_result.stale, progress);
         let n = progress.num_failed();
         return Err(Error::DeployFailed(format!(
             "failed to lock {n} host(s), aborting",
@@ -656,28 +601,48 @@ mod tests {
         DeployProgress::new(hosts, Box::new(NoopObserver))
     }
 
+    /// In-memory connector for tests, using pre-built connection factories.
+    struct TestConnector {
+        factories: BTreeMap<Hostname, Box<dyn Fn() -> Box<dyn Connection> + Send + Sync>>,
+    }
+
+    fn test_connector(hosts: &[&TestHost]) -> TestConnector {
+        let mut factories = BTreeMap::new();
+        for host in hosts {
+            let hostname = host.session.hostname.clone();
+            let factory: Box<dyn Fn() -> _ + Send + Sync> = Box::new(host.connector());
+            factories.insert(hostname, factory);
+        }
+        TestConnector { factories }
+    }
+
+    impl HostConnector for TestConnector {
+        fn connect(&self, host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
+            let factory = self.factories.get(host).ok_or_else(|| {
+                HostError::ConnectionFailed(format!(
+                    "ssh: connect to host {host}: Connection timed out"
+                ))
+            })?;
+            Ok(factory())
+        }
+
+        fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {
+            panic!("install not expected in tests")
+        }
+    }
+
     /// Run a deploy through run_deploy using in-memory connections.
     fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&hostnames);
         // Pre-build Sync-safe connection factories (TestHost is not Sync
         // because git2::Repository is not Sync).
-        let connectors: Vec<_> = targets
-            .iter()
-            .map(|t| (t.session.hostname.clone(), t.connector()))
-            .collect();
+        let connector = test_connector(targets);
         run_deploy(
             &driver.store,
             plan,
             "deckard@spinner",
-            |host| {
-                let (_, connector) = connectors
-                    .iter()
-                    .find(|(h, _)| h == host)
-                    .expect("host is in targets");
-                Ok(connector())
-            },
-            |_| panic!("install not expected"),
+            &connector,
             &progress,
         )
     }
@@ -743,13 +708,12 @@ mod tests {
         let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
         let plan = make_plan(commit_v3, &[("web1", Some(commit_v1))]);
         let progress = test_progress(&["web1"]);
-        let connector = target.connector();
+        let connector = test_connector(&[&target]);
         let result = run_deploy(
             &driver_b.store,
             &plan,
             "deckard@spinner",
-            |_| Ok(connector()),
-            |_| panic!("install not expected"),
+            &connector,
             &progress,
         );
 
@@ -795,18 +759,12 @@ mod tests {
             &[("web1", Some(commit_v1)), ("web2", Some(commit_v1))],
         );
         let progress = test_progress(&["web1", "web2"]);
-        let c1 = web1.connector();
-        let c2 = web2.connector();
+        let connector = test_connector(&[&web1, &web2]);
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
-            |host| match host.0.as_str() {
-                "web1" => Ok(c1()),
-                "web2" => Ok(c2()),
-                _ => panic!("unexpected host: {host:?}"),
-            },
-            |_| panic!("install not expected"),
+            &connector,
             &progress,
         );
 
@@ -840,13 +798,12 @@ mod tests {
 
         let plan = make_plan(commit, &[("web1", None)]);
         let progress = test_progress(&["web1"]);
-        let connector = target.connector();
+        let connector = test_connector(&[&target]);
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
-            |_| Ok(connector()),
-            |_| panic!("install not expected"),
+            &connector,
             &progress,
         );
 
@@ -866,22 +823,16 @@ mod tests {
         // web2 is in the plan but unreachable.
         let plan = make_plan(commit, &[("web1", None), ("web2", None)]);
         let progress = test_progress(&["web1", "web2"]);
-        let c1 = web1.connector();
+        let connector = test_connector(&[&web1]);
         let result = run_deploy(
             &driver.store,
             &plan,
             "deckard@spinner",
-            |host| match host.0.as_str() {
-                "web1" => Ok(c1()),
-                other => Err(HostError::ConnectionFailed(format!(
-                    "ssh: connect to host {other}: Connection timed out",
-                ))),
-            },
-            |_| panic!("install not expected"),
+            &connector,
             &progress,
         );
 
-        // Deploy aborts because web2 is unreachable.
+        // Deploy aborts because web2 is unreachable (not in TestConnector).
         assert!(result.is_err());
         assert!(matches!(*progress.state("web2"), HostState::Failed(_)));
 
@@ -911,20 +862,26 @@ mod tests {
             fn close(&mut self) {}
         }
 
-        let progress = test_progress(&["web1"]);
-        let host = Hostname::from("web1");
-        let result = try_connect(
-            &host,
-            &|_| {
+        struct MismatchConnector;
+        impl HostConnector for MismatchConnector {
+            fn connect(
+                &self,
+                _host: &Hostname,
+            ) -> std::result::Result<Box<dyn Connection>, HostError> {
                 Ok(Box::new(Conn(Hello {
                     version: protocol::VERSION.to_string(),
                     hostname: "spinner".to_string(),
                     current_commit: None,
                 })))
-            },
-            &|_| panic!("install not expected"),
-            &progress,
-        );
+            }
+            fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {
+                panic!("install not expected")
+            }
+        }
+
+        let progress = test_progress(&["web1"]);
+        let host = Hostname::from("web1");
+        let result = try_connect(&host, &MismatchConnector, &progress);
 
         assert!(result.is_none());
         assert!(matches!(

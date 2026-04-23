@@ -1,6 +1,6 @@
 //! Deptool: a declarative deployment tool.
 //!
-//! Operator-side modules: [`plan`], [`deploy`], [`display`], [`setup`].
+//! Operator-side modules: [`plan`], [`deploy`], [`sync`], [`display`], [`setup`].
 //! Agent-side modules: [`agent`], [`checkout`], [`log`].
 //! Shared: [`store`], [`protocol`], [`error`], [`prim`].
 
@@ -15,6 +15,7 @@ pub mod prim;
 pub mod protocol;
 pub mod setup;
 pub mod store;
+pub mod sync;
 
 /// Test utilities, available to both unit tests and integration tests.
 #[doc(hidden)]

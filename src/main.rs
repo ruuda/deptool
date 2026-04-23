@@ -65,6 +65,27 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
+    /// Refresh tracking refs by connecting to hosts.
+    #[bpaf(command)]
+    Sync {
+        /// Path to the local store (default: ./deptool_store).
+        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+        store: PathBuf,
+        /// Path to the store on target hosts (default: /var/lib/deptool/store).
+        #[bpaf(
+            long("remote-store"),
+            fallback(PathBuf::from("/var/lib/deptool/store"))
+        )]
+        remote_store: PathBuf,
+        #[bpaf(
+            long("all"),
+            flag(sync::SyncMode::AllHosts, sync::SyncMode::OnlyAffectedHosts)
+        )]
+        mode: sync::SyncMode,
+        /// Directory containing the cluster config.
+        #[bpaf(positional("DIR"))]
+        dir: PathBuf,
+    },
     /// Commands that run on target hosts (used internally over SSH).
     #[bpaf(command)]
     Agent {
@@ -78,6 +99,90 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
+}
+
+fn is_shell_safe(s: &str) -> bool {
+    s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c))
+}
+
+struct RemoteConnector {
+    remote_store: String,
+    remote_bin_path: String,
+    binary: Vec<u8>,
+}
+
+impl RemoteConnector {
+    fn new(remote_store: &Path) -> Result<Self> {
+        let remote_store = remote_store
+            .to_str()
+            .expect("remote store path is valid UTF-8")
+            .to_string();
+        let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
+
+        // 5 bytes (10 hex chars) should be long enough to avoid collisions,
+        // and short enough to keep paths and commands readable and debuggable.
+        let suffix = setup::truncated_sha256(&binary, 5);
+        let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
+        let remote_bin_path = format!("{}/{bin_name}", setup::BIN_DIR);
+
+        // SSH concatenates remote arguments into a single shell string.
+        // We assert the inputs are shell-safe; in the future we should
+        // pass the store path over stdin instead.
+        assert!(
+            is_shell_safe(&remote_store),
+            "remote store path is free of shell metacharacters"
+        );
+        assert!(
+            is_shell_safe(&remote_bin_path),
+            "remote binary path is free of shell metacharacters"
+        );
+        Ok(Self {
+            remote_store,
+            remote_bin_path,
+            binary,
+        })
+    }
+}
+
+impl setup::HostConnector for RemoteConnector {
+    fn connect(&self, host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
+        assert!(
+            is_shell_safe(&host.0),
+            "hostname is free of shell metacharacters"
+        );
+        let mut cmd = Command::new("ssh");
+        cmd.args([
+            &host.0,
+            "sudo",
+            &self.remote_bin_path,
+            "agent",
+            "session",
+            &self.remote_store,
+        ]);
+        let session = deploy::RemoteSession::new(cmd)?;
+        Ok(Box::new(session))
+    }
+
+    fn install(&self, host: &Hostname) -> std::result::Result<(), HostError> {
+        setup::install_binary(host, &self.remote_bin_path, &self.binary)
+    }
+}
+
+struct LocalConnector {
+    remote_store: String,
+}
+
+impl setup::HostConnector for LocalConnector {
+    fn connect(&self, _host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
+        let mut cmd = Command::new(std::env::current_exe().expect("current exe path is known"));
+        cmd.args(["agent", "session", &self.remote_store]);
+        let session = deploy::RemoteSession::new(cmd)?;
+        Ok(Box::new(session))
+    }
+
+    fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {
+        Ok(())
+    }
 }
 
 fn run_deploy(
@@ -114,61 +219,16 @@ fn run_deploy(
         return Ok(());
     }
 
-    let remote_store_str = remote_store
-        .to_str()
-        .expect("remote store path is valid UTF-8")
-        .to_string();
-
-    let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
-    // 5 bytes (10 hex chars) should be long enough to avoid collisions,
-    // and short enough to keep paths and commands readable and debuggable.
-    let suffix = setup::truncated_sha256(&binary, 5);
-    let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
-    let remote_bin_path = format!("{}/{bin_name}", setup::BIN_DIR);
-
-    // SSH concatenates remote arguments into a single shell string.
-    // We assert the inputs are shell-safe; in the future we should
-    // pass the store path over stdin instead.
-    let is_shell_safe = |s: &str| s.chars().all(|c| c.is_alphanumeric() || "/_.-".contains(c));
-    assert!(
-        is_shell_safe(&remote_store_str),
-        "remote store path is free of shell metacharacters"
-    );
-    assert!(
-        is_shell_safe(&remote_bin_path),
-        "remote binary path is free of shell metacharacters"
-    );
-
-    let connect = |host: &Hostname| -> std::result::Result<Box<dyn Connection>, HostError> {
-        let cmd = match mode {
-            DeployMode::Local => {
-                let mut cmd =
-                    Command::new(std::env::current_exe().expect("current exe path is known"));
-                cmd.args(["agent", "session", &remote_store_str]);
-                cmd
-            }
-            DeployMode::Remote => {
-                assert!(
-                    is_shell_safe(&host.0),
-                    "hostname is free of shell metacharacters"
-                );
-                let mut cmd = Command::new("ssh");
-                cmd.args([
-                    &host.0,
-                    "sudo",
-                    &remote_bin_path,
-                    "agent",
-                    "session",
-                    &remote_store_str,
-                ]);
-                cmd
-            }
-        };
-        let session = deploy::RemoteSession::new(cmd)?;
-        Ok(Box::new(session))
-    };
-    let install = |host: &Hostname| -> std::result::Result<(), HostError> {
-        setup::install_binary(host, &remote_bin_path, &binary)
+    let connector: Box<dyn setup::HostConnector> = match mode {
+        DeployMode::Remote => Box::new(RemoteConnector::new(&remote_store)?),
+        DeployMode::Local => {
+            let remote_store = remote_store
+                .to_str()
+                .expect("remote store path is valid UTF-8");
+            Box::new(LocalConnector {
+                remote_store: remote_store.to_string(),
+            })
+        }
     };
 
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
@@ -176,10 +236,9 @@ fn run_deploy(
     let operator = format!("{user}@{hostname}");
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
-    let printer = display::StatusPrinter::new(color);
-    let progress = deploy::DeployProgress::new(hosts, Box::new(printer));
+    let progress = deploy::DeployProgress::with_status_printer(hosts);
 
-    deploy::run_deploy(&repo, &plan, &operator, connect, install, &progress)
+    deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress)
 }
 
 fn run() -> Result<()> {
@@ -194,6 +253,16 @@ fn run() -> Result<()> {
             mode,
             dir,
         } => run_deploy(store, dir, remote_store, plan_only, confirm_mode, mode)?,
+        Cmd::Sync {
+            store,
+            remote_store,
+            mode,
+            dir,
+        } => {
+            let store = Store::open_or_init(&store)?;
+            let connector = RemoteConnector::new(&remote_store)?;
+            sync::run_sync(&store, &dir, &connector, mode)?;
+        }
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }
 

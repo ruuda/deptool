@@ -266,7 +266,7 @@ impl TestHost {
     ///
     /// The factory captures owned paths (no references to self), so it is
     /// `Send + Sync` and safe to call from multiple threads.
-    pub fn connector(&self) -> impl Fn() -> Box<dyn Connection> + Send + Sync {
+    pub fn connector(&self) -> impl Fn() -> Box<dyn Connection> + Send + Sync + 'static {
         let store_path = self.session.store.path().to_path_buf();
         let hostname = self.session.hostname.0.clone();
         let apps_path = self.apps.path().to_path_buf();
