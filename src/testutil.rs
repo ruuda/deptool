@@ -61,10 +61,20 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
 }
 
 /// Create a commit with the given files and advance main.
+///
+/// Uses `refs/heads/main` as the parent (if it exists) to build a linear
+/// commit chain in tests.
 pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
     let tree_oid = build_tree_from_files(&store.repo, files)?;
-    let oid = store.commit_tree(tree_oid)?;
-    store.advance_main(oid)?;
+    let parent: Vec<Oid> = store
+        .repo
+        .find_reference("refs/heads/main")
+        .ok()
+        .map(|r| r.peel_to_commit().expect("main points to a commit").id())
+        .into_iter()
+        .collect();
+    let oid = store.commit_tree(tree_oid, &parent)?;
+    store.set_ref("refs/heads/main", oid, RefUpdate::SetMain)?;
     Ok(oid)
 }
 
@@ -101,6 +111,14 @@ impl TestRepo {
     /// Create a commit with the given files, without touching the filesystem.
     pub fn commit(&self, files: &[(&str, &[u8])]) -> Oid {
         commit_files(&self.store, files).expect("commit succeeds")
+    }
+
+    /// Plan a deploy from a commit's tree.
+    pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
+        let tree_oid = self.get_commit_tree_oid(commit);
+        crate::plan::make_plan(&self.store, tree_oid)
+            .expect("plan succeeds")
+            .expect("plan has changes")
     }
 
     /// Get the tree OID for a commit.

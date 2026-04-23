@@ -71,9 +71,6 @@ const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
     for (host, host_plan) in &plan.hosts {
         write!(out, "{host}")?;
-        if !host_plan.is_fast_forward {
-            write!(out, " {}", color.red("(diverged)"))?;
-        }
         if !host_plan.is_rollback_safe {
             write!(out, " {}", color.yellow("(rollback unavailable)"))?;
         }
@@ -127,16 +124,6 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
         println!("Auto-rollback if deploy fails.");
     } else {
         println!("{}", color.yellow("Rollback unavailable for some hosts."));
-    }
-
-    let diverged = plan.hosts.values().filter(|h| !h.is_fast_forward).count();
-    if diverged > 0 {
-        let noun = if diverged == 1 { "host" } else { "hosts" };
-        println!(
-            "This will {} to {diverged} {noun}, \
-             which may inadvertently reverse previous changes!",
-            color.bold("force-push"),
-        );
     }
 
     let n = plan.hosts.len();
@@ -460,7 +447,6 @@ mod tests {
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -498,7 +484,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -540,7 +525,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -585,7 +569,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -625,7 +608,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -659,7 +641,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -700,7 +681,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -712,38 +692,6 @@ web1
     update nginx
         ~ nginx.conf
         restart nginx.service
-
-",
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn diverged_host_shows_warning() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_fast_forward: false,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
-        assert_eq!(
-            render(&t.store, &plan)?,
-            "\
-web1 (diverged)
-    add nginx
-        + nginx.conf
 
 ",
         );
@@ -765,7 +713,6 @@ web1 (diverged)
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: false,
                 },
             )]),
@@ -801,7 +748,6 @@ web1 (rollback unavailable)
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -842,7 +788,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
                     )]),
                     expected_current: None,
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -887,7 +832,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),
@@ -927,7 +871,6 @@ web1
                         compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
                     )]),
                     expected_current: Some(c1),
-                    is_fast_forward: true,
                     is_rollback_safe: true,
                 },
             )]),

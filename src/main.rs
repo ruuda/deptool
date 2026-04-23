@@ -9,7 +9,7 @@ use std::process::Command;
 use bpaf::Bpaf;
 
 use deploy::Connection;
-use error::{ApplyError, Error, HostError, Result};
+use error::{ApplyError, HostError, Result};
 use prim::Hostname;
 use store::Store;
 
@@ -36,12 +36,6 @@ enum ConfirmMode {
     ApplyWithoutPrompt,
 }
 
-#[derive(Debug, Clone, Copy)]
-enum PushMode {
-    ForwardOnly,
-    ForcePush,
-}
-
 #[derive(Debug, Clone, Bpaf)]
 enum Cmd {
     /// Plan and apply changes to all hosts.
@@ -65,9 +59,6 @@ enum Cmd {
             flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
         )]
         confirm_mode: ConfirmMode,
-        /// Allow deploying commits that don't descend from the host's current state.
-        #[bpaf(long("force-push"), flag(PushMode::ForcePush, PushMode::ForwardOnly))]
-        push_mode: PushMode,
         #[bpaf(long("local"), flag(DeployMode::Local, DeployMode::Remote), hide)]
         mode: DeployMode,
         /// Directory containing the cluster config to deploy.
@@ -95,33 +86,24 @@ fn run_deploy(
     remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
-    push_mode: PushMode,
     mode: DeployMode,
 ) -> Result<()> {
     let repo = Store::open_or_init(&store)?;
     let tree_oid = repo.build_tree(&dir)?;
-    let commit = repo.commit_tree(tree_oid)?;
-    let plan = plan::make_plan(&repo, commit)?;
 
-    if plan.hosts.is_empty() {
-        eprintln!("All hosts are up to date.");
-        return Ok(());
-    }
+    let plan = match plan::make_plan(&repo, tree_oid)? {
+        Some(plan) => plan,
+        None => {
+            eprintln!("All hosts are up to date.");
+            return Ok(());
+        }
+    };
 
     let color = display::UseColor::from_env();
     display::print_plan(&mut std::io::stdout(), &repo, &plan, color)?;
 
     if plan_only {
         return Ok(());
-    }
-
-    for (host, host_plan) in &plan.hosts {
-        if !host_plan.is_fast_forward {
-            match push_mode {
-                PushMode::ForwardOnly => return Err(Error::Diverged(host.clone())),
-                PushMode::ForcePush => break,
-            }
-        }
     }
 
     let decision = match confirm_mode {
@@ -206,21 +188,12 @@ fn run() -> Result<()> {
     match args.cmd {
         Cmd::Deploy {
             store,
-            dir,
             remote_store,
             plan_only,
             confirm_mode,
-            push_mode,
             mode,
-        } => run_deploy(
-            store,
             dir,
-            remote_store,
-            plan_only,
-            confirm_mode,
-            push_mode,
-            mode,
-        )?,
+        } => run_deploy(store, dir, remote_store, plan_only, confirm_mode, mode)?,
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }
 

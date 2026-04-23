@@ -165,8 +165,6 @@ pub enum Error {
     Io(std::io::Error),
     /// Non-store JSON failure (agent protocol parsing).
     Json(serde_json::Error),
-    /// The deploy is not a fast-forward from the host's current state.
-    Diverged(crate::prim::Hostname),
     /// One or more hosts failed during a deploy.
     DeployFailed(String),
 }
@@ -219,11 +217,6 @@ impl fmt::Display for Error {
             // what the host has (`current`) and what we try to deploy, and then
             // we can show the `git log cc..current` to point out the culprit,
             // especially including author timestamps and metadata.
-            Error::Diverged(host) => write!(
-                f,
-                "{host}: deploy is not a fast-forward. \
-                 Pull the latest state, or run with --force-push to override."
-            ),
             Error::DeployFailed(msg) => write!(f, "{msg}"),
         }
     }

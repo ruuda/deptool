@@ -2,9 +2,8 @@
 
 ## Operator commands
 
-The operator-facing commands are `commit` and `deploy`. These map directly
-onto the two things an operator does: record a new desired state, then push
-it to the cluster.
+The operator-facing command is `deploy`. It takes a config directory,
+records it as a new commit in the store, and deploys it to the cluster.
 
 `deploy` subsumes planning, confirmation, and applying in one command. There
 is no separate `plan` command: the confirmation prompt already shows you what
@@ -62,6 +61,6 @@ implementation simple.
    deployment log, which is just the reflog for the `current` ref. In the reflog
    we should also record the hostname and username of the operator machine that
    initiated the deployment. You want to know who deployed something.
- - `deptool commit` should take a commit message that describes what we are
-   deploying. For example, when you generate target configuration with Nix, it
-   could mention the store path.
+ - `deptool deploy` should support a `--message` flag for a commit message
+   that describes what we are deploying. For example, when you generate target
+   configuration with Nix, it could mention the store path.

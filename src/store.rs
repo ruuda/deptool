@@ -35,6 +35,14 @@ pub struct SystemdConfig {
     pub units_enabled: Vec<String>,
 }
 
+/// A host's tracking state as known by the driver.
+pub struct HostRef {
+    /// The commit deployed to this host (`refs/remotes/{host}/current`).
+    pub commit: Oid,
+    /// The host's own subtree within that commit's tree.
+    pub host_tree: Oid,
+}
+
 /// A bare Git repository used as the config store.
 pub struct Store {
     pub repo: Repository,
@@ -81,30 +89,20 @@ impl Store {
         }
     }
 
-    /// Create a commit on top of `refs/heads/main` without advancing the ref.
+    /// Create a commit with the given tree and parent commits.
     ///
-    /// If the tree is identical to the current head, returns the existing
-    /// commit -- hosts may still need to catch up.
-    pub fn commit_tree(&self, tree_oid: Oid) -> Result<Oid> {
-        let parent = self
-            .repo
-            .find_reference("refs/heads/main")
-            .ok()
-            .map(|r| r.peel_to_commit())
-            .transpose()?;
-
-        if let Some(ref p) = parent {
-            if p.tree_id() == tree_oid {
-                return Ok(p.id());
-            }
-        }
-
+    /// Does not update any ref -- the caller decides where to point.
+    pub fn commit_tree(&self, tree_oid: Oid, parent_oids: &[Oid]) -> Result<Oid> {
         let tree = self.repo.find_tree(tree_oid)?;
         let author_sig = match self.repo.signature() {
             Ok(sig) => sig,
             Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
         };
-        let parents: Vec<&Commit> = parent.iter().collect();
+        let parents: Vec<Commit> = parent_oids
+            .iter()
+            .map(|&oid| self.repo.find_commit(oid))
+            .collect::<std::result::Result<_, _>>()?;
+        let parent_refs: Vec<&Commit> = parents.iter().collect();
 
         Ok(self.repo.commit(
             None,
@@ -112,13 +110,63 @@ impl Store {
             &author_sig,
             "Update config",
             &tree,
-            &parents,
+            &parent_refs,
         )?)
     }
 
-    /// Advance `refs/heads/main` to the given commit.
-    pub fn advance_main(&self, commit_oid: Oid) -> Result<()> {
-        self.set_ref("refs/heads/main", commit_oid, RefUpdate::AdvanceMain)
+    /// Map hostnames to their subtree OIDs from a config tree.
+    pub fn host_trees(&self, tree_oid: Oid) -> Result<BTreeMap<Hostname, Oid>> {
+        let tree = self.repo.find_tree(tree_oid)?;
+        Ok(tree_entries(&tree)
+            .into_iter()
+            .map(|(name, oid)| (Hostname(name), oid))
+            .collect())
+    }
+
+    /// Look up tracking refs for the given hosts.
+    ///
+    /// For each host that has a `refs/remotes/{host}/current` ref, returns
+    /// the deployed commit and the host's own subtree within it.
+    pub fn host_tracking_refs(&self, hosts: &[Hostname]) -> Result<BTreeMap<Hostname, HostRef>> {
+        let mut result = BTreeMap::new();
+        for host in hosts {
+            let refname = format!("refs/remotes/{host}/current");
+            let commit = match self.repo.find_reference(&refname) {
+                Ok(r) => r.peel_to_commit()?,
+                Err(_) => continue,
+            };
+            let tree = commit.tree()?;
+            let host_tree = match tree.get_name(&host.0) {
+                Some(entry) => entry.id(),
+                None => continue,
+            };
+            result.insert(
+                host.clone(),
+                HostRef {
+                    commit: commit.id(),
+                    host_tree,
+                },
+            );
+        }
+        Ok(result)
+    }
+
+    /// Reduce a set of commits to the frontier -- the minimal subset where
+    /// no commit is an ancestor of another.
+    pub fn frontier(&self, commits: &[Oid]) -> Result<Vec<Oid>> {
+        let unique: BTreeSet<Oid> = commits.iter().copied().collect();
+        let mut frontier = Vec::new();
+        for &oid in &unique {
+            let dominated = unique.iter().any(|&other| {
+                other != oid && self.repo.graph_descendant_of(other, oid).unwrap_or(false)
+            });
+            if !dominated {
+                frontier.push(oid);
+            }
+        }
+        // Ensure the output is deterministic regardless of input order.
+        frontier.sort();
+        Ok(frontier)
     }
 
     /// Check out a subtree (host/app) from a commit into a target directory.
@@ -153,7 +201,7 @@ impl Store {
             }
             RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
             RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
-            RefUpdate::AdvanceMain => "deploy: advance main".to_string(),
+            RefUpdate::SetMain => "deploy: lock acquired, deploying this commit".to_string(),
         };
         let force = true;
         self.repo.reference(refname, oid, force, &reflog_msg)?;
@@ -350,13 +398,20 @@ pub enum RefUpdate<'a> {
     Rollback { operator: &'a str },
     ApplyComplete,
     FetchStale,
-    AdvanceMain,
+    SetMain,
 }
 
-/// Get the tree entries (name -> oid) one level deep.
+/// Get the subtree entries (name -> oid) one level deep.
+///
+/// Only includes entries that are trees, not blobs. The config tree is
+/// structured as `{host}/{app}/{files}`, so the first two levels are
+/// always directories.
 pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
     let mut entries = BTreeMap::new();
     for entry in tree.iter() {
+        if entry.kind() != Some(git2::ObjectType::Tree) {
+            continue;
+        }
         if let Some(name) = entry.name() {
             entries.insert(name.to_string(), entry.id());
         }
@@ -420,12 +475,21 @@ mod tests {
     }
 
     #[test]
-    fn commit_tree_reuses_existing_commit_when_unchanged() {
+    fn commit_tree_creates_commit_with_given_parents() {
         let t = TestRepo::new();
-        let oid = t.commit(&[("web1/app/config", b"v1")]);
-        let tree_oid = t.get_commit_tree_oid(oid);
+        let c1 = t.commit(&[("web1/app/config", b"v1")]);
+        let c2 = t.commit(&[("web1/app/config", b"v2")]);
 
-        assert_eq!(t.store.commit_tree(tree_oid).unwrap(), oid);
+        let tree_oid = t.get_commit_tree_oid(c2);
+        let c3 = t
+            .store
+            .commit_tree(tree_oid, &[c1, c2])
+            .expect("commit succeeds");
+
+        let commit = t.store.repo.find_commit(c3).expect("commit exists");
+        assert_eq!(commit.parent_count(), 2);
+        assert_eq!(commit.parent_id(0).expect("parent 0"), c1);
+        assert_eq!(commit.parent_id(1).expect("parent 1"), c2);
     }
 
     #[test]
@@ -551,6 +615,98 @@ mod tests {
             host_tree.get_name("kept.conf").is_some(),
             "non-empty entries should be kept",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn tree_entries_skips_blobs() {
+        let t = TestRepo::new();
+        // Create a tree with a blob at the app level alongside a real app.
+        let c = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/stray.txt", b"oops")]);
+        let tree = t.store.get_commit_tree(c).expect("commit has a tree");
+        let web1_tree = t
+            .store
+            .repo
+            .find_tree(tree.get_name("web1").expect("web1 exists").id())
+            .expect("web1 is a tree");
+
+        let entries = tree_entries(&web1_tree);
+        assert!(
+            entries.contains_key("nginx"),
+            "subtree entry should be kept"
+        );
+        assert!(
+            !entries.contains_key("stray.txt"),
+            "blob entry should be skipped",
+        );
+    }
+
+    #[test]
+    fn frontier_keeps_only_tips() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("h/app/f", b"v1")]);
+        let c2 = t.commit(&[("h/app/f", b"v2")]);
+        let c3 = t.commit(&[("h/app/f", b"v3")]);
+
+        // Linear chain: only the tip survives.
+        assert_eq!(t.store.frontier(&[c1, c2, c3])?, vec![c3]);
+        assert_eq!(t.store.frontier(&[c3, c1])?, vec![c3]);
+
+        // Single commit.
+        assert_eq!(t.store.frontier(&[c2])?, vec![c2]);
+
+        // Empty input.
+        assert_eq!(t.store.frontier(&[])?, vec![]);
+
+        // Duplicates are deduplicated.
+        assert_eq!(t.store.frontier(&[c3, c3])?, vec![c3]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn frontier_keeps_diverged_branches() -> Result<()> {
+        let t = TestRepo::new();
+        let base = t.commit(&[("h/app/f", b"base")]);
+        let c_a = t.commit(&[("h/app/f", b"branch-a")]);
+
+        // Branch from base so c_a and c_b are diverged.
+        t.store
+            .set_ref("refs/heads/main", base, RefUpdate::FetchStale)?;
+        let c_b = t.commit(&[("h/app/f", b"branch-b")]);
+
+        let result = t.store.frontier(&[c_a, c_b])?;
+        let mut expected = vec![c_a, c_b];
+        expected.sort();
+        assert_eq!(result, expected);
+
+        // Base is dominated by both, should be removed.
+        assert_eq!(t.store.frontier(&[base, c_a, c_b])?, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn host_tracking_refs_collects_per_host_state() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        t.set_host_tracking_ref("web2", c1);
+
+        let hosts = vec!["web1".into(), "web2".into()];
+        let refs = t.store.host_tracking_refs(&hosts)?;
+        assert_eq!(refs.len(), 2);
+
+        // Both hosts point to the same commit.
+        assert_eq!(refs[&"web1".into()].commit, c1);
+        assert_eq!(refs[&"web2".into()].commit, c1);
+
+        // But their host subtree OIDs differ (different app content).
+        assert_ne!(
+            refs[&"web1".into()].host_tree,
+            refs[&"web2".into()].host_tree,
+        );
+
         Ok(())
     }
 }

@@ -319,6 +319,15 @@ impl AgentSession {
             Some(ctx.target_commit),
         )?;
 
+        if let Some(current) = ctx.current_commit {
+            let is_descendant = self
+                .store
+                .repo
+                .graph_descendant_of(ctx.target_commit, current)
+                .map_err(|e| ApplyError::Store(e.to_string()))?;
+            assert!(is_descendant, "target commit descends from current commit");
+        }
+
         assert_eq!(
             system_diff.is_rollback_safe(),
             ctx.is_rollback_safe,
