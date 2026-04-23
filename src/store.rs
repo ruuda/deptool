@@ -299,7 +299,7 @@ impl Store {
         commit_oid: Oid,
         host: &Hostname,
         apps_dir: &Path,
-    ) -> Result<crate::plan::DesiredUnits> {
+    ) -> Result<BTreeMap<String, PathBuf>> {
         self.desired_subdir_symlinks(commit_oid, host, apps_dir, "systemd")
     }
 
@@ -325,7 +325,7 @@ impl Store {
         commit_oid: Oid,
         host: &Hostname,
         apps_dir: &Path,
-    ) -> Result<crate::plan::DesiredSysusers> {
+    ) -> Result<BTreeMap<String, PathBuf>> {
         self.desired_subdir_symlinks(commit_oid, host, apps_dir, "sysusers")
     }
 

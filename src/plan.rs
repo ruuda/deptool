@@ -195,8 +195,17 @@ impl SysusersChanges {
     }
 }
 
-/// Map from sysuser config filename to the absolute symlink target path.
-pub type DesiredSysusers = BTreeMap<String, PathBuf>;
+/// Desired managed-symlink state for a host deploy.
+///
+/// Maps filenames to absolute symlink target paths for each managed
+/// directory (systemd units and sysusers configs).
+#[derive(Default)]
+pub struct DesiredState {
+    /// Unit files to symlink in the unit directory.
+    pub units: BTreeMap<String, PathBuf>,
+    /// Sysuser config files to symlink in the sysusers directory.
+    pub sysusers: BTreeMap<String, PathBuf>,
+}
 
 /// Compute unit lifecycle actions by comparing two enabled unit sets.
 ///
@@ -405,9 +414,6 @@ pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
     let system = compute_system_diff(store, &diff)?;
     Ok(AppPlan { diff, system })
 }
-
-/// Map from unit filename to the absolute symlink target path.
-pub type DesiredUnits = BTreeMap<String, PathBuf>;
 
 /// Compute per-app diffs and the aggregate system diff for a host deploy.
 ///

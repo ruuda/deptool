@@ -776,6 +776,9 @@ mod tests {
         Ok(())
     }
 
+    /// Content-only sysusers changes are rollback-safe: deptool can restore
+    /// the old config file. The OS won't un-create a user that was already
+    /// materialized, but rolling back the config is still useful.
     #[test]
     fn sysusers_content_change_without_link_is_rollback_safe() -> Result<()> {
         let t = ApplyTest::new();

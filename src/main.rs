@@ -281,8 +281,7 @@ fn run() -> Result<()> {
 use agent::AgentConfig;
 
 fn activate(
-    desired_units: &plan::DesiredUnits,
-    desired_sysusers: &plan::DesiredSysusers,
+    desired: &plan::DesiredState,
     changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
     log: &mut dyn FnMut(&str),
@@ -300,7 +299,7 @@ fn activate(
     // units, because units may run as those users. On app removal this
     // wastefully runs sysusers after unlinking the config, but it's
     // idempotent and not worth special-casing.
-    checkout::reconcile_managed_symlinks(desired_sysusers, apps_dir, sysusers_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)?;
     if changes.sysusers.content_changed {
         log("starting systemd-sysusers");
         if !systemctl_ok(&["start", "systemd-sysusers"]) {
@@ -318,7 +317,7 @@ fn activate(
     // "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    let symlink_changes = checkout::reconcile_managed_symlinks(desired_units, apps_dir, unit_dir)?;
+    let symlink_changes = checkout::reconcile_managed_symlinks(&desired.units, apps_dir, unit_dir)?;
 
     // Only poke systemd when something actually changed on disk.
     let needs_reload = !symlink_changes.is_empty() || !changes.units.is_empty();
@@ -395,20 +394,17 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        Box::new(
-            move |desired_units, desired_sysusers, changes, emit, log: &mut dyn FnMut(&str)| {
-                activate(
-                    desired_units,
-                    desired_sysusers,
-                    changes,
-                    emit,
-                    log,
-                    &apps_dir,
-                    &unit_dir,
-                    &sysusers_dir,
-                )
-            },
-        ),
+        Box::new(move |desired, changes, emit, log: &mut dyn FnMut(&str)| {
+            activate(
+                desired,
+                changes,
+                emit,
+                log,
+                &apps_dir,
+                &unit_dir,
+                &sysusers_dir,
+            )
+        }),
         Some(log_path),
     )
 }
