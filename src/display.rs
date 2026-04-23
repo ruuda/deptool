@@ -428,7 +428,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
-    use crate::plan::{AppDiff, HostPlan, Plan, compute_app_plan};
+    use crate::plan::{AppDiff, Plan};
     use crate::prim::Hostname;
     use crate::testutil::TestRepo;
 
@@ -453,20 +453,7 @@ mod tests {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"server {}\n")]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -490,24 +477,11 @@ web1
             ),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
-web1
+web1 (rollback unavailable)
     add nginx
         + manifest.json
         + nginx.conf
@@ -531,24 +505,11 @@ web1
             ),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
-web1
+web1 (rollback unavailable)
     add nginx
         + manifest.json
         + nginx.conf
@@ -575,20 +536,7 @@ web1
             ),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Remove { old_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -614,20 +562,7 @@ web1
             ),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Remove { old_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -647,20 +582,7 @@ web1
         let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
-        let plan = Plan {
-            commit: c2,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c2, "nginx", AppDiff::Update { old_tree, new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -687,20 +609,7 @@ web1
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
-        let plan = Plan {
-            commit: c2,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c2, "nginx", AppDiff::Update { old_tree, new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -719,20 +628,11 @@ web1
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: false,
-                },
-            )]),
-        };
+        let mut plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
+        plan.hosts
+            .get_mut(&Hostname::from("web1"))
+            .expect("host exists in plan")
+            .is_rollback_safe = false;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -754,24 +654,11 @@ web1 (rollback unavailable)
             ("web1/nginx/manifest.json", manifest),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
-web1
+web1 (rollback unavailable)
     add nginx
         + manifest.json
         + nginx.conf
@@ -794,24 +681,11 @@ web1
             ("web1/nginx/manifest.json", manifest),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
-web1
+web1 (rollback unavailable)
     add nginx
         + manifest.json
         + nginx.conf
@@ -838,20 +712,7 @@ web1
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
         let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "nginx");
-        let plan = Plan {
-            commit: c2,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Update { old_tree, new_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c2, "nginx", AppDiff::Update { old_tree, new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -877,20 +738,7 @@ web1
             ("web1/nginx/manifest.json", manifest),
         ]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "nginx");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "nginx".into(),
-                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "nginx", AppDiff::Remove { old_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
@@ -911,24 +759,11 @@ web1
             ("web1/myapp/config.toml", b"key = true"),
         ]);
         let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "myapp".into(),
-                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
-                    )]),
-                    expected_current: None,
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "myapp", AppDiff::Add { new_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\
-web1
+web1 (rollback unavailable)
     add myapp
         + config.toml
         + sysusers/myapp.conf
@@ -944,20 +779,7 @@ web1
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/myapp/sysusers/myapp.conf", b"u myapp -")]);
         let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
-        let plan = Plan {
-            commit: c1,
-            hosts: BTreeMap::from([(
-                Hostname::from("web1"),
-                HostPlan {
-                    apps: BTreeMap::from([(
-                        "myapp".into(),
-                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
-                    )]),
-                    expected_current: Some(c1),
-                    is_rollback_safe: true,
-                },
-            )]),
-        };
+        let plan = t.plan_for(c1, "myapp", AppDiff::Remove { old_tree })?;
         assert_eq!(
             render(&t.store, &plan)?,
             "\

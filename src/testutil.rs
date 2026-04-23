@@ -115,6 +115,28 @@ impl TestRepo {
         commit_files(&self.store, files).expect("commit succeeds")
     }
 
+    /// Build a single-host, single-app plan for display tests.
+    pub fn plan_for(
+        &self,
+        commit: Oid,
+        app: &str,
+        diff: crate::plan::AppDiff,
+    ) -> crate::error::Result<crate::plan::Plan> {
+        let app_plan = crate::plan::compute_app_plan(&self.store, diff)?;
+        let is_rollback_safe = app_plan.system.is_rollback_safe();
+        Ok(crate::plan::Plan {
+            commit,
+            hosts: std::collections::BTreeMap::from([(
+                crate::prim::Hostname::from("web1"),
+                crate::plan::HostPlan {
+                    apps: std::collections::BTreeMap::from([(app.into(), app_plan)]),
+                    expected_current: None,
+                    is_rollback_safe,
+                },
+            )]),
+        })
+    }
+
     /// Plan a deploy from a commit's tree.
     pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
         let tree_oid = self.get_commit_tree_oid(commit);
