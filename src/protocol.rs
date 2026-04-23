@@ -61,6 +61,10 @@ pub enum Message {
     SystemdUnitStatus {
         output: String,
     },
+    /// Output of `systemd-sysusers` after materializing system users.
+    SysusersOutput {
+        output: String,
+    },
     ApplyComplete {
         #[serde(with = "crate::prim::ser::oid")]
         commit: Oid,

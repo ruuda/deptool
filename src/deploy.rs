@@ -453,6 +453,9 @@ fn push_and_apply_host(
                 let filtered = filter_systemd_status(output.trim_end());
                 progress.log_message(host, &filtered);
             }
+            Message::SysusersOutput { output } => {
+                progress.log_message(host, output.trim_end());
+            }
             Message::Error(apply_err) => {
                 return Err(HostError::Apply(apply_err.clone()));
             }

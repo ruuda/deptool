@@ -301,9 +301,34 @@ fn activate(
     // idempotent and not worth special-casing.
     checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)?;
     if changes.sysusers.content_changed {
-        log("starting systemd-sysusers");
-        if !systemctl_ok(&["start", "systemd-sysusers"]) {
-            return Err(ApplyError::SysusersActivationFailed);
+        // Invoke the binary directly -- the systemd-sysusers.service
+        // unit has ConditionNeedsUpdate=/etc which skips execution
+        // outside of early boot.
+        log("running systemd-sysusers");
+        let result = std::process::Command::new("systemd-sysusers")
+            // Default console log level suppresses user creation messages.
+            .env("SYSTEMD_LOG_LEVEL", "info")
+            .output();
+        match result {
+            Ok(output) => {
+                // Systemd tools log to stderr, not stdout.
+                let text = String::from_utf8_lossy(&output.stderr);
+                let trimmed = text.trim_end();
+                if !trimmed.is_empty() {
+                    emit(protocol::Message::SysusersOutput {
+                        output: format!("systemd-sysusers:\n{trimmed}"),
+                    });
+                }
+                if !output.status.success() {
+                    return Err(ApplyError::SysusersActivationFailed);
+                }
+            }
+            Err(err) => {
+                emit(protocol::Message::SysusersOutput {
+                    output: format!("systemd-sysusers: {err}"),
+                });
+                return Err(ApplyError::SysusersActivationFailed);
+            }
         }
     }
 
