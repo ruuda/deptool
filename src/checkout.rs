@@ -216,6 +216,12 @@ pub fn reconcile_managed_symlinks(
         }
     }
 
+    // The directory may not exist yet (e.g. /etc/sysusers.d on a fresh
+    // system). Create it on first use rather than requiring provisioning.
+    if !desired.is_empty() && !target_dir.exists() {
+        fs::create_dir_all(target_dir)?;
+    }
+
     for (name, desired_target) in desired {
         let needs_update = match actual.get(name) {
             None => true,
@@ -550,6 +556,19 @@ mod tests {
 
         assert_eq!(changed, BTreeSet::from(["nginx.service".to_string()]));
         assert!(units.path().join("nginx.service").is_symlink());
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_creates_target_dir_if_missing() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let sysusers_dir = apps.path().join("nonexistent-sysusers.d");
+        let target = apps.path().join("myapp/current/sysusers/myapp.conf");
+        let desired = BTreeMap::from([("myapp.conf".to_string(), target)]);
+
+        reconcile_managed_symlinks(&desired, apps.path(), &sysusers_dir)?;
+
+        assert!(sysusers_dir.join("myapp.conf").is_symlink());
         Ok(())
     }
 
