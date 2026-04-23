@@ -8,7 +8,7 @@
 ## Agent notes
 
  - Use quiet modes to avoid polluting your context window. E.g. `--quiet` on build/test commands.
- - By your nature you are overconfident in your knowledge. Don't trust, verify. Read man pages, check tool behavior where possible.
+ - By your nature you are overconfident in your knowledge. Don't trust, verify. Read man pages, check tool behavior where possible. You have a pattern of acknowledging rules in reflection but not following them during work -- knowing a rule exists is not the same as applying it. Slow down at decision points.
  - However, tool calls are not a substitute for thinking. Form a hypothesis before verifying.
  - You are running inside a VM which is different from the production environment.
  - Avoid cryptic Bash tool calls, they are hard to review for permission checks.
@@ -102,6 +102,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()` when the ok-path is the important one -- `if let Err` buries the function call after the error handling keyword.
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
+ - Prefer safe APIs over unsafe. Check `std` and `std::os::unix` before reaching for `libc`.
  - Measure before optimizing. Build the simplest correct version, benchmark it, and only add complexity if the measurements show a real problem. When an optimization forces complexity on callers (new type bounds, split borrows, wrapper functions), the cure is worse than the disease.
  - Don't overengineer. The right design emerges by subtraction. Justify with the current problem, not hypothetical future needs.
  - When analogous code already exists, mirror its structure. Symmetry signals good design.
