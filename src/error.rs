@@ -56,6 +56,8 @@ pub enum ApplyError {
     SymlinkFailed { link: String, cause: String },
     /// One or more systemd units failed to become active after apply.
     SystemdActivationFailed,
+    /// systemd-sysusers failed to materialize declared system users.
+    SysusersActivationFailed,
     /// A store operation failed during the apply phase.
     Store(String),
     /// An I/O error on the host.
@@ -82,6 +84,9 @@ impl fmt::Display for ApplyError {
             }
             ApplyError::SystemdActivationFailed => {
                 write!(f, "one or more units failed to become active")
+            }
+            ApplyError::SysusersActivationFailed => {
+                write!(f, "systemd-sysusers failed to create system users")
             }
             ApplyError::Store(msg) => write!(f, "{msg}"),
             ApplyError::Io(msg) => write!(f, "{msg}"),

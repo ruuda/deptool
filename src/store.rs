@@ -251,49 +251,82 @@ impl Store {
         self.path().join("deptool.lock")
     }
 
-    /// Collect desired unit symlinks for a host.
+    /// List filenames in an app tree's named subdirectory.
     ///
-    /// Maps each unit filename to the absolute symlink target path under
-    /// `apps_dir/<app>/current/systemd/`.
+    /// Returns an empty set if the subdirectory doesn't exist.
+    fn subdir_entries(&self, app_tree_oid: Oid, subdir: &str) -> Result<BTreeSet<String>> {
+        let tree = self.repo.find_tree(app_tree_oid)?;
+        let entry = match tree.get_name(subdir) {
+            Some(entry) => entry,
+            None => return Ok(BTreeSet::new()),
+        };
+        let subtree = self.repo.find_tree(entry.id())?;
+        let mut names = BTreeSet::new();
+        for entry in subtree.iter() {
+            if let Some(name) = entry.name() {
+                names.insert(name.to_string());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Collect desired symlinks for an app subdirectory across all apps.
+    ///
+    /// Maps each filename in `subdir` to the absolute symlink target path
+    /// under `apps_dir/<app>/current/<subdir>/`.
+    fn desired_subdir_symlinks(
+        &self,
+        commit_oid: Oid,
+        host: &Hostname,
+        apps_dir: &Path,
+        subdir: &str,
+    ) -> Result<BTreeMap<String, PathBuf>> {
+        let tree = self.get_commit_tree(commit_oid)?;
+        let apps = self.get_host_apps(&tree, host)?;
+        let mut result = BTreeMap::new();
+        for (app, app_tree_oid) in &apps {
+            for name in self.subdir_entries(*app_tree_oid, subdir)? {
+                let target = apps_dir.join(app).join("current").join(subdir).join(&name);
+                result.insert(name, target);
+            }
+        }
+        Ok(result)
+    }
+
+    /// Collect desired unit symlinks for a host.
     pub fn desired_units(
         &self,
         commit_oid: Oid,
         host: &Hostname,
         apps_dir: &Path,
     ) -> Result<crate::plan::DesiredUnits> {
-        let tree = self.get_commit_tree(commit_oid)?;
-        let apps = self.get_host_apps(&tree, host)?;
-        let mut units = BTreeMap::new();
-        for (app, app_tree_oid) in &apps {
-            for name in self.app_units(*app_tree_oid)? {
-                let target = apps_dir
-                    .join(app)
-                    .join("current")
-                    .join("systemd")
-                    .join(&name);
-                units.insert(name, target);
-            }
-        }
-        Ok(units)
+        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "systemd")
     }
 
     /// List all unit files in an app tree's `systemd/` directory.
-    ///
-    /// Returns an empty set if the app has no `systemd/` subtree.
     pub fn app_units(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
+        self.subdir_entries(app_tree_oid, "systemd")
+    }
+
+    /// List all sysuser config files in an app tree's `sysusers/` directory.
+    pub fn app_sysusers(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
+        self.subdir_entries(app_tree_oid, "sysusers")
+    }
+
+    /// Get the tree oid of the `sysusers/` subtree, for content comparison.
+    pub fn sysusers_tree_oid(&self, app_tree_oid: Oid) -> Result<Option<Oid>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
-        let systemd_entry = match tree.get_name("systemd") {
-            Some(entry) => entry,
-            None => return Ok(BTreeSet::new()),
-        };
-        let systemd_tree = self.repo.find_tree(systemd_entry.id())?;
-        let mut units = BTreeSet::new();
-        for entry in systemd_tree.iter() {
-            if let Some(name) = entry.name() {
-                units.insert(name.to_string());
-            }
-        }
-        Ok(units)
+        Ok(tree.get_name("sysusers").map(|e| e.id()))
+    }
+
+    /// Collect desired sysusers symlinks for a host.
+    pub fn desired_sysusers(
+        &self,
+        commit_oid: Oid,
+        host: &Hostname,
+        apps_dir: &Path,
+    ) -> Result<crate::plan::DesiredSysusers> {
+        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "sysusers")
     }
 
     /// Read the enabled units from an app's manifest as a set.
@@ -339,8 +372,10 @@ impl Store {
     fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
         let apps = self.get_host_apps(config_tree, host)?;
 
-        // Track unit files and symlink targets across apps to detect conflicts.
+        // Track unit files, sysuser configs, and symlink targets across apps
+        // to detect conflicts.
         let mut unit_owners: BTreeMap<String, String> = BTreeMap::new();
+        let mut sysuser_owners: BTreeMap<String, String> = BTreeMap::new();
         let mut symlink_owners: BTreeMap<String, String> = BTreeMap::new();
 
         for (app, app_tree_oid) in &apps {
@@ -352,6 +387,15 @@ impl Store {
                 if let Some(other) = unit_owners.insert(name.clone(), app.clone()) {
                     return Err(StoreError::InvalidConfig(format!(
                         "unit {name} provided by both {other} and {app}",
+                    )));
+                }
+            }
+
+            // Check for duplicate sysuser config files across apps.
+            for name in self.app_sysusers(*app_tree_oid)? {
+                if let Some(other) = sysuser_owners.insert(name.clone(), app.clone()) {
+                    return Err(StoreError::InvalidConfig(format!(
+                        "sysuser config {name} provided by both {other} and {app}",
                     )));
                 }
             }
@@ -556,6 +600,21 @@ mod tests {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("/etc/foo.conf"), "{msg}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_sysuser_file_across_apps() {
+        let t = TestRepo::new();
+        let oid = t.commit(&[
+            ("host/app1/sysusers/myuser.conf", b"u myuser -"),
+            ("host/app2/sysusers/myuser.conf", b"u myuser -"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("myuser.conf"), "{msg}");
     }
 
     #[test]

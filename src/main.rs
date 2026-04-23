@@ -282,17 +282,31 @@ use agent::AgentConfig;
 
 fn activate(
     desired_units: &plan::DesiredUnits,
+    desired_sysusers: &plan::DesiredSysusers,
     changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
     log: &mut dyn FnMut(&str),
     apps_dir: &Path,
     unit_dir: &Path,
+    sysusers_dir: &Path,
 ) -> std::result::Result<(), ApplyError> {
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
     // that these symlinks provide.
     // TODO: log individual symlink changes.
     checkout::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
+
+    // Reconcile sysusers symlinks and materialize users before starting
+    // units, because units may run as those users. On app removal this
+    // wastefully runs sysusers after unlinking the config, but it's
+    // idempotent and not worth special-casing.
+    checkout::reconcile_managed_symlinks(desired_sysusers, apps_dir, sysusers_dir)?;
+    if changes.sysusers.content_changed {
+        log("starting systemd-sysusers");
+        if !systemctl_ok(&["start", "systemd-sysusers"]) {
+            return Err(ApplyError::SysusersActivationFailed);
+        }
+    }
 
     for unit in &changes.units.disable {
         log(&format!("disabling {unit}"));
@@ -304,7 +318,7 @@ fn activate(
     // "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    let symlink_changes = checkout::reconcile_unit_symlinks(desired_units, apps_dir, unit_dir)?;
+    let symlink_changes = checkout::reconcile_managed_symlinks(desired_units, apps_dir, unit_dir)?;
 
     // Only poke systemd when something actually changed on disk.
     let needs_reload = !symlink_changes.is_empty() || !changes.units.is_empty();
@@ -371,6 +385,7 @@ fn systemctl_ok(args: &[&str]) -> bool {
 fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
     let apps_dir = config.apps_dir.clone();
     let unit_dir = config.unit_dir.clone();
+    let sysusers_dir = config.sysusers_dir.clone();
     let log_dir = config
         .apps_dir
         .parent()
@@ -381,8 +396,17 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
         Box::new(
-            move |desired_units, changes, emit, log: &mut dyn FnMut(&str)| {
-                activate(desired_units, changes, emit, log, &apps_dir, &unit_dir)
+            move |desired_units, desired_sysusers, changes, emit, log: &mut dyn FnMut(&str)| {
+                activate(
+                    desired_units,
+                    desired_sysusers,
+                    changes,
+                    emit,
+                    log,
+                    &apps_dir,
+                    &unit_dir,
+                    &sysusers_dir,
+                )
             },
         ),
         Some(log_path),

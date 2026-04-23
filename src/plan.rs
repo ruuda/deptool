@@ -37,6 +37,8 @@ pub struct SystemDiff<T = String> {
     pub units: UnitChanges,
     /// Manifest symlink changes.
     pub symlinks: SymlinkChanges<T>,
+    /// Sysusers config file changes.
+    pub sysusers: SysusersChanges,
 }
 
 impl<T> SystemDiff<T> {
@@ -53,7 +55,11 @@ impl<T> SystemDiff<T> {
     /// this safety check. Do NOT use field access (e.g. `self.symlinks.create`)
     /// -- it silently ignores new fields.
     pub fn is_rollback_safe(&self) -> bool {
-        let SystemDiff { units, symlinks } = self;
+        let SystemDiff {
+            units,
+            symlinks,
+            sysusers,
+        } = self;
         let UnitChanges {
             enable,
             restart: _,
@@ -66,7 +72,12 @@ impl<T> SystemDiff<T> {
             remove: _,
             change: _,
         } = symlinks;
-        enable.is_empty() && link.is_empty() && create.is_empty()
+        let SysusersChanges {
+            link: sysusers_link,
+            unlink: _,
+            content_changed: _,
+        } = sysusers;
+        enable.is_empty() && link.is_empty() && create.is_empty() && sysusers_link.is_empty()
     }
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
@@ -79,6 +90,9 @@ impl<T> SystemDiff<T> {
         self.symlinks.create.append(&mut other.symlinks.create);
         self.symlinks.remove.append(&mut other.symlinks.remove);
         self.symlinks.change.append(&mut other.symlinks.change);
+        self.sysusers.link.append(&mut other.sysusers.link);
+        self.sysusers.unlink.append(&mut other.sysusers.unlink);
+        self.sysusers.content_changed |= other.sysusers.content_changed;
     }
 }
 
@@ -92,6 +106,7 @@ impl SystemDiff {
         SystemDiff {
             units: self.units,
             symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
+            sysusers: self.sysusers,
         }
     }
 }
@@ -154,6 +169,34 @@ impl UnitChanges {
             && self.unlink.is_empty()
     }
 }
+
+/// Sysusers file changes, derived from Git trees only.
+///
+/// Like unit symlinks, sysusers config files live in a special directory
+/// (`sysusers/`) and get symlinked to `/etc/sysusers.d/`. Unlike units,
+/// we don't need enable/disable -- we just need to know whether to run
+/// `systemd-sysusers` to materialize the declared users.
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SysusersChanges {
+    /// Sysuser config files newly provided by this app.
+    pub link: Vec<String>,
+    /// Sysuser config files no longer provided by this app.
+    pub unlink: Vec<String>,
+    /// Whether the sysusers subtree content changed between old and new tree.
+    ///
+    /// This is the trigger for running `systemd-sysusers`. Subsumes link and
+    /// unlink changes (any file addition or removal changes the subtree oid).
+    pub content_changed: bool,
+}
+
+impl SysusersChanges {
+    pub fn is_empty(&self) -> bool {
+        self.link.is_empty() && self.unlink.is_empty() && !self.content_changed
+    }
+}
+
+/// Map from sysuser config filename to the absolute symlink target path.
+pub type DesiredSysusers = BTreeMap<String, PathBuf>;
 
 /// Compute unit lifecycle actions by comparing two enabled unit sets.
 ///
@@ -292,7 +335,17 @@ pub fn compute_system_diff(
             units.link = store.app_units(*new_tree)?.into_iter().collect();
             let manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
-            SystemDiff { units, symlinks }
+            let new_sysusers = store.app_sysusers(*new_tree)?;
+            let sysusers = SysusersChanges {
+                content_changed: !new_sysusers.is_empty(),
+                link: new_sysusers.into_iter().collect(),
+                unlink: Vec::new(),
+            };
+            SystemDiff {
+                units,
+                symlinks,
+                sysusers,
+            }
         }
         AppDiff::Remove { old_tree } => {
             let enabled = store.enabled_units(*old_tree)?;
@@ -300,7 +353,17 @@ pub fn compute_system_diff(
             units.unlink = store.app_units(*old_tree)?.into_iter().collect();
             let manifest = store.read_manifest(*old_tree)?;
             let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
-            SystemDiff { units, symlinks }
+            let old_sysusers = store.app_sysusers(*old_tree)?;
+            let sysusers = SysusersChanges {
+                content_changed: !old_sysusers.is_empty(),
+                link: Vec::new(),
+                unlink: old_sysusers.into_iter().collect(),
+            };
+            SystemDiff {
+                units,
+                symlinks,
+                sysusers,
+            }
         }
         AppDiff::Update { old_tree, new_tree } => {
             let old_all = store.app_units(*old_tree)?;
@@ -313,7 +376,25 @@ pub fn compute_system_diff(
             let old_manifest = store.read_manifest(*old_tree)?;
             let new_manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
-            SystemDiff { units, symlinks }
+            let old_sysusers_all = store.app_sysusers(*old_tree)?;
+            let new_sysusers_all = store.app_sysusers(*new_tree)?;
+            let sysusers = SysusersChanges {
+                content_changed: store.sysusers_tree_oid(*old_tree)?
+                    != store.sysusers_tree_oid(*new_tree)?,
+                link: new_sysusers_all
+                    .difference(&old_sysusers_all)
+                    .cloned()
+                    .collect(),
+                unlink: old_sysusers_all
+                    .difference(&new_sysusers_all)
+                    .cloned()
+                    .collect(),
+            };
+            SystemDiff {
+                units,
+                symlinks,
+                sysusers,
+            }
         }
     };
     Ok(result)

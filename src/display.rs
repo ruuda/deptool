@@ -9,7 +9,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, SymlinkChanges, UnitChanges};
+use crate::plan::{AppDiff, Plan, SymlinkChanges, SysusersChanges, UnitChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
 
@@ -94,6 +94,7 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                 }
             }
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
+            write_sysusers_actions(out, &app_plan.system.sysusers, color)?;
             write_unit_actions(out, &app_plan.system.units, color)?;
             writeln!(out)?;
         }
@@ -216,16 +217,31 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
         writeln!(out, "        {} {unit}", color.red("disable"))?;
     }
     for unit in &units.unlink {
-        writeln!(out, "        {} {unit}", color.red("unlink"))?;
+        writeln!(out, "        {} {unit}", color.red("unlink unit"))?;
     }
     for unit in &units.link {
-        writeln!(out, "        {} {unit}", color.green("link"))?;
+        writeln!(out, "        {} {unit}", color.green("link unit"))?;
     }
     for unit in &units.enable {
         writeln!(out, "        {} {unit}", color.green("enable"))?;
     }
     for unit in &units.restart {
         writeln!(out, "        {} {unit}", color.yellow("restart"))?;
+    }
+    Ok(())
+}
+
+/// Print sysusers symlink actions: unlink then link.
+fn write_sysusers_actions(
+    out: &mut impl Write,
+    sysusers: &SysusersChanges,
+    color: UseColor,
+) -> Result<()> {
+    for name in &sysusers.unlink {
+        writeln!(out, "        {} {name}", color.red("unlink sysuser"))?;
+    }
+    for name in &sysusers.link {
+        writeln!(out, "        {} {name}", color.green("link sysuser"))?;
     }
     Ok(())
 }
@@ -538,8 +554,8 @@ web1
         + nginx.conf
         + systemd/nginx-reload.timer
         + systemd/nginx.service
-        link nginx-reload.timer
-        link nginx.service
+        link unit nginx-reload.timer
+        link unit nginx.service
         enable nginx.service
 
 ",
@@ -579,8 +595,8 @@ web1
 web1
     remove nginx
         disable nginx.service
-        unlink nginx-reload.timer
-        unlink nginx.service
+        unlink unit nginx-reload.timer
+        unlink unit nginx.service
 
 ",
         );
@@ -881,6 +897,73 @@ web1
 web1
     remove nginx
         unlink /etc/nginx/nginx.conf
+
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_with_sysusers_shows_link_sysuser() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"key = true"),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([(
+                        "myapp".into(),
+                        compute_app_plan(&t.store, AppDiff::Add { new_tree })?,
+                    )]),
+                    expected_current: None,
+                    is_rollback_safe: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+    add myapp
+        + config.toml
+        + sysusers/myapp.conf
+        link sysuser myapp.conf
+
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn removed_app_with_sysusers_shows_unlink_sysuser() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/myapp/sysusers/myapp.conf", b"u myapp -")]);
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
+        let plan = Plan {
+            commit: c1,
+            hosts: BTreeMap::from([(
+                Hostname::from("web1"),
+                HostPlan {
+                    apps: BTreeMap::from([(
+                        "myapp".into(),
+                        compute_app_plan(&t.store, AppDiff::Remove { old_tree })?,
+                    )]),
+                    expected_current: Some(c1),
+                    is_rollback_safe: true,
+                },
+            )]),
+        };
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1
+    remove myapp
+        unlink sysuser myapp.conf
 
 ",
         );

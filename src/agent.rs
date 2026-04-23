@@ -12,7 +12,7 @@ use git2::Oid;
 use crate::checkout::{self, CheckoutMode, checkout};
 use crate::error::ApplyError;
 use crate::log::FileLog;
-use crate::plan::{DesiredUnits, SystemDiff, diff_host};
+use crate::plan::{DesiredSysusers, DesiredUnits, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -26,6 +26,7 @@ pub struct AgentConfig {
     pub hostname: String,
     pub apps_dir: PathBuf,
     pub unit_dir: PathBuf,
+    pub sysusers_dir: PathBuf,
 }
 
 impl AgentConfig {
@@ -38,10 +39,14 @@ impl AgentConfig {
         let unit_dir = PathBuf::from(
             std::env::var("DEPTOOL_UNIT_DIR").unwrap_or("/etc/systemd/system".into()),
         );
+        let sysusers_dir = PathBuf::from(
+            std::env::var("DEPTOOL_SYSUSERS_DIR").unwrap_or("/etc/sysusers.d".into()),
+        );
         AgentConfig {
             hostname,
             apps_dir,
             unit_dir,
+            sysusers_dir,
         }
     }
 }
@@ -68,6 +73,7 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
 type OnActivate = Box<
     dyn Fn(
             &DesiredUnits,
+            &DesiredSysusers,
             &SystemDiff<PathBuf>,
             &mut dyn FnMut(Message),
             &mut dyn FnMut(&str),
@@ -134,7 +140,7 @@ impl AgentSession {
     /// Create a session for testing that does not touch systemd or symlinks.
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
-        let on_activate: OnActivate = Box::new(|_, _, _, _| Ok(()));
+        let on_activate: OnActivate = Box::new(|_, _, _, _, _| Ok(()));
         AgentSession::new(
             Store { repo },
             hostname.into(),
@@ -350,9 +356,18 @@ impl AgentSession {
         let desired_units =
             self.store
                 .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?;
+        let desired_sysusers =
+            self.store
+                .desired_sysusers(ctx.target_commit, &self.hostname, &self.apps_dir)?;
 
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
-        match (self.on_activate)(&desired_units, &system_diff, emit_message, &mut log_fn) {
+        match (self.on_activate)(
+            &desired_units,
+            &desired_sysusers,
+            &system_diff,
+            emit_message,
+            &mut log_fn,
+        ) {
             Ok(()) => {}
             Err(err) if system_diff.is_rollback_safe() => {
                 self.log(format_args!("activation failed, rolling back: {err}"));
@@ -448,8 +463,20 @@ impl AgentSession {
                 .desired_units(oid, &self.hostname, &self.apps_dir)?,
             None => BTreeMap::new(),
         };
+        let desired_sysusers = match ctx.current_commit {
+            Some(oid) => self
+                .store
+                .desired_sysusers(oid, &self.hostname, &self.apps_dir)?,
+            None => BTreeMap::new(),
+        };
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
-        (self.on_activate)(&desired_units, &system_diff, emit_message, &mut log_fn)?;
+        (self.on_activate)(
+            &desired_units,
+            &desired_sysusers,
+            &system_diff,
+            emit_message,
+            &mut log_fn,
+        )?;
 
         match ctx.current_commit {
             Some(good) => self.store.set_ref(
@@ -555,7 +582,7 @@ mod tests {
         use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
-        Box::new(move |_, _, _, _| {
+        Box::new(move |_, _, _, _, _| {
             let i = calls.fetch_add(1, Ordering::SeqCst);
             results
                 .get(i)
@@ -667,7 +694,7 @@ mod tests {
     #[test]
     fn no_rollback_when_not_rollback_safe() {
         let on_activate: super::OnActivate =
-            Box::new(|_, _, _, _| Err(ApplyError::SystemdActivationFailed));
+            Box::new(|_, _, _, _, _| Err(ApplyError::SystemdActivationFailed));
 
         // Data with a newly enabled unit -- not rollback-safe.
         let (mut host, c1) = test_host(

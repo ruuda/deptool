@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use git2::Oid;
 
 use crate::error::ApplyError;
-use crate::plan::{AppDiff, DesiredUnits, SymlinkChanges};
+use crate::plan::{AppDiff, SymlinkChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
 
@@ -197,20 +197,22 @@ pub fn checkout(
     Ok(())
 }
 
-/// Reconcile unit symlinks: make unit_dir match desired.
+/// Reconcile managed symlinks in a directory.
 ///
-/// Returns the set of unit names whose symlinks were added or changed.
-pub fn reconcile_unit_symlinks(
-    desired: &DesiredUnits,
+/// Makes `target_dir` contain exactly the symlinks in `desired`, only
+/// touching symlinks that point into `apps_dir` (i.e., ones we created).
+/// Returns the set of names whose symlinks were added or changed.
+pub fn reconcile_managed_symlinks(
+    desired: &BTreeMap<String, PathBuf>,
     apps_dir: &Path,
-    unit_dir: &Path,
+    target_dir: &Path,
 ) -> Result<BTreeSet<String>> {
-    let actual = collect_actual_units(apps_dir, unit_dir)?;
+    let actual = collect_managed_symlinks(apps_dir, target_dir)?;
     let mut changed = BTreeSet::new();
 
     for name in actual.keys() {
         if !desired.contains_key(name) {
-            fs::remove_file(unit_dir.join(name))?;
+            fs::remove_file(target_dir.join(name))?;
         }
     }
 
@@ -220,7 +222,7 @@ pub fn reconcile_unit_symlinks(
             Some(actual_target) => actual_target != desired_target,
         };
         if needs_update {
-            let link_path = unit_dir.join(name);
+            let link_path = target_dir.join(name);
             if link_path.exists() || link_path.symlink_metadata().is_ok() {
                 fs::remove_file(&link_path)?;
             }
@@ -345,17 +347,17 @@ fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     }
 }
 
-/// Collect actual unit symlinks in unit_dir that point into apps_dir.
+/// Collect symlinks in `dir` that point into `apps_dir`.
 ///
 /// We create absolute symlinks, so we just check whether the raw symlink
 /// target starts with apps_dir. No canonicalization needed.
-fn collect_actual_units(
+fn collect_managed_symlinks(
     apps_dir: &Path,
-    unit_dir: &Path,
+    dir: &Path,
 ) -> Result<BTreeMap<String, std::path::PathBuf>> {
     let mut units = BTreeMap::new();
 
-    let entries = match fs::read_dir(unit_dir) {
+    let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(units),
         Err(e) => return Err(e.into()),
@@ -535,16 +537,16 @@ mod tests {
         Ok(())
     }
 
-    // reconcile_unit_symlinks tests (which need filesystem access)
+    // reconcile_managed_symlinks tests (which need filesystem access)
 
     #[test]
-    fn reconcile_unit_symlinks_creates_symlink_for_desired_unit() -> Result<()> {
+    fn reconcile_managed_symlinks_creates_symlink_for_desired_unit() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        let changed = reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
+        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
 
         assert_eq!(changed, BTreeSet::from(["nginx.service".to_string()]));
         assert!(units.path().join("nginx.service").is_symlink());
@@ -552,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_unit_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
+    fn reconcile_managed_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
@@ -560,7 +562,7 @@ mod tests {
         // Create a symlink as if a previous reconcile put it there.
         unix_fs::symlink(&target, units.path().join("nginx.service"))?;
 
-        let changed = reconcile_unit_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        let changed = reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         assert!(!units.path().join("nginx.service").exists());
@@ -568,7 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_unit_symlinks_leaves_unmanaged_symlinks_intact() -> Result<()> {
+    fn reconcile_managed_symlinks_leaves_unmanaged_symlinks_intact() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
 
@@ -578,7 +580,7 @@ mod tests {
             units.path().join("sshd.service"),
         )?;
 
-        let changed = reconcile_unit_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        let changed = reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         assert!(units.path().join("sshd.service").is_symlink());
@@ -586,14 +588,14 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_unit_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
+    fn reconcile_managed_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
-        let changed = reconcile_unit_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
 
         assert!(changed.is_empty());
         Ok(())
@@ -632,7 +634,7 @@ mod tests {
         assert_eq!(actions.disable, vec!["nginx.service"]);
     }
 
-    /// Test harness for `diff_host` + `checkout` + `reconcile_unit_symlinks`.
+    /// Test harness for `diff_host` + `checkout` + `reconcile_managed_symlinks`.
     struct ApplyTest {
         repo: TestRepo,
         apps: TempDir,
@@ -694,7 +696,7 @@ mod tests {
                 .repo
                 .store
                 .desired_units(commit, host, self.apps.path())?;
-            reconcile_unit_symlinks(&desired, self.apps.path(), self.units.path())?;
+            reconcile_managed_symlinks(&desired, self.apps.path(), self.units.path())?;
             Ok(system)
         }
     }
@@ -720,6 +722,96 @@ mod tests {
         assert_eq!(changes.units.enable, vec!["nginx.service"]);
         assert!(changes.units.restart.is_empty());
         assert!(changes.units.disable.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_with_sysusers_links_and_sets_content_changed() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"key = true"),
+        ]);
+
+        let changes = t.apply(c1, None)?;
+
+        assert_eq!(changes.sysusers.link, vec!["myapp.conf"]);
+        assert!(changes.sysusers.unlink.is_empty());
+        assert!(changes.sysusers.content_changed);
+        Ok(())
+    }
+
+    #[test]
+    fn sysusers_content_changed_when_file_modified() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+        let c2 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+
+        let changes = t.apply(c2, Some(c1))?;
+
+        // Same set of files, but content changed.
+        assert!(changes.sysusers.link.is_empty());
+        assert!(changes.sysusers.unlink.is_empty());
+        assert!(changes.sysusers.content_changed);
+        Ok(())
+    }
+
+    #[test]
+    fn sysusers_link_makes_deploy_rollback_unsafe() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+
+        let changes = t.apply(c1, None)?;
+
+        assert!(!changes.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn sysusers_content_change_without_link_is_rollback_safe() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+        let c2 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+
+        let changes = t.apply(c2, Some(c1))?;
+
+        assert!(changes.sysusers.content_changed);
+        assert!(changes.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn sysusers_not_changed_when_only_other_files_change() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+        let c2 = t.repo.commit(&[
+            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("web1/myapp/config.toml", b"v2"),
+        ]);
+
+        let changes = t.apply(c2, Some(c1))?;
+
+        assert!(changes.sysusers.link.is_empty());
+        assert!(changes.sysusers.unlink.is_empty());
+        assert!(!changes.sysusers.content_changed);
         Ok(())
     }
 
