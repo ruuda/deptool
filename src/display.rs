@@ -83,8 +83,11 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                         writeln!(out, "        {} {file}", color_prefix(color, prefix))?;
                     }
                 }
-                AppDiff::Remove { .. } => {
+                AppDiff::Remove { old_tree } => {
                     writeln!(out, "    {} {app}", color.red("remove"))?;
+                    for (prefix, file) in diff_files(&store.repo, *old_tree, empty_tree_oid())? {
+                        writeln!(out, "        {} {file}", color_prefix(color, prefix))?;
+                    }
                 }
                 AppDiff::Update { old_tree, new_tree } => {
                     writeln!(out, "    {} {app}", color.yellow("update"))?;
@@ -542,6 +545,9 @@ web1 (rollback unavailable)
             "\
 web1
     remove nginx
+        - manifest.json
+        - systemd/nginx-reload.timer
+        - systemd/nginx.service
         disable nginx.service
         unlink unit nginx-reload.timer
         unlink unit nginx.service
@@ -568,6 +574,8 @@ web1
             "\
 web1
     remove nginx
+        - manifest.json
+        - nginx.conf
         disable nginx.service
 
 ",
@@ -744,6 +752,8 @@ web1
             "\
 web1
     remove nginx
+        - manifest.json
+        - nginx.conf
         unlink /etc/nginx/nginx.conf
 
 ",
@@ -785,6 +795,7 @@ web1 (rollback unavailable)
             "\
 web1
     remove myapp
+        - sysusers/myapp.conf
         unlink sysuser myapp.conf
 
 ",

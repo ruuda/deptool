@@ -410,6 +410,9 @@ ignores empty directories. We can work around this by adding an empty file:
     $ deptool deploy deptool_config
     webserver
         remove caddy
+            - Caddyfile
+            - manifest.json
+            - systemd/caddy.service
             disable caddy.service
             unlink unit caddy.service
 
