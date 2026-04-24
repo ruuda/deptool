@@ -28,7 +28,7 @@
           cargoLock = {
             lockFile = ./Cargo.lock;
             outputHashes = {
-              "git2-0.21.0" = "sha256-y+uOGVQEEotOKWXxx7NOIDo4HiGoqcNJXLEv5cow2eA=";
+              "git2-0.21.0" = "sha256-Wr2uhMZHRM2ZEnU4YDlcG2YrGyJEk/wERTYjy/1EaRc=";
             };
           };
           nativeBuildInputs = [ pkgss.pkg-config ];
