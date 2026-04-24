@@ -34,7 +34,7 @@ target host is Linux), but this is not a use case we need to solve right now.
 
 ## Remote agent
 
-When Deptool runs `deptool agent session` on the remote host, it always starts
+When Deptool runs `deptool agent` on the remote host, it always starts
 `deptool` by absolute path, so we know exactly which version we get, and it's
 the same version that the operator is using. As an additional verification, the
 agent announces its version as the hello message of the session protocol. The
@@ -72,12 +72,12 @@ Then we write the binary over stdin. This command is carefully chosen such that:
    already installed or not, also if a different version is installed.
 
 If this is the initial installation, then it's insufficient to put the binary in
-place, we also need to `git init --bare` the store. `deptool agent session` can
+place, we also need to `git init --bare` the store. `deptool agent` can
 do this at startup if it detects that the store is not yet initialized.
 
 ## Version discovery
 
-When Deptool connects to a target host, it always runs `deptool agent session`.
+When Deptool connects to a target host, it always runs `deptool agent`.
 If this command fails because the binary does not exist, we execute the
 installation as described above, and then retry starting an agent session. This
 means that for a new host we need three SSH sessions, but adding hosts and and

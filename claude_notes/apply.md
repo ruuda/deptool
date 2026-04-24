@@ -11,14 +11,16 @@ The oid prefix is the first 10 hex digits of the commit oid. Each checkout
 is an immutable directory. We never mutate a checkout in place. Old
 checkouts are small (just config files) and are kept indefinitely.
 
-<!-- TODO(ruuda): Update tree to include sysusers/ alongside systemd/. -->
 A typical app directory:
 
     /var/lib/deptool/apps/nginx/current/
     ├── nginx.conf
     ├── mime.types
-    └── systemd/
-        └── nginx.service
+    ├── manifest.json
+    ├── systemd/
+    │   └── nginx.service
+    └── sysusers/
+        └── nginx.conf
 
 Everything the app needs — config files, systemd units, environment files —
 lives in one flat (or shallow) directory. A human operator can `ls` and
@@ -65,23 +67,28 @@ whether they point into `/var/lib/deptool/`. This makes the operation
 convergent: it does not matter what state the system was in before. Crashed
 mid-deploy, manually tampered with, fresh boot — the result is the same.
 
-<!-- TODO(ruuda): Document the sysusers phase (between manifest symlinks and systemd units). -->
 After all per-app checkouts and symlink swaps are done, manifest symlinks
 (e.g. config files in `/etc`) are reconciled first -- units may depend on
-paths that these symlinks provide. Then the systemd phase runs in this
-order:
+paths that these symlinks provide. Then the sysusers and systemd phases
+run in this order:
 
- 1. `systemctl disable --now` for units that should no longer be enabled.
- 2. Reconcile unit symlinks: scan `/etc/systemd/system/` for symlinks
+ 1. Reconcile sysusers symlinks: scan `/etc/sysusers.d/` for symlinks
+    pointing into `/var/lib/deptool/`, collect all files across the
+    deployed apps' `sysusers/` directories, and create or remove symlinks
+    to make them match. If any `sysusers/` content changed in this deploy,
+    invoke `systemd-sysusers` to materialize the users. This happens before
+    the systemd phase so units can reference users that were just created.
+ 2. `systemctl disable --now` for units that should no longer be enabled.
+ 3. Reconcile unit symlinks: scan `/etc/systemd/system/` for symlinks
     pointing into `/var/lib/deptool/` (the actual set), collect all unit
     files across all deployed apps (the desired set), and create or remove
     symlinks to make actual match desired. This runs after disable because
     systemd treats our symlinks as "linked units" and `systemctl disable`
     removes the link itself, not just the enablement symlinks. Reconciling
     here restores them.
- 3. `systemctl daemon-reload` to pick up the reconciled state.
- 4. `systemctl enable --now` for units that should be newly enabled.
- 5. `systemctl restart` for units whose app changed while staying enabled.
+ 4. `systemctl daemon-reload` to pick up the reconciled state.
+ 5. `systemctl enable --now` for units that should be newly enabled.
+ 6. `systemctl restart` for units whose app changed while staying enabled.
 
 ## Reboot resilience
 
