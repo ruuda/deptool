@@ -1,3 +1,10 @@
+// Deptool -- A declarative configuration deployment tool.
+// Copyright 2026 Ruud van Asseldonk
+
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// A copy of the License has been included in the root of the repository.
+
 //! Integration tests for deploy and sync.
 //!
 //! Exercises the full binary end-to-end: CLI parsing, plan construction,
