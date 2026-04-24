@@ -5,9 +5,24 @@ files on a cluster of unix hosts reachable over SSH. Deptool is designed for
 smallish clusters (1–50) hosts managed by a small group of operators
 (1–5 people), and it is extremely fast for this use case.
 
-Check out [the manual](https://docs.ruuda.nl/deptool/) for more information.
-<!-- The link above is the rendered version of the docs directory in this
-repository. -->
+Check out [the manual][manual] for more information. To dive straight in, check
+out the [tutorial][tutorial].
+
+<!-- The links above below are the rendered versions of what's in the docs
+directory in this repository. -->
+[manual]:   https://docs.ruuda.nl/deptool/
+[tutorial]: https://docs.ruuda.nl/deptool/
+
+## Status
+
+Deptool is a hobby project without commercial support. I use it to mange my own
+personal infra and it works very well for this use case. I’m open-sourcing it in
+the hope that others find it useful too, bug reports are welcome. If there is
+sufficient interest, I may look into setting up a more mature release flow with
+prebuilt binaries and more thought about compatibility between versions. [Drop
+me a message][contact] if Deptool is useful to you!
+
+[contact]: https://ruudvanasseldonk.com/contact
 
 ## Hacking
 
