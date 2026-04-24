@@ -110,11 +110,10 @@ struct Args {
 }
 
 fn make_connector(mode: ConnectMode) -> Result<Box<dyn setup::HostConnector>> {
-    // The remote store path is fixed in production, but tests override it via
-    // DEPTOOL_REMOTE_STORE to point at a temporary directory.
-    let remote_store = std::env::var("DEPTOOL_REMOTE_STORE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/var/lib/deptool/store"));
+    let remote_store = PathBuf::from(prim::test_override(
+        "DEPTOOL_REMOTE_STORE",
+        "/var/lib/deptool/store",
+    ));
     match mode {
         ConnectMode::Remote => Ok(Box::new(RemoteConnector::new(&remote_store)?)),
         ConnectMode::Local => {

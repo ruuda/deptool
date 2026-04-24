@@ -79,3 +79,16 @@ pub fn read_hostname() -> String {
         .trim()
         .to_string()
 }
+
+/// Read a test override from an env var, falling back to the production
+/// default. Compiled out of release builds so a deployed binary can't be
+/// swayed by a stray environment variable.
+#[cfg(debug_assertions)]
+pub fn test_override(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+
+#[cfg(not(debug_assertions))]
+pub fn test_override(_key: &str, default: &str) -> String {
+    default.to_string()
+}

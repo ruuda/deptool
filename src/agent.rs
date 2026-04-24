@@ -37,22 +37,12 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     pub fn from_env() -> Self {
-        let hostname =
-            std::env::var("DEPTOOL_HOSTNAME").unwrap_or_else(|_| crate::prim::read_hostname());
-        let apps_dir = PathBuf::from(
-            std::env::var("DEPTOOL_APPS_DIR").unwrap_or("/var/lib/deptool/apps".into()),
-        );
-        let unit_dir = PathBuf::from(
-            std::env::var("DEPTOOL_UNIT_DIR").unwrap_or("/etc/systemd/system".into()),
-        );
-        let sysusers_dir = PathBuf::from(
-            std::env::var("DEPTOOL_SYSUSERS_DIR").unwrap_or("/etc/sysusers.d".into()),
-        );
+        use crate::prim::{read_hostname, test_override};
         AgentConfig {
-            hostname,
-            apps_dir,
-            unit_dir,
-            sysusers_dir,
+            hostname: test_override("DEPTOOL_HOSTNAME", &read_hostname()),
+            apps_dir: PathBuf::from(test_override("DEPTOOL_APPS_DIR", "/var/lib/deptool/apps")),
+            unit_dir: PathBuf::from(test_override("DEPTOOL_UNIT_DIR", "/etc/systemd/system")),
+            sysusers_dir: PathBuf::from(test_override("DEPTOOL_SYSUSERS_DIR", "/etc/sysusers.d")),
         }
     }
 }
