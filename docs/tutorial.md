@@ -386,6 +386,37 @@ deployed, it can clean up after itself and delete symlinks that are no longer
 included in a new revision of the configuration. As an additional safeguard,
 it will only remove symlinks that point into `/var/lib/deptool`.
 
+## Removing the app
+
+To remove an app, simply remove it from the configuration, and Deptool will
+remove it from the host. In our somewhat artificial tutorial, this would leave
+the host empty, which will make Deptool ignore it: just like Git, Deptool
+ignores empty directories. We can work around this by adding an empty file:
+
+    $ rm -fr deptool_config/webserver/caddy
+    $ touch deptool_config/webserver/intentionally-left-blank
+    $ deptool deploy deptool_config
+    webserver
+        remove caddy
+            disable caddy.service
+            unlink unit caddy.service
+
+    Auto-rollback if deploy fails.
+    Apply to 1 host? [y/N/d] y
+
+      webserver: done
+
+If we check the host, the app is indeed gone:
+
+    root@webserver $ ls -l /var/lib/deptool/apps
+    total 0
+
+    root@webserver $ systemctl status caddy.service
+    Unit caddy.service could not be found.
+
+`/var/lib/deptool` does still exist on the host, but it does not interfere with
+anything.
+
 ## Conclusion
 
 In this tutorial we deployed configuration for a single app on a single host.
