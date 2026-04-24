@@ -23,7 +23,8 @@ variables and select `musl` as the target. The Makefile takes care of this:
 
 ```
 $ make release
-$ ldd target/x86_64-unknown-linux-musl/release/deptool
+$ cp target/x86_64-unknown-linux-musl/release/deptool ~/.local/bin
+$ ldd $(which deptool)
 statically linked
 ```
 
@@ -32,10 +33,10 @@ and reproducible build environment:
 
 ```
 $ nix build
-$ ldd result/bin/deptool
+$ cp result/bin/deptool ~/.local/bin
+$ ldd $(which deptool)
 statically linked
 ```
 
 [rustup]: https://rust-lang.org/tools/install/
 [nix]:    https://nixos.org/
-
