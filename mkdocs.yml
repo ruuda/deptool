@@ -25,3 +25,7 @@ nav:
       - "Manifests": "manifests.md"
       - "Deployment phases": "deployment_phases.md"
       - "The store": "store.md"
+  - "Command reference":
+      - "deptool": "cmd/deptool.md"
+      - "deptool deploy": "cmd/deptool_deploy.md"
+      - "deptool sync": "cmd/deptool_sync.md"

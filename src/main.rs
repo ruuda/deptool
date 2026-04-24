@@ -61,7 +61,7 @@ enum Cmd {
         confirm_mode: ConfirmMode,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         mode: ConnectMode,
-        /// Directory containing the cluster config to deploy.
+        /// Directory containing the config tree to deploy.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
@@ -77,6 +77,7 @@ enum Cmd {
             fallback(PathBuf::from("/var/lib/deptool/store"))
         )]
         remote_store: PathBuf,
+        /// Sync all hosts in the cluster, not just the ones that appear stale.
         #[bpaf(
             long("all"),
             flag(sync::SyncMode::AllHosts, sync::SyncMode::OnlyAffectedHosts)
@@ -84,7 +85,7 @@ enum Cmd {
         sync_mode: sync::SyncMode,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         connect_mode: ConnectMode,
-        /// Directory containing the cluster config.
+        /// Directory containing the config tree.
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
@@ -101,6 +102,7 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
+    // TODO: Add a --version option.
 }
 
 fn make_connector(mode: ConnectMode, remote_store: &Path) -> Result<Box<dyn setup::HostConnector>> {

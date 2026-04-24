@@ -30,8 +30,8 @@ store, these refs are always up to date because nothing else mutates the
 cluster. In a collaborative setting they may be outdated, just like your Git
 remote tracking refs may be outdated when you did not pull for a while. A
 `deptool deploy` will discover staleness and update the refs, but if you already
-know your local store has outdated refs, you can also run `deptool sync` to pull
-the latest state explicitly.
+know your local store has outdated refs, you can also run
+[`deptool sync`](cmd/deptool_sync.md) to pull the latest state explicitly.
 
 ## Target-side refs
 
