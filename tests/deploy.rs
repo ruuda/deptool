@@ -70,12 +70,11 @@ impl LocalEnv {
             .args(args)
             .arg("--store")
             .arg(self.store.path())
-            .arg("--remote-store")
-            .arg(self.remote_store.path())
             .arg("--local")
             .env("DEPTOOL_HOSTNAME", self.hostname)
             .env("DEPTOOL_APPS_DIR", self.apps.path())
             .env("DEPTOOL_UNIT_DIR", self.units.path())
+            .env("DEPTOOL_REMOTE_STORE", self.remote_store.path())
             .output()
             .expect("deptool runs")
     }

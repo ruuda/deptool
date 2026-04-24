@@ -51,12 +51,6 @@ enum Cmd {
         /// Path to the local store (default: ./.deptool).
         #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
-        /// Path to the store on target hosts (default: /var/lib/deptool/store).
-        #[bpaf(
-            long("remote-store"),
-            fallback(PathBuf::from("/var/lib/deptool/store"))
-        )]
-        remote_store: PathBuf,
         /// Compute and display the plan, then exit without applying.
         #[bpaf(long("plan-only"), switch)]
         plan_only: bool,
@@ -79,12 +73,6 @@ enum Cmd {
         /// Path to the local store (default: ./.deptool).
         #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
-        /// Path to the store on target hosts (default: /var/lib/deptool/store).
-        #[bpaf(
-            long("remote-store"),
-            fallback(PathBuf::from("/var/lib/deptool/store"))
-        )]
-        remote_store: PathBuf,
         /// Sync all hosts in the cluster, not just the ones that appear stale.
         #[bpaf(
             long("all"),
@@ -121,9 +109,14 @@ struct Args {
     // TODO: Add a --version option.
 }
 
-fn make_connector(mode: ConnectMode, remote_store: &Path) -> Result<Box<dyn setup::HostConnector>> {
+fn make_connector(mode: ConnectMode) -> Result<Box<dyn setup::HostConnector>> {
+    // The remote store path is fixed in production, but tests override it via
+    // DEPTOOL_REMOTE_STORE to point at a temporary directory.
+    let remote_store = std::env::var("DEPTOOL_REMOTE_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/var/lib/deptool/store"));
     match mode {
-        ConnectMode::Remote => Ok(Box::new(RemoteConnector::new(remote_store)?)),
+        ConnectMode::Remote => Ok(Box::new(RemoteConnector::new(&remote_store)?)),
         ConnectMode::Local => {
             let remote_store = remote_store
                 .to_str()
@@ -243,7 +236,6 @@ fn resolve_dir(store: &Store, dir: Option<PathBuf>) -> Result<PathBuf> {
 fn run_deploy(
     store: PathBuf,
     dir: Option<PathBuf>,
-    remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
     mode: ConnectMode,
@@ -275,7 +267,7 @@ fn run_deploy(
         return Ok(());
     }
 
-    let connector = make_connector(mode, &remote_store)?;
+    let connector = make_connector(mode)?;
 
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let hostname = prim::read_hostname();
@@ -294,22 +286,20 @@ fn run() -> Result<()> {
     match args.cmd {
         Cmd::Deploy {
             store,
-            remote_store,
             plan_only,
             confirm_mode,
             mode,
             dir,
-        } => run_deploy(store, dir, remote_store, plan_only, confirm_mode, mode)?,
+        } => run_deploy(store, dir, plan_only, confirm_mode, mode)?,
         Cmd::Sync {
             store,
-            remote_store,
             sync_mode,
             connect_mode,
             dir,
         } => {
             let store = Store::open(&store)?;
             let dir = resolve_dir(&store, dir)?;
-            let connector = make_connector(connect_mode, &remote_store)?;
+            let connector = make_connector(connect_mode)?;
             let observer = display::StatusPrinter::new(display::UseColor::from_env());
             sync::run_sync(&store, &dir, &*connector, sync_mode, Box::new(observer))?;
         }
