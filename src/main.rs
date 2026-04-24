@@ -16,7 +16,7 @@ use std::process::Command;
 use bpaf::Bpaf;
 
 use deploy::Connection;
-use error::{ApplyError, HostError, Result};
+use error::{ApplyError, Error, HostError, Result};
 use prim::Hostname;
 use store::Store;
 
@@ -68,9 +68,10 @@ enum Cmd {
         confirm_mode: ConfirmMode,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         mode: ConnectMode,
-        /// Directory containing the config tree to deploy.
+        /// Directory containing the config tree to deploy. If omitted, use the
+        /// one recorded by the most recent deploy or sync.
         #[bpaf(positional("DIR"))]
-        dir: PathBuf,
+        dir: Option<PathBuf>,
     },
     /// Refresh tracking refs by connecting to hosts.
     #[bpaf(command)]
@@ -92,9 +93,10 @@ enum Cmd {
         sync_mode: sync::SyncMode,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         connect_mode: ConnectMode,
-        /// Directory containing the config tree.
+        /// Directory containing the config tree. If omitted, use the one
+        /// recorded by the most recent deploy or sync.
         #[bpaf(positional("DIR"))]
-        dir: PathBuf,
+        dir: Option<PathBuf>,
     },
     /// Create an empty store in the current directory.
     #[bpaf(command)]
@@ -217,15 +219,28 @@ impl setup::HostConnector for LocalConnector {
     }
 }
 
+/// Resolve the config tree directory, recording an explicit one as the default
+/// for subsequent runs.
+fn resolve_dir(store: &Store, dir: Option<PathBuf>) -> Result<PathBuf> {
+    match dir {
+        Some(d) => {
+            store.set_default_cluster(&d)?;
+            Ok(d)
+        }
+        None => store.get_default_cluster()?.ok_or(Error::NoDefaultCluster),
+    }
+}
+
 fn run_deploy(
     store: PathBuf,
-    dir: PathBuf,
+    dir: Option<PathBuf>,
     remote_store: PathBuf,
     plan_only: bool,
     confirm_mode: ConfirmMode,
     mode: ConnectMode,
 ) -> Result<()> {
     let repo = Store::open(&store)?;
+    let dir = resolve_dir(&repo, dir)?;
     let tree_oid = repo.build_tree(&dir)?;
 
     let plan = match plan::make_plan(&repo, tree_oid)? {
@@ -284,6 +299,7 @@ fn run() -> Result<()> {
             dir,
         } => {
             let store = Store::open(&store)?;
+            let dir = resolve_dir(&store, dir)?;
             let connector = make_connector(connect_mode, &remote_store)?;
             let observer = display::StatusPrinter::new(display::UseColor::from_env());
             sync::run_sync(&store, &dir, &*connector, sync_mode, Box::new(observer))?;

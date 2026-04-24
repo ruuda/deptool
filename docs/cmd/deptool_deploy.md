@@ -1,6 +1,9 @@
 # deptool deploy
 
-    deptool deploy [--no-confirm] [--plan-only] [--] <dir>
+    deptool deploy [--no-confirm] [--plan-only] [--] [<dir>]
+
+<!-- TODO(ruuda): Document that <dir> is optional and falls back to the config
+     tree recorded by the most recent deploy or sync. -->
 
 ## Description
 

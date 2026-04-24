@@ -185,6 +185,8 @@ pub enum Error {
     Io(std::io::Error),
     /// Non-store JSON failure (agent protocol parsing).
     Json(serde_json::Error),
+    /// No config tree was passed and none is recorded in the store.
+    NoDefaultCluster,
     /// One or more hosts failed during a deploy.
     DeployFailed(String),
 }
@@ -233,6 +235,10 @@ impl fmt::Display for Error {
             Error::Store(e) => write!(f, "{e}"),
             Error::Io(e) => write!(f, "{e}"),
             Error::Json(e) => write!(f, "{e}"),
+            Error::NoDefaultCluster => write!(
+                f,
+                "no default cluster; pass a config tree directory to set one",
+            ),
             // TODO: Later we could also find the common ancestor `cc` between
             // what the host has (`current`) and what we try to deploy, and then
             // we can show the `git log cc..current` to point out the culprit,

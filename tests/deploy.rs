@@ -54,19 +54,22 @@ impl LocalEnv {
         fs::write(full, content).unwrap();
     }
 
-    /// Build a deptool command with the store and config dir set.
-    fn cmd(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(DEPTOOL);
-        cmd.args(args)
-            .arg("--store")
-            .arg(self.store.path())
-            .arg(self.config.path());
-        cmd
+    /// The config tree directory as a string, for inclusion in `run` args.
+    fn config_dir(&self) -> &str {
+        self.config
+            .path()
+            .to_str()
+            .expect("config path is valid UTF-8")
     }
 
-    /// Run a deptool subcommand locally with the agent environment set.
+    /// Run a deptool subcommand locally. The caller passes `config_dir()` in
+    /// `args` to set the cluster explicitly, or omits it to exercise the
+    /// recorded default.
     fn run(&self, args: &[&str]) -> std::process::Output {
-        self.cmd(args)
+        Command::new(DEPTOOL)
+            .args(args)
+            .arg("--store")
+            .arg(self.store.path())
             .arg("--remote-store")
             .arg(self.remote_store.path())
             .arg("--local")
@@ -100,6 +103,38 @@ fn init_creates_bare_repo() {
 }
 
 #[test]
+fn deploy_without_dir_uses_recorded_default() {
+    let env = LocalEnv::new("testhost");
+    env.write_config("nginx/nginx.conf", b"v1");
+
+    let out = env.run(&["deploy", "--no-confirm", env.config_dir()]);
+    assert!(out.status.success(), "initial deploy succeeds");
+
+    env.write_config("nginx/nginx.conf", b"v2");
+    let out = env.run(&["deploy", "--no-confirm"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "second deploy succeeds: {stderr}");
+
+    let current = env.apps.path().join("nginx/current");
+    assert_eq!(
+        fs::read_to_string(current.join("nginx.conf")).expect("nginx.conf is readable"),
+        "v2",
+    );
+}
+
+#[test]
+fn deploy_without_dir_or_default_names_the_problem() {
+    let env = LocalEnv::new("testhost");
+    let out = env.run(&["deploy"]);
+    assert!(!out.status.success(), "deploy without dir or default fails");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no default cluster"),
+        "error names the missing default, got: {stderr}",
+    );
+}
+
+#[test]
 fn deploy_without_store_points_to_init() {
     let config = TempDir::new("config");
     let output = Command::new(DEPTOOL)
@@ -124,7 +159,7 @@ fn deploy_locally() {
     let env = LocalEnv::new("testhost");
     env.write_config("nginx/nginx.conf", b"server {}");
 
-    let output = env.run(&["deploy", "--no-confirm"]);
+    let output = env.run(&["deploy", "--no-confirm", env.config_dir()]);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -146,7 +181,7 @@ fn sync_then_deploy_avoids_staleness() {
 
     let deploy = |version: &str| {
         env.write_config("nginx/nginx.conf", version.as_bytes());
-        env.run(&["deploy", "--no-confirm"])
+        env.run(&["deploy", "--no-confirm", env.config_dir()])
     };
 
     // Deploy v1, then v2.
@@ -168,11 +203,11 @@ fn sync_then_deploy_avoids_staleness() {
 
     // Sync fixes the stale ref. Deploy v3 should succeed.
     env.write_config("nginx/nginx.conf", b"v3");
-    let output = env.run(&["sync"]);
+    let output = env.run(&["sync", env.config_dir()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "sync failed: {stderr}");
 
-    let output = env.run(&["deploy", "--no-confirm"]);
+    let output = env.run(&["deploy", "--no-confirm", env.config_dir()]);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
@@ -185,11 +220,7 @@ fn deploy_rejects_invalid_config() {
     let env = LocalEnv::new("deckard");
     env.write_config("nginx/manifest.json", br#"{"unknown_key": true}"#);
 
-    // No --local needed: --plan-only exits before connecting to hosts.
-    let output = env
-        .cmd(&["deploy", "--plan-only"])
-        .output()
-        .expect("deptool runs");
+    let output = env.run(&["deploy", "--plan-only", env.config_dir()]);
     assert!(
         !output.status.success(),
         "deploy should reject invalid config"

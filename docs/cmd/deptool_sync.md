@@ -1,6 +1,9 @@
 # deptool sync
 
-    deptool sync [--all] [--] <dir>
+    deptool sync [--all] [--] [<dir>]
+
+<!-- TODO(ruuda): Document that <dir> is optional and falls back to the config
+     tree recorded by the most recent deploy or sync. -->
 
 ## Description
 

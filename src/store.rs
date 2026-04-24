@@ -84,6 +84,24 @@ impl Store {
         self.repo.path()
     }
 
+    /// The config tree directory recorded by the most recent deploy or sync.
+    pub fn get_default_cluster(&self) -> Result<Option<PathBuf>> {
+        let config = self.repo.config()?;
+        match config.get_string("deptool.cluster") {
+            Ok(s) => Ok(Some(PathBuf::from(s))),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Git(e)),
+        }
+    }
+
+    /// Remember `path` as the default config tree for subsequent runs.
+    pub fn set_default_cluster(&self, path: &Path) -> Result<()> {
+        let s = path.to_str().expect("cluster path is valid UTF-8");
+        let mut config = self.repo.config()?;
+        config.set_str("deptool.cluster", s)?;
+        Ok(())
+    }
+
     /// Read the host-local `refs/heads/current` commit, if it exists.
     pub fn current_commit(&self) -> Option<Oid> {
         self.repo
