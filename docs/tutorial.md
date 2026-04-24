@@ -9,6 +9,21 @@ a static binary; prebuilt binaries are not yet available.
 > machine must have the same <abbr>CPU</abbr> architecture as the target host,
 > and both must run the same operating system.
 
+## Prerequisites
+
+In this tutorial we are going to manage a host named `webserver`. This host must
+be reachable via <abbr>SSH</abbr> — either because it has a <abbr>DNS</abbr>
+name, or because it’s defined in your `~/.ssh/config`. To manage it, Deptool
+needs root access on this host. If root <abbr>SSH</abbr> is allowed, you can add
+a [`User`][man-user] line in your `~/.ssh/config`. Alternatively, if your
+default user is allowed to use passwordless sudo, that also works. Confirm that
+this works:
+
+    $ ssh webserver 'sudo cat /etc/hostname'
+    webserver
+
+[man-user]: https://man.archlinux.org/man/ssh_config.5#User
+
 ## Preparing a store
 
 Create a new bare Git repository. This is where Deptool stores its deployment
@@ -25,10 +40,7 @@ configuration:
 
     $ mkdir deptool_config
 
-In this directory, we create one directory per target host. This host must be
-reachable via <abbr>SSH</abbr> — either because it has a <abbr>DNS</abbr> name,
-or because it’s defined in your `~/.ssh/config`. Let’s say that our target host
-is named `webserver`:
+In this directory, we create one directory per target host:
 
     $ mkdir deptool_config/webserver
 

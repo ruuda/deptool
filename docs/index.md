@@ -21,7 +21,8 @@ Updating a configuration file across the cluster can be done sub-second.
 **Safe.** Deptool computes a deployment plan ahead of time. You can view the
 full diff before even connecting. Deptool can roll back automatically in case a
 systemd unit fails to start after a deploy, and it prevents concurrent
-deploys with host-level locks.
+deploys with host-level locks. Deployment is idempotent, so a deploy that is
+interrupted half-way can safely be retried.
 
 **Opinionated, but simple.** Deptool manages files, it does not allow executing
 arbitrary commands that mutate your system. It is not a generic tool that tries
