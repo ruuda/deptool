@@ -30,14 +30,21 @@ struct LocalEnv {
 
 impl LocalEnv {
     fn new(hostname: &'static str) -> Self {
-        Self {
+        let env = Self {
             store: TempDir::new("store"),
             remote_store: TempDir::new("remote-store"),
             apps: TempDir::new("apps"),
             units: TempDir::new("units"),
             config: TempDir::new("config"),
             hostname,
-        }
+        };
+        let output = Command::new(DEPTOOL)
+            .args(["init", "--store"])
+            .arg(env.store.path())
+            .output()
+            .expect("deptool runs");
+        assert!(output.status.success(), "init exits successfully");
+        env
     }
 
     /// Write a file under `{hostname}/{path}` in the config directory.
@@ -78,6 +85,38 @@ fn help_does_not_crash() {
         .output()
         .expect("deptool runs");
     assert!(output.status.success(), "--help exits successfully");
+}
+
+#[test]
+fn init_creates_bare_repo() {
+    let store = TempDir::new("store");
+    let output = Command::new(DEPTOOL)
+        .args(["init", "--store"])
+        .arg(store.path())
+        .output()
+        .expect("deptool runs");
+    assert!(output.status.success(), "init exits successfully");
+    git2::Repository::open_bare(store.path()).expect("init creates a bare repo");
+}
+
+#[test]
+fn deploy_without_store_points_to_init() {
+    let config = TempDir::new("config");
+    let output = Command::new(DEPTOOL)
+        .args(["deploy", "--store", "does-not-exist"])
+        .arg(config.path())
+        .output()
+        .expect("deptool runs");
+    assert!(!output.status.success(), "deploy without store fails");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no store at 'does-not-exist'"),
+        "error names the missing path, got: {stderr}",
+    );
+    assert!(
+        stderr.contains("deptool init"),
+        "error suggests 'deptool init', got: {stderr}",
+    );
 }
 
 #[test]

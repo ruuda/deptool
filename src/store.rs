@@ -57,6 +57,9 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Err(StoreError::NotFound(path.to_path_buf()));
+        }
         Ok(Store {
             repo: Repository::open(path)?,
         })

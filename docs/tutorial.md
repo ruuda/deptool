@@ -26,17 +26,16 @@ this works:
 
 ## Preparing a store
 
-Create a new bare Git repository. This is where Deptool stores its deployment
-history, and tracks the cluster state.
+Deptool uses a _store_ to track its deployment history and cluster state. Under
+the hood the store is a bare Git repository, by default located at `.deptool`.
+Let’s create it:
 
-    $ git init --bare .deptool
-    Initialized empty Git repository in .deptool
-
-The default name for the store is `.deptool`. Unless overridden with
-`--store`, `deptool deploy` looks in this directory.
+    $ deptool init
+    Initialized store at '.deptool'.
 
 To populate the store, we will first create a new directory to hold the cluster
-configuration, named after the cluster we are about to manage:
+configuration, named after the cluster we are about to manage. This directory
+lives next to `.deptool`:
 
     $ mkdir prod
 

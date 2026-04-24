@@ -96,6 +96,13 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: PathBuf,
     },
+    /// Create an empty store in the current directory.
+    #[bpaf(command)]
+    Init {
+        /// Path to the store to create (default: ./.deptool).
+        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
+        store: PathBuf,
+    },
     /// Commands that run on target hosts (used internally over SSH).
     #[bpaf(command)]
     Agent {
@@ -218,7 +225,7 @@ fn run_deploy(
     confirm_mode: ConfirmMode,
     mode: ConnectMode,
 ) -> Result<()> {
-    let repo = Store::open_or_init(&store)?;
+    let repo = Store::open(&store)?;
     let tree_oid = repo.build_tree(&dir)?;
 
     let plan = match plan::make_plan(&repo, tree_oid)? {
@@ -276,10 +283,14 @@ fn run() -> Result<()> {
             connect_mode,
             dir,
         } => {
-            let store = Store::open_or_init(&store)?;
+            let store = Store::open(&store)?;
             let connector = make_connector(connect_mode, &remote_store)?;
             let observer = display::StatusPrinter::new(display::UseColor::from_env());
             sync::run_sync(&store, &dir, &*connector, sync_mode, Box::new(observer))?;
+        }
+        Cmd::Init { store } => {
+            Store::open_or_init(&store)?;
+            eprintln!("Initialized store at '{}'.", store.display());
         }
         Cmd::Agent { cmd } => run_agent(cmd)?,
     }

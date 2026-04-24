@@ -27,5 +27,6 @@ nav:
       - "The store": "store.md"
   - "Command reference":
       - "deptool": "cmd/deptool.md"
+      - "deptool init": "cmd/deptool_init.md"
       - "deptool deploy": "cmd/deptool_deploy.md"
       - "deptool sync": "cmd/deptool_sync.md"

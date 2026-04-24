@@ -8,12 +8,15 @@
 //! Error types and Result aliases.
 
 use std::fmt;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
 /// An error from the Git store or its contents.
 #[derive(Debug)]
 pub enum StoreError {
+    /// No store exists at the given path. Points the user at `deptool init`.
+    NotFound(PathBuf),
     /// Git operation failure (libgit2).
     Git(git2::Error),
     /// Filesystem I/O failure.
@@ -47,6 +50,11 @@ impl From<serde_json::Error> for StoreError {
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            StoreError::NotFound(path) => write!(
+                f,
+                "no store at '{}'; run 'deptool init' to create one",
+                path.display(),
+            ),
             StoreError::Git(e) => write!(f, "{e}"),
             StoreError::Io(e) => write!(f, "{e}"),
             StoreError::Json(e) => write!(f, "{e}"),
