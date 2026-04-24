@@ -71,7 +71,7 @@ Let’s deploy this to our 1-host cluster!
             + Caddyfile
 
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 Before even connecting to a host, Deptool shows us the _plan_. In this case, the
 plan is to add a new app `caddy` on host `webserver`, which contains a new file
@@ -87,7 +87,7 @@ over a single <abbr>SSH</abbr> connection. If the latency to the host is not too
 bad, this should all happen within a second:
 
 
-    Apply to 1 host? [y/N/d] y
+    Apply to 1 host in cluster 'prod'? [y/N/d] y
 
       webserver: done
 
@@ -136,13 +136,13 @@ again:
             ~ Caddyfile
     
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d] 
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 When we deploy this, Deptool indicates that the file `Caddyfile`, part of app
 `caddy` on host `webserver`, has changes. Press `d` to diff the contents of
 Caddyfile, `y` to deploy.
 
-    Apply to 1 host? [y/N/d] y
+    Apply to 1 host in cluster 'prod'? [y/N/d] y
     
       webserver: done
 
@@ -228,7 +228,7 @@ Let’s deploy it:
             enable caddy.service
 
     Rollback unavailable for some hosts.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 The plan tells us a few things:
 
@@ -242,7 +242,7 @@ The plan tells us a few things:
 Furthermore, Deptool warns that rollback is not available. This is fine, we’ll
 dive into the details of rollback later. Press `y` to accept.
 
-    Apply to 1 host? [y/N/d] y
+    Apply to 1 host in cluster 'prod'? [y/N/d] y
 
     webserver:
     ● caddy.service - Caddy webserver
@@ -272,7 +272,7 @@ Let’s update our Caddy configuration again, and deploy:
             restart caddy.service
 
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 This time the plan tells us:
 
@@ -289,7 +289,7 @@ back at the previous revision again, and restart systemd units once more so they
 pick up the previous known-good configuration. This ensures that we don’t leave
 `caddy.service` in a failed state, with no webserver running. Let’s accept:
 
-    Apply to 1 host? [y/N/d] y
+    Apply to 1 host in cluster 'prod'? [y/N/d] y
 
     webserver:
     ● caddy.service - Caddy webserver
@@ -343,7 +343,7 @@ Deploy this:
             restart caddy.service
 
     Rollback unavailable for some hosts.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 This time the plan includes the new file `tmpfiles.conf`, and the new symlink
 at `/etc/tmpfiles.d/caddy.conf`. This symlink points through `current`:
@@ -362,7 +362,7 @@ target file. For example, let’s change the group owner from `caddy` to `www`:
             restart caddy.service
 
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 This time the plan does not mention the `/etc/tmpfiles.d/caddy.conf`, because
 it does not need to change. Press `d` to double-check the diff, then `y` to
@@ -382,7 +382,7 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
             restart caddy.service
 
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d]
+    Apply to 1 host in cluster 'prod'? [y/N/d]
 
 This time the plan says:
 
@@ -416,7 +416,7 @@ ignores empty directories. We can work around this by adding an empty file:
             unlink unit caddy.service
 
     Auto-rollback if deploy fails.
-    Apply to 1 host? [y/N/d] y
+    Apply to 1 host in cluster 'prod'? [y/N/d] y
 
       webserver: done
 

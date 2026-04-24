@@ -219,6 +219,15 @@ impl setup::HostConnector for LocalConnector {
     }
 }
 
+/// Last component of the config tree path, shown to the operator so they can
+/// see which cluster is being deployed when the positional was omitted.
+fn cluster_name(dir: &Path) -> &str {
+    dir.file_name()
+        .unwrap_or(dir.as_os_str())
+        .to_str()
+        .expect("cluster name is valid UTF-8")
+}
+
 /// Resolve the config tree directory, recording an explicit one as the default
 /// for subsequent runs.
 fn resolve_dir(store: &Store, dir: Option<PathBuf>) -> Result<PathBuf> {
@@ -260,7 +269,7 @@ fn run_deploy(
 
     let decision = match confirm_mode {
         ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
-        ConfirmMode::Prompt => display::confirm(&repo, &plan, &store, color)?,
+        ConfirmMode::Prompt => display::confirm(&repo, &plan, cluster_name(&dir), color)?,
     };
     if let display::Decision::Abort = decision {
         return Ok(());

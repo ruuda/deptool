@@ -9,7 +9,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use git2::{Delta, Oid, Repository};
@@ -129,7 +128,7 @@ pub enum Decision {
 ///
 /// `d` shows the full file diff for all hosts in a single pager, then
 /// re-shows the prompt. Enter or `N` aborts (the default).
-pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<Decision> {
+pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Result<Decision> {
     let all_rollback_safe = plan.hosts.values().all(|h| h.is_rollback_safe);
     if all_rollback_safe {
         println!("Auto-rollback if deploy fails.");
@@ -140,14 +139,14 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
     let n = plan.hosts.len();
     let noun = if n == 1 { "host" } else { "hosts" };
     loop {
-        print!("Apply to {n} {noun}? [y/N/d] ");
+        print!("Apply to {n} {noun} in cluster '{cluster}'? [y/N/d] ");
         io::stdout().flush()?;
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         match input.trim() {
             "y" | "Y" => return Ok(Decision::Apply),
-            "d" | "D" => show_diffs(store, plan, store_path, color)?,
+            "d" | "D" => show_diffs(store, plan, color)?,
             _ => return Ok(Decision::Abort),
         }
     }
@@ -157,7 +156,7 @@ pub fn confirm(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -
 ///
 /// Without this, each `git diff` invocation opens its own pager, so deploying
 /// to N hosts means dismissing N pagers.
-fn show_diffs(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) -> Result<()> {
+fn show_diffs(store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
     println!();
     let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
@@ -169,7 +168,7 @@ fn show_diffs(store: &Store, plan: &Plan, store_path: &Path, color: UseColor) ->
         writeln!(combined, "{}", color.blue(&host.to_string()))?;
         let child = Command::new("git")
             .arg("--git-dir")
-            .arg(store_path)
+            .arg(store.path())
             .args(["diff", "--color=always"])
             .arg(old_oid.to_string())
             .arg(new_oid.to_string())
