@@ -31,6 +31,10 @@ Maps absolute paths on the target host to relative paths inside the app's
 checkout. Deptool creates symlinks at the specified paths, pointing through
 `<app>/current/` so they always resolve to the active version.
 
+To prevent interference with systemd units and sysusers managed by Deptool,
+symlink targets in `/etc/systemd/system` and `/etc/sysusers.d` are not allowed.
+Use the [designated directories](directory_layout.md#apps) for those instead.
+
 ## Incremental adoption
 
 Deptool is designed for incremental adoption. When a symlink target already
