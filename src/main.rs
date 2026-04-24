@@ -13,7 +13,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use bpaf::Bpaf;
+use bpaf::{Bpaf, long};
 
 use deploy::Connection;
 use error::{ApplyError, Error, HostError, Result};
@@ -106,7 +106,6 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
-    // TODO: Add a --version option.
 }
 
 fn make_connector(mode: ConnectMode) -> Result<Box<dyn setup::HostConnector>> {
@@ -280,7 +279,13 @@ fn run_deploy(
 }
 
 fn run() -> Result<()> {
-    let args = args().run();
+    // Register --version with bpaf (with only the long name, no -V) so it
+    // appears in --help output. The flag is actually intercepted in main()
+    // before bpaf runs, to avoid bpaf's hardcoded `Version: ` prefix.
+    let args = args()
+        .version(env!("CARGO_PKG_VERSION"))
+        .version_parser(long("version").help("Print version and exit"))
+        .run();
 
     match args.cmd {
         Cmd::Deploy {
@@ -512,6 +517,12 @@ fn run_agent(cmd: AgentCmd) -> Result<()> {
 }
 
 fn main() {
+    // Handled outside bpaf so that the output is just `deptool <version>`,
+    // rather than bpaf's hardcoded `Version: ...` prefix.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("Deptool {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     if let Err(e) = run() {
         eprintln!("Error: {e}");
         std::process::exit(1);
