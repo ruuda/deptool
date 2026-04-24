@@ -35,7 +35,7 @@ Let’s create it:
 
 To populate the store, we will first create a new directory to hold the cluster
 configuration, named after the cluster we are about to manage. This directory
-lives next to `.deptool`:
+lives next to the store[^1]:
 
     $ mkdir prod
 
@@ -52,7 +52,12 @@ so:
         └── caddy
             └── Caddyfile
 
-Upon deploy, Deptool will commit this directory tree to its store.[^1]
+Let’s create it:
+
+    $ mkdir prod/webserver/caddy
+    $ vim prod/webserver/caddy/Caddyfile
+
+Upon deploy, Deptool will commit this directory tree to its store.
 
 [^1]: The store is located outside of the config directory `prod`, so that you
       can easily delete the entire config directory. This is because in larger
