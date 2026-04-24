@@ -62,8 +62,8 @@ one we are deploying, run `systemctl disable --now` on them.
 ### Update systemd units
 
 Reconcile Deptool symlinks in `/etc/systemd/system` to match the current
-[systemd units](directory_layout#systemd) defined across the host’s apps. Then
-run `systemctl daemon-reload` to pick up changes to units.
+[systemd units](directory_layout.md#systemd) defined across the host’s apps.
+Then run `systemctl daemon-reload` to pick up changes to units.
 
 ### Enable and start systemd units
 

@@ -2,7 +2,7 @@
 
 In this tutorial we will make our first Deptool deployment against a single
 host. Before we start, follow the [build instructions](building.md) to build
-a static binary.
+a static binary; prebuilt binaries are not yet available.
 
 > **Note**<br>
 > Because Deptool copies its own binary to target hosts, currently the operator
@@ -97,7 +97,7 @@ This created a directory `/var/lib/deptool` on the target host:
         └── ...
 
  * `apps/caddy` contains a directory named after the commit that Deptool created
-   for this depoyment. It contains the `Caddyfile` that we wanted to deploy.
+   for this deployment. It contains the `Caddyfile` that we wanted to deploy.
  * `apps/caddy/current` is a symlink to that directory.
  * `bin` contains a binary `deptool` named after the version and the hash of the
    binary.[^2]
@@ -213,7 +213,7 @@ Let’s deploy it:
         update caddy
             + manifest.json
             + systemd/caddy.service
-            link caddy.service
+            link unit caddy.service
             enable caddy.service
 
     Rollback unavailable for some hosts.
@@ -222,13 +222,14 @@ Let’s deploy it:
 The plan tells us a few things:
 
  * We’re going to deploy to host `webserver`, where we modify the `caddy` app.
+   Because we’re adding a new systemd unit, rollback is not available.
  * The files `manifest.json` and `systemd/caddy.service` are going to be
    newly created inside the app directory.
  * A symlink to `caddy.service` is going to be placed in `/etc/systemd/system`.
  * The unit `caddy.service` is going to be enabled.
 
-Furthermore, Deptool warns that rollback is not available. We’ll dive into the
-details of rollback later, for now this is not important. Press `y` to accept.
+Furthermore, Deptool warns that rollback is not available. This is fine, we’ll
+dive into the details of rollback later. Press `y` to accept.
 
     Apply to 1 host? [y/N/d] y
 
@@ -366,7 +367,7 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
         update caddy
             ~ manifest.json
             - tmpfiles.conf
-            unlink/etc/tmpfiles.d/caddy.conf
+            unlink /etc/tmpfiles.d/caddy.conf
             restart caddy.service
 
     Auto-rollback if deploy fails.

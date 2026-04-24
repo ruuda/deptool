@@ -3,7 +3,7 @@
 Deptool is written in Rust and builds with Cargo. It specifies a compatible
 toolchain in `rust-toolchain.toml`, though other versions may work. If you
 manage Rust with [Rustup][rustup], it will automatically download the right
-toolchain.
+toolchain. Deptool has few dependencies, so it’s quick to build from source.
 
 Start by cloning the repository from one of the two mirrors:
 
@@ -16,18 +16,24 @@ $ cd deptool
 For local development, `cargo check` and `cargo test` work fine. For production
 use though, because Deptool copies itself to the target host to run in agent
 mode there, we need to build a static binary. There are two ways to do this.
-With Cargo:
+
+If you have Rustup and a C compiler installed, the Cargo-based build should work
+out of the box. To ensure a fully static build we need to set a few environment
+variables and select `musl` as the target. The Makefile takes care of this:
 
 ```
 $ make release
 $ ldd target/x86_64-unknown-linux-musl/release/deptool
+statically linked
 ```
 
-Or with [Nix][nix]:
+Alternatively, you can build with [Nix][nix], which provides a self-contained
+and reproducible build environment:
 
 ```
 $ nix build
 $ ldd result/bin/deptool
+statically linked
 ```
 
 [rustup]: https://rust-lang.org/tools/install/
