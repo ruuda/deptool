@@ -31,3 +31,7 @@ config tree in `<dir>`, and the latest known state based on the remote tracking
 refs in the store. This is the same set of hosts that `deptool deploy` would
 connect to. With `--all`, Deptool instead fetches the latest state from _all_
 hosts defined in the config tree.
+
+### `--store`
+
+Path to the local [store](../store.md), by default `.deptool`.

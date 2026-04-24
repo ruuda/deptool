@@ -10,8 +10,6 @@ The `deptool` executable, see the commands for more details. The commands are:
  * [deploy](deptool_deploy.md) — Deploy a config tree to the cluster.
  * [sync](deptool_sync.md) — Fetch the latest cluster state.
 
-## Global options
+Deptool respects the [`NO_COLOR`][nocolor] environment variable.
 
-### `--store`
-
-Path to the local [store](../store.md), by default `.deptool`.
+[nocolor]: https://no-color.org/

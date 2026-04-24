@@ -24,3 +24,7 @@ plan. With this flag, it instead proceeds automatically.
 ### `--plan-only`
 
 Compute the plan and exit, do not connect to any host.
+
+### `--store`
+
+Path to the local [store](../store.md), by default `.deptool`.
