@@ -16,7 +16,7 @@ the target host. The only prerequisite is the ability to open an
 
 **Fast.** Deptool only connects to hosts that are affected by a change,
 which it can determine statically. It deploys against hosts in parallel,
-and merely pushes files and restarts systemd units.
+and merely pushes files and optionally manages systemd units.
 Updating a configuration file across the cluster can be done sub-second.
 
 **Safe.** Deptool computes a deployment plan ahead of time. You can view the
@@ -81,10 +81,10 @@ directories define _apps_. For example:
             └── nginx.service
 
 Per host, Deptool materializes the app directories in `/var/lib/deptool/apps`.
-It then manages systemd units, and it can create symlinks on the filesystem that
-point into `/var/lib/deptool`, as defined in the manifest, `manifest.json`. See
-also the [directory layout](directory_layout.md) and [manifest](manifests.md)
-reference.
+It then manages systemd units if any are included, and it can create symlinks on
+the filesystem that point into `/var/lib/deptool`, as defined in the manifest,
+`manifest.json`. See also the [directory layout](directory_layout.md) and
+[manifest](manifests.md) reference.
 
 On the operator machine, Deptool keeps a remote-tracking ref per target host.
 This way it knows what is deployed on that host, and whether a new commit
