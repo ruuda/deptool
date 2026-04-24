@@ -1,9 +1,9 @@
 # Deptool
 
 Deptool is a declarative configuration deployment tool. It manages configuration
-files on a cluster of hosts reachable over <abbr>SSH</abbr>. Deptool is designed
-for smallish clusters (1–50 hosts) managed by a small group of operators
-(1–5 people). Deptool is:
+files on a cluster of unix hosts reachable over <abbr>SSH</abbr>. Deptool is
+designed for smallish clusters (1–50 hosts) managed by a small group of
+operators (1–5 people). Deptool is:
 
 **Declarative.** You define the desired state of your cluster, Deptool
 materializes that state. When you stop defining a file, Deptool removes it. No

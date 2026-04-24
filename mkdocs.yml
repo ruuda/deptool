@@ -18,6 +18,7 @@ nav:
   - "Overview": "index.md"
   - "User guide":
       - "Tutorial": "tutorial.md"
+      - "User management": "user_management.md"
       # - TODO: How to guide, deploying a simple app.
       # - TODO: How to guide, managing system users with systemd-sysusers.
   - "Reference":

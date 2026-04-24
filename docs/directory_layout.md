@@ -70,7 +70,7 @@ contents of an app’s `sysusers` directory, Deptool executes
 [systemd-sysusers][sd-sysusers].
 
 > **Note**<br>
-> Beware of systemd-sysuser’s behavior! In particular, it does nothing when a
+> Beware of systemd-sysusers’ behavior! In particular, it does nothing when a
 > user or group already exists, so changing a sysuser file after its initial
 > deployment is ineffective and can even cause confusion, as the file on disk
 > will not match reality. Moreover, removing a sysuser file does not remove the
@@ -78,7 +78,8 @@ contents of an app’s `sysusers` directory, Deptool executes
 
 Sysusers are created before restarting systemd units, so that units can
 reference users defined by sysusers included in the app, see also
-[deployment phases](deployment_phases.md).
+[deployment phases](deployment_phases.md#update-sysusers). See the [user
+management guide](user_management.md) for alternative ways to manage users.
 
 [sysusers.d]:  https://www.freedesktop.org/software/systemd/man/latest/sysusers.d.html
 [sd-sysusers]: https://www.freedesktop.org/software/systemd/man/latest/systemd-sysusers.html#
