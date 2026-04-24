@@ -1,46 +1,56 @@
 # Store
 
-Deptool stores state in Git repositories.
+Deptool stores cluster configuration in a Git repository called the _store_.
+It stores all config trees that were ever deployed to the cluster. The store
+exists as a bare Git repository on the operator machine, by default in
+`deptool_store`. It also exists as a bare repository on every target host in
+`/var/lib/deptool/store`.
 
- * Cluster configuration as Git trees.
- * The history of cluster configuration as a Git branch.
+## Data model
 
-## Target machine
+A config tree defines the desired state for the entire cluster, as outlined
+in the [directory layout](directory_layout.md) chapter. The store stores config
+trees as Git trees.
 
-On a target machine inside a cluster, we have two refs:
+Every deployment is a commit that points to the config tree we deployed or
+attempted to deploy. It carries metadata about who created it and when, and it
+enables Deptool to not just track what is currently deployed, but everything
+that was ever deployed to the cluster.
 
- * `refs/heads/current` for what is currently checked out.
- * `refs/heads/target` for what we intend to check out.
+## Operator-side refs
 
-Usually these two refs point to the same commit, but we split them such that if
-something fails during a deployment, we know it was not finished and we can
-recover.
+ * `refs/heads/main` point to the last commit that we attempted to deploy.
+ * `refs/remotes/<host>/current` points to the commit that is deployed at that
+   host.
 
-The reflog for these refs gives us the deployment history for free. It is kept
-locally on the machine so it is the source of truth.
+On the operator side, Deptool keeps a remote-tracking ref per target host.
+This enables Deptool to determine which hosts are affected by a change,
+completely offline. For a cluster managed by a single person from a single
+store, these refs are always up to date because nothing else mutates the
+cluster. In a collaborative setting they may be outdated, just like your Git
+remote tracking refs may be outdated when you did not pull for a while. A
+`deptool deploy` will discover staleness and update the refs, but if you already
+know your local store has outdated refs, you can also run `deptool sync` to pull
+the latest state explicitly.
 
-## Developer machine
+## Target-side refs
 
-On the developer machine, from which the operator runs `deptool`, we mirror the
-refs of the target machines using the standard Git remote conventions.
+ * `refs/heads/current` points to the last successfully deployed commit.
+ * `refs/heads/target` points to the target of the last deploy.
 
- * `refs/remotes/<hostname>/current` is what is checked out at the host.
- * `refs/remotes/<hostname>/target` is the target for that machine.
+On the target machine, Deptool keeps refs to record what is currently deployed
+there, and their reflog provides a log of every (attempted) deploy. When the
+host is in a clean state, `current` and `target` point to the same commit. At
+the start of a deploy, `target` advances to the commit that we attempt to
+deploy, while `current` only advances after the deploy is complete. When the two
+refs disagree, either a deploy is in progress, or a deploy failed and the target
+state is only partially applied.
 
-Locally on the developer machine we furthermore have:
+## Transport
 
-  * `refs/heads/main`, the standard main branch, which is where we add new
-    commits when we `deptool commit`.
-  * `refs/heads/current`, the last thing that we know we deployed against the
-    cluster.
-
-The deployment workflow is documented in [deployment.md](deployment.md).
-
-## Unresolved questions
-
- * Removing _all_ profiles from a host is currently not something we can do
-   because you can't have empty directories in Git trees. Maybe we can just
-   leave a file `EMPTY` in the tree for that host. Or maybe we should have a
-   file `META` in every host besides its profile to clarify inventory? Or maybe
-   we should have a top-level inventory file. But `META` per dir sounds kinda
-   nice, I think, in case we need to track more in the future.
+Deptool keeps the Git repositories synchronized between the operator machine and
+target hosts by sending packfiles over the existing <abbr>SSH</abbr> agent
+session. This skips the additional <abbr>SSH</abbr> handshake that would be
+needed for an out-of-band `git push`, and it ensures that Deptool works even
+when Git is not installed on the target host. (Deptool embeds libgit2 in its
+static binary.)
