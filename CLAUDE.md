@@ -77,6 +77,7 @@ Post-generation checklist (run after writing code, before presenting):
  - For each new `bool` parameter: use an enum instead. `frobnicate(true)` is meaningless; `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
  - For each `replace_all` on a word: will it match inside a longer word (e.g. "started" inside "restarted")? Use more context or targeted edits.
  - For each doc comment on changed code: does it still match the current signature and behavior? Re-read it after every refactor.
+ - For each change to user-visible output (plan display, logs, errors): `git grep` for fragments of the old output in `docs/` and tests. Update every match.
 
 ## Working with Git
 
