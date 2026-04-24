@@ -5,10 +5,9 @@ host. Before we start, follow the [build instructions](building.md) to build
 a static binary.
 
 > **Note**<br>
-> Because Deptool copies its own binary to target hosts, the operator machine
-> must have the same <abbr>CPU</abbr> architecture as the target host, and both
-> must run Linux. This is not a fundamental limitation, just a consequence of
-> the current build process.
+> Because Deptool copies its own binary to target hosts, currently the operator
+> machine must have the same <abbr>CPU</abbr> architecture as the target host,
+> and both must run the same operating system.
 
 ## Preparing a store
 

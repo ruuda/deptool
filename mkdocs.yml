@@ -23,7 +23,7 @@ nav:
   - "Reference":
       - "Directory layout": "directory_layout.md"
       - "Manifests": "manifests.md"
-  #     - "Deployment phases": "deployment_phases.md"
+      - "Deployment phases": "deployment_phases.md"
   # - "Internals":
   #     - "The store": "store.md"
   # - "Development":
