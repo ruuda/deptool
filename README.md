@@ -13,6 +13,11 @@ directory in this repository. -->
 [manual]:   https://docs.ruuda.nl/deptool/
 [tutorial]: https://docs.ruuda.nl/deptool/
 
+> [!NOTE]
+> Because Deptool copies its own binary to target hosts, currently the operator
+> machine must have the same CPU architecture as the target host, and both must
+> run the same operating system.
+
 ## Status
 
 Deptool is a hobby project without commercial support. I use it to mange my own
