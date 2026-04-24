@@ -20,17 +20,6 @@ use error::{ApplyError, Error, HostError, Result};
 use prim::Hostname;
 use store::Store;
 
-#[derive(Debug, Clone, Bpaf)]
-enum AgentCmd {
-    /// Start an interactive session over stdin/stdout.
-    #[bpaf(command)]
-    Session {
-        /// Path to the bare Git store.
-        #[bpaf(positional("STORE"))]
-        store: PathBuf,
-    },
-}
-
 #[derive(Debug, Clone, Copy)]
 enum ConnectMode {
     Local,
@@ -93,11 +82,12 @@ enum Cmd {
         #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
     },
-    /// Commands that run on target hosts (used internally over SSH).
-    #[bpaf(command)]
+    /// Run the agent on a target host (invoked internally over SSH).
+    #[bpaf(command, hide)]
     Agent {
-        #[bpaf(external(agent_cmd))]
-        cmd: AgentCmd,
+        /// Path to the bare Git store.
+        #[bpaf(positional("STORE"))]
+        store: PathBuf,
     },
 }
 
@@ -181,7 +171,6 @@ impl setup::HostConnector for RemoteConnector {
             "sudo",
             &self.remote_bin_path,
             "agent",
-            "session",
             &self.remote_store,
         ]);
         let session = deploy::RemoteSession::new(cmd)?;
@@ -200,7 +189,7 @@ struct LocalConnector {
 impl setup::HostConnector for LocalConnector {
     fn connect(&self, _host: &Hostname) -> std::result::Result<Box<dyn Connection>, HostError> {
         let mut cmd = Command::new(std::env::current_exe().expect("current exe path is known"));
-        cmd.args(["agent", "session", &self.remote_store]);
+        cmd.args(["agent", &self.remote_store]);
         let session = deploy::RemoteSession::new(cmd)?;
         Ok(Box::new(session))
     }
@@ -311,7 +300,7 @@ fn run() -> Result<()> {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());
         }
-        Cmd::Agent { cmd } => run_agent(cmd)?,
+        Cmd::Agent { store } => run_agent(store)?,
     }
 
     Ok(())
@@ -473,45 +462,41 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
     )
 }
 
-fn run_agent(cmd: AgentCmd) -> Result<()> {
-    match cmd {
-        AgentCmd::Session { store } => {
-            // Since we install the exact agent binary that the driver needs on
-            // demand, versions can pile up on the target host (especially
-            // during development), so GC the bin directory.
-            let gc_result = match std::env::current_exe() {
-                Ok(exe) => setup::gc_bin_dir(&exe),
-                Err(_) => Ok(()), // Can't determine our path, skip GC.
-            };
-            if let Err(err) = gc_result {
-                eprintln!("gc: {err}");
-            }
+fn run_agent(store: PathBuf) -> Result<()> {
+    // Since we install the exact agent binary that the driver needs on
+    // demand, versions can pile up on the target host (especially
+    // during development), so GC the bin directory.
+    let gc_result = match std::env::current_exe() {
+        Ok(exe) => setup::gc_bin_dir(&exe),
+        Err(_) => Ok(()), // Can't determine our path, skip GC.
+    };
+    if let Err(err) = gc_result {
+        eprintln!("gc: {err}");
+    }
 
-            let store = Store::open_or_init(&store)?;
-            let config = AgentConfig::from_env();
-            let current_commit = store.current_commit();
-            let hello = protocol::Hello {
-                version: protocol::VERSION.to_string(),
-                hostname: config.hostname.clone(),
-                current_commit,
-            };
-            let mut session = make_agent_session(store, &config);
-            let stdin = std::io::stdin().lock();
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &hello)?;
-            writeln!(stdout)?;
-            stdout.flush()?;
+    let store = Store::open_or_init(&store)?;
+    let config = AgentConfig::from_env();
+    let current_commit = store.current_commit();
+    let hello = protocol::Hello {
+        version: protocol::VERSION.to_string(),
+        hostname: config.hostname.clone(),
+        current_commit,
+    };
+    let mut session = make_agent_session(store, &config);
+    let stdin = std::io::stdin().lock();
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &hello)?;
+    writeln!(stdout)?;
+    stdout.flush()?;
 
-            for line in stdin.lines() {
-                let request: protocol::Request = serde_json::from_str(&line?)?;
-                session.handle_request(request, &mut |message| {
-                    // Ignore write errors here; the operator may have disconnected.
-                    let _ = serde_json::to_writer(&mut stdout, &message);
-                    let _ = writeln!(stdout);
-                    let _ = stdout.flush();
-                });
-            }
-        }
+    for line in stdin.lines() {
+        let request: protocol::Request = serde_json::from_str(&line?)?;
+        session.handle_request(request, &mut |message| {
+            // Ignore write errors here; the operator may have disconnected.
+            let _ = serde_json::to_writer(&mut stdout, &message);
+            let _ = writeln!(stdout);
+            let _ = stdout.flush();
+        });
     }
     Ok(())
 }
