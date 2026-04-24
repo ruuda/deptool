@@ -48,11 +48,12 @@ configure scripts.
 ## Workflow
 
 Deptool expects configuration for your entire cluster materialized in a
-directory, the _config tree_. By convention this directory is named
-`deptool_config`. You can maintain this directory tree by hand, but for more
-complex configurations, you probably want to generate it using an external tool.
+directory, the _config tree_. By convention this directory is named after the
+cluster, for example `prod`. You can maintain this directory tree by hand, but
+for more complex configurations, you probably want to generate it using an
+external tool.
 
-To deploy, run `deptool deploy deptool_config`. This commits the desired cluster
+To deploy, run `deptool deploy prod`. This commits the desired cluster
 state into Deptool’s _store_. From the store it determines which hosts are
 affected and computes a deployment plan, completely offline. After you accept
 this plan, Deptool connects to the affected hosts and applies the new state

@@ -13,4 +13,4 @@ The `deptool` executable, see the commands for more details. The commands are:
 
 ### `--store`
 
-Path to the local [store](../store.md), by default `deptool_store`.
+Path to the local [store](../store.md), by default `.deptool`.

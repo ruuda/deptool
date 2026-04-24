@@ -3,7 +3,7 @@
 Deptool stores cluster configuration in a Git repository called the _store_.
 It stores all config trees that were ever deployed to the cluster. The store
 exists as a bare Git repository on the operator machine, by default in
-`deptool_store`. It also exists as a bare repository on every target host in
+`.deptool`. It also exists as a bare repository on every target host in
 `/var/lib/deptool/store`.
 
 ## Data model

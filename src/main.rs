@@ -48,8 +48,8 @@ enum Cmd {
     /// Plan and apply changes to all hosts.
     #[bpaf(command)]
     Deploy {
-        /// Path to the local store (default: ./deptool_store).
-        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+        /// Path to the local store (default: ./.deptool).
+        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
         /// Path to the store on target hosts (default: /var/lib/deptool/store).
         #[bpaf(
@@ -75,8 +75,8 @@ enum Cmd {
     /// Refresh tracking refs by connecting to hosts.
     #[bpaf(command)]
     Sync {
-        /// Path to the local store (default: ./deptool_store).
-        #[bpaf(long("store"), fallback(PathBuf::from("deptool_store")))]
+        /// Path to the local store (default: ./.deptool).
+        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
         /// Path to the store on target hosts (default: /var/lib/deptool/store).
         #[bpaf(
