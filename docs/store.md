@@ -19,7 +19,7 @@ that was ever deployed to the cluster.
 
 ## Operator-side refs
 
- * `refs/heads/main` point to the last commit that we attempted to deploy.
+ * `refs/heads/main` points to the last commit that we attempted to deploy.
  * `refs/remotes/<host>/current` points to the commit that is deployed at that
    host.
 

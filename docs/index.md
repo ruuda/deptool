@@ -3,7 +3,8 @@
 Deptool is a declarative configuration deployment tool. It manages configuration
 files on a cluster of unix hosts reachable over <abbr>SSH</abbr>. Deptool is
 designed for smallish clusters (1–50 hosts) managed by a small group of
-operators (1–5 people). Deptool is:
+operators (1–5 people) who run `deptool deploy` from their local machine.
+Deptool is:
 
 **Declarative.** You define the desired state of your cluster, Deptool
 materializes that state. When you stop defining a file, Deptool removes it. No
@@ -28,7 +29,8 @@ interrupted half-way can safely be retried.
 arbitrary commands that mutate your system. It is not a generic tool that tries
 to solve every deployment problem for everybody. Deptool works best when you can
 configure applications to read config from `/var/lib/deptool/…/current`, which
-is where Deptool materializes deployed config files.
+is where Deptool materializes deployed config files. For applications that
+demand files in particular locations, Deptool can create symlinks.
 
 **Unidirectional.** Deptool pushes configuration from the operator machine
 to target hosts. Aside from tracking the deployed version, Deptool does not
@@ -86,11 +88,11 @@ reference.
 On the operator machine, Deptool keeps a remote-tracking ref per target host.
 This way it knows what is deployed on that host, and whether a new commit
 affects any of the host’s apps. This also enables it to show a full diff ahead
-of time.
+of time. For a single operator deploying from a single store, the
+remote-tracking refs are always up to date. This means Deptool never initiates
+any superfluous connections, which keeps it fast.
 
-For a single operator deploying from a single store, the remote-tracking refs
-are always up to date. This means Deptool never initiates any superfluous
-connections. For multiple operators collaboratively managing a cluster, an
+For multiple operators collaboratively managing a cluster, an
 operator’s local refs may provide an outdated view of the cluster. Deptool
 detects this before applying any changes: it locks every host with the intent
 of applying the plan as accepted. If during locking it turns out the plan was
