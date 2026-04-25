@@ -4,11 +4,6 @@ In this tutorial we will make our first Deptool deployment against a single
 host. Before we start, follow the [build instructions](building.md) to build
 a static binary; prebuilt binaries are not yet available.
 
-> **Note**<br>
-> Because Deptool copies its own binary to target hosts, currently the operator
-> machine must have the same <abbr>CPU</abbr> architecture as the target host,
-> and both must run the same operating system.
-
 ## Prerequisites
 
 In this tutorial we are going to manage a host named `webserver`. This host must
@@ -81,7 +76,6 @@ Let’s deploy this to our 1-host cluster!
 Before even connecting to a host, Deptool shows us the _plan_. In this case, the
 plan is to add a new app `caddy` on host `webserver`, which contains a new file
 `Caddyfile`. Press `d` to see the full diff, and then `y` to deploy.
-
 
 Because we haven’t connected to this host before, the first thing Deptool will
 do is copy the `deptool` binary to the host into `/var/lib/deptool/bin`. Then
