@@ -88,6 +88,14 @@ Post-generation checklist (run after writing code, before presenting):
  - Negative diffstats are good. Codebase growth needs to be justified. Ask yourself whether the lines spent are well-spent.
  - Don't game the line stats. Readability is more important than line count.
 
+## Session journal
+
+ - Each session has a journal entry at `journal/YYYY-MM-DD-topic.md`. It is the bridge between sessions: a future session reads the journal to pick up context. Treat it as a working document, not an after-the-fact summary.
+ - Update the journal *as the session progresses*, not only at the end. After a meaningful step (a design pivot, a framing tool the user introduces, a substantive review pass), revisit the entry. The entry should be in a usable state at any moment in case the session is interrupted.
+ - What to capture: the session's key topics, a running summary of what was done (decisions and rejected paths, not a play-by-play), reflections and learnings, and any framing tools (personas, mental models) the user established. Existing entries in `journal/` show the shape, including "What went well" / "What I should do differently" sections.
+ - What to skip: per-edit blow-by-blows (`git log` covers that), restating things already in code or docs, filler.
+ - If a learning is generic — applies beyond this session's topic — also update `CLAUDE.md` or write a memory, per the rule in the task section.
+
 ## Code style
 
  - Optimize for readability.
