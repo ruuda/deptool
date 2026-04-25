@@ -1,8 +1,15 @@
 # Building
 
 Prebuilt binaries are not yet available, so to use Deptool, you have to build it
-from source. Depending on your use case, you may have to build it for multiple
-platforms.
+from source. Deptool copies itself to the target host to run in agent mode
+there, so we need binaries for the target hosts. If your target hosts use the
+same platform (operating system and <abbr>CPU</abbr> architecture) as the
+machine where you deploy from — for example, an x64 Linux laptop deploying to
+x64 Linux servers — you only need to build one binary. Follow the _operator
+side_ section below. For cross-platform deployment, such as an <abbr>ARM</abbr>
+Macbook deploying to x64 Linux, read the _host side_ section as well.
+
+## Prerequisites
 
 Deptool is written in Rust and builds with Cargo. It has few dependencies, so
 it’s quick to build from source. The repository includes a `rust-toolchain.toml`
@@ -18,11 +25,10 @@ $ git clone https://github.com/ruuda/deptool    # Alternative mirror
 $ cd deptool
 ```
 
-For local development, `cargo check` and `cargo test` work fine. For production
-use, Deptool copies itself to the target host to run in agent mode there, so we
-need binaries for the target hosts. We need a binary for every platform
-(operating system and <abbr>CPU</abbr> architecture) that we want to deploy to,
-and for maximal compatibility, we build static binaries.
+For local development, `cargo check` and `cargo test` work fine. For a release
+build, `cargo build --release` works for running locally, but the resulting
+dynamically linked binary might be incompatible with target hosts. For maximal
+portability, follow the steps below to build a static binary instead.
 
 [rustup]: https://rust-lang.org/tools/install/
 
@@ -46,16 +52,13 @@ If you are on a different platform, you can build a dynamically linked release b
     $ cp target/release/deptool ~/.local/bin
     $ deptool --version
 
-Depending on which platform you want to deploy to, you will also need to build
-the platform-specific binaries.
+If you want to deploy to hosts that run a different operating system or
+<abbr>CPU</abbr> architecture than where you deploy from, you also need to build
+the platform-specific binaries, as described in the next section. If you deploy
+only to the same platform, then Deptool can use the same binary on all sides, so
+we are done here.
 
 ## Building the host side
-
-The target hosts that you deploy to need a suitable `deptool` binary too.
-If your target hosts use the same operating system and <abbr>CPU</abbr>
-architecture, then Deptool can use the same binary, and you don’t need to build
-anything else. For example, if you are on an x64 Linux laptop deploying to x64
-Linux servers, this works out of the box.
 
 When your target hosts are a different platform than the operator side, we need
 a binary per platform in [`DEPTOOL_BIN_DIR`][bindir]. For example, if you are on
@@ -77,9 +80,10 @@ in the `build` directory automate this. For example:
     └── linux-x86_64
         └── deptool-0.1.0-f55bedb949
 
-You can now point `DEPTOOL_BIN_DIR` at `target/deptool-bin`, or you can copy the
-contents of `deptool-bin` into `~/.cache/deptool`, to ensure that your
-operator-side `deptool` binary can discover the platform-specific binaries.
+You can now point `DEPTOOL_BIN_DIR` at `target/deptool-bin`, or you can copy
+the contents of `deptool-bin` into `~/.cache/deptool` (the default location)
+to ensure that your operator-side `deptool` binary can discover the
+platform-specific binaries.
 
 [bindir]: cmd/deptool.md#deptool_bin_dir
 [czb]:    https://github.com/rust-cross/cargo-zigbuild
