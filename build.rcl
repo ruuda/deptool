@@ -49,6 +49,7 @@ let platform_script = t =>
 
   mkdir -p "target/deptool-bin/{subdir}"
   cp "target/{t.triple}/release/deptool" "target/deptool-bin/{subdir}/deptool-$VERSION-$COMMIT"
+  ln -sf "deptool-$VERSION-$COMMIT" "target/deptool-bin/{subdir}/deptool"
   """;
 
 {

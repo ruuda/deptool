@@ -11,3 +11,4 @@ LIBZ_SYS_STATIC=1 cargo zigbuild --target=aarch64-apple-darwin --release
 
 mkdir -p "target/deptool-bin/darwin-arm64"
 cp "target/aarch64-apple-darwin/release/deptool" "target/deptool-bin/darwin-arm64/deptool-$VERSION-$COMMIT"
+ln -sf "deptool-$VERSION-$COMMIT" "target/deptool-bin/darwin-arm64/deptool"
