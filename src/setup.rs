@@ -37,14 +37,19 @@ pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
 /// as the operator's own binary.
 pub const BUILD_PLATFORM: &str = env!("BUILD_PLATFORM");
 
-/// Local cache of deptool binaries to push to target hosts, one subdir
+/// Directory of deptool binaries to push to target hosts, with one subdir
 /// per host platform.
 ///
-/// Subdir names are the host's `uname -sm` output with spaces hyphenated,
-/// e.g. `Linux-x86_64`. Resolves to `$XDG_CACHE_HOME/deptool` or
-/// `$HOME/.cache/deptool`. Populated by `make dev-install` or by
-/// extracting a release tarball.
+/// Subdir names are the host's `uname -sm` output, lowercased with spaces
+/// replaced by hyphens, e.g. `linux-x86_64`. Resolves in order:
+///   1. `$DEPTOOL_BIN_DIR` -- explicit override, e.g. point at
+///      `target/deptool-bin` for local-dev cross-arch deploys.
+///   2. `$XDG_CACHE_HOME/deptool`.
+///   3. `$HOME/.cache/deptool`.
 pub fn binaries_dir() -> PathBuf {
+    if let Some(p) = std::env::var_os("DEPTOOL_BIN_DIR").filter(|s| !s.is_empty()) {
+        return PathBuf::from(p);
+    }
     let root = match std::env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
         Some(p) => PathBuf::from(p),
         None => {
@@ -53,6 +58,20 @@ pub fn binaries_dir() -> PathBuf {
         }
     };
     root.join("deptool")
+}
+
+/// Cache-dir subdir name for a host platform: `uname -sm` output,
+/// lowercased with spaces replaced by hyphens. `build.rcl` applies the
+/// same transformation when laying out artifacts under `target/deptool-bin/`.
+fn platform_subdir(platform: &str) -> String {
+    let subdir = platform.to_lowercase().replace(' ', "-");
+    // Defensive: uname comes from a remote host. Refuse anything that
+    // could escape the cache directory when joined as a path component.
+    assert!(
+        !subdir.contains('/'),
+        "uname output is a single path component, got {subdir:?}",
+    );
+    subdir
 }
 
 const GC_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -109,14 +128,7 @@ fn resolve_binary_path(binaries_dir: &Path, bin_name: &str, platform: &str) -> P
     if platform == BUILD_PLATFORM {
         return std::env::current_exe().expect("current exe path is known");
     }
-    let cache_subdir = platform.replace(' ', "-");
-    // Defensive: uname comes from a remote host. Refuse anything that
-    // could escape the cache directory when joined as a path component.
-    assert!(
-        !cache_subdir.contains('/'),
-        "uname output is a single path component, got {cache_subdir:?}",
-    );
-    binaries_dir.join(&cache_subdir).join(bin_name)
+    binaries_dir.join(platform_subdir(platform)).join(bin_name)
 }
 
 fn run_install_session(

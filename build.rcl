@@ -1,0 +1,73 @@
+// Source of truth for cargo target triples and their `uname -sm` outputs.
+// Run `rcl build` from the repo root to regenerate the artifacts. The
+// generated files are committed so consumers don't need RCL installed.
+
+// Targets included in the cross-build / release tarball.
+let release_targets = [
+  { uname = "Darwin arm64", triple = "aarch64-apple-darwin" },
+  { uname = "Linux aarch64", triple = "aarch64-unknown-linux-musl" },
+  { uname = "Linux armv7l", triple = "armv7-unknown-linux-musleabihf" },
+  { uname = "Linux x86_64", triple = "x86_64-unknown-linux-musl" },
+];
+
+// Triples build.rs must also recognize so that plain `cargo build` /
+// `cargo test` works on a developer's host (which defaults to the gnu
+// variant), even though we don't ship those binaries.
+let dev_targets = [
+  { uname = "Linux aarch64", triple = "aarch64-unknown-linux-gnu" },
+  { uname = "Linux x86_64", triple = "x86_64-unknown-linux-gnu" },
+];
+
+let all_targets = [..release_targets, ..dev_targets];
+
+let subdir_of = uname => uname.to_lowercase().replace(" ", "-");
+
+// build/build_platform.rs: included by build.rs to map cargo target -> uname.
+let rs_module = [
+  "pub fn build_platform_for(target: &str) -> &'static str {",
+  "    match target {",
+  for t in all_targets: f"        \"{t.triple}\" => \"{t.uname}\",",
+  "        other => panic!(\"deptool: unsupported target triple {other:?}; add to build.rcl\"),",
+  "    }",
+  "}",
+];
+
+// build/release.sh: cross-build the release set and arrange the binaries
+// under target/deptool-bin/<platform>/<bin-name>, the layout the runtime
+// expects (point DEPTOOL_BIN_DIR at this directory for local-dev
+// cross-arch deploys).
+let copy_block = t =>
+  let subdir = subdir_of(t.uname);
+  let src = f"'target/{t.triple}/release/deptool'";
+  f"""
+  mkdir -p "$DEST/{subdir}"
+  cp {src} "$DEST/{subdir}/$BIN"
+  """;
+
+let release_script = [
+  "# Run from the repo root.",
+  "set -euo pipefail",
+  "",
+  for t in release_targets:
+  f"LIBZ_SYS_STATIC=1 cargo zigbuild --target={t.triple} --release",
+  "",
+  "VERSION=$(awk -F'\"' '/^version = / { print $2; exit }' Cargo.toml)",
+  "COMMIT=$(git rev-parse HEAD | cut -c-10)",
+  "BIN=\"deptool-$VERSION-$COMMIT\"",
+  "DEST=target/deptool-bin",
+  "",
+  for t in release_targets: copy_block(t),
+];
+
+{
+  "build/build_platform.rs": {
+    contents = rs_module,
+    format = "raw",
+    banner = "// Generated from build.rcl. Do not edit.\n",
+  },
+  "build/release.sh": {
+    contents = release_script,
+    format = "raw",
+    banner = "#!/bin/sh\n# Generated from build.rcl. Do not edit.\n",
+  },
+}

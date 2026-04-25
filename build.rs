@@ -20,6 +20,10 @@
 
 use std::process::Command;
 
+#[path = "build/build_platform.rs"]
+mod build_platform;
+use build_platform::build_platform_for;
+
 fn main() {
     // Re-run when the commit moves, when staged changes are added or
     // removed, when source changes, or when this script changes.
@@ -29,6 +33,7 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=build/build_platform.rs");
 
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -45,23 +50,12 @@ fn main() {
         .trim();
     println!("cargo:rustc-env=BUILD_COMMIT={commit}");
 
-    // Map the cargo target triple to the `uname -sm` output that platform
-    // prints. Used to skip the binaries-cache lookup when deploying to a
-    // host of the same platform as the operator's own binary.
+    // Map the cargo target triple to its `uname -sm` output via the
+    // generated `build_platform_for` function. Used to skip the
+    // binaries-cache lookup when deploying to a host of the same platform
+    // as the operator's binary.
     let target = std::env::var("TARGET").expect("TARGET is set by Cargo");
-    let build_platform = match target.as_str() {
-        "x86_64-unknown-linux-musl" | "x86_64-unknown-linux-gnu" => "Linux x86_64",
-        "aarch64-unknown-linux-musl" | "aarch64-unknown-linux-gnu" => "Linux aarch64",
-        "armv7-unknown-linux-musleabihf" | "armv7-unknown-linux-gnueabihf" => "Linux armv7l",
-        "aarch64-apple-darwin" => "Darwin arm64",
-        "x86_64-apple-darwin" => "Darwin x86_64",
-        "x86_64-unknown-openbsd" => "OpenBSD amd64",
-        "aarch64-unknown-openbsd" => "OpenBSD arm64",
-        other => panic!(
-            "deptool: unsupported target triple {other:?}; \
-             add a uname mapping to build.rs"
-        ),
-    };
+    let build_platform = build_platform_for(&target);
     println!("cargo:rustc-env=BUILD_PLATFORM={build_platform}");
 
     // Release binaries get pushed to target hosts, where stale or ambiguous

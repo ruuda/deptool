@@ -44,7 +44,13 @@ fn write_timestamp(buf: &mut Vec<u8>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is after 1970");
-    let secs = now.as_secs() as i64;
+    // Cast through `libc::time_t` so this builds on 32-bit targets too,
+    // where it's `i32` rather than `i64`. The libc crate marks this
+    // alias deprecated because it will widen to 64-bit on all musl
+    // targets in a future release; that's a width change we'll absorb
+    // for free, not a reason to switch APIs.
+    #[allow(deprecated)]
+    let secs = now.as_secs() as libc::time_t;
     let ms = now.subsec_millis();
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::gmtime_r(&secs, &mut tm) };

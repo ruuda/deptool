@@ -17,6 +17,13 @@ For local development, `cargo check` and `cargo test` work fine. For production
 use though, because Deptool copies itself to the target host to run in agent
 mode there, we need to build a static binary. There are two ways to do this.
 
+<!-- TODO(ruuda): Update this section. The Makefile is gone; cross-builds for
+all release targets now go through `./build/release.sh`, which requires
+cargo-zigbuild and the rustup targets installed. The script lays out
+binaries under `target/deptool-bin/<platform>/<bin-name>` for the runtime
+to find when `DEPTOOL_BIN_DIR` is set. The Nix build path also needs
+revisiting (build.rs now reads `.git/HEAD` and `git status`). -->
+
 If you have Rustup and a C compiler installed, the Cargo-based build should work
 out of the box. To ensure a fully static build we need to set a few environment
 variables and select `musl` as the target. The Makefile takes care of this:
