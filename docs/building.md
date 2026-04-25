@@ -34,16 +34,3 @@ $ cp target/x86_64-unknown-linux-musl/release/deptool ~/.local/bin
 $ ldd $(which deptool)
 statically linked
 ```
-
-Alternatively, you can build with [Nix][nix], which provides a self-contained
-and reproducible build environment:
-
-```
-$ nix build
-$ cp result/bin/deptool ~/.local/bin
-$ ldd $(which deptool)
-statically linked
-```
-
-[rustup]: https://rust-lang.org/tools/install/
-[nix]:    https://nixos.org/

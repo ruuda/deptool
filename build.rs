@@ -35,6 +35,23 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=build/build_platform.rs");
 
+    // Map the cargo target triple to its `uname -sm` output via the
+    // generated `build_platform_for` function. Used to skip the
+    // binaries-cache lookup when deploying to a host of the same platform
+    // as the operator's binary.
+    let target = std::env::var("TARGET").expect("TARGET is set by Cargo");
+    let build_platform = build_platform_for(&target);
+    println!("cargo:rustc-env=BUILD_PLATFORM={build_platform}");
+
+    // If BUILD_COMMIT is not set, then we use Git to look up the current
+    // commit below. This is the default case for local development. We allow
+    // bypassing Git by setting the env var, so that the application can be
+    // built as a Nix flake as well. In that case we assume the tree is not
+    // dirty.
+    if std::env::var("BUILD_COMMIT").is_ok() {
+        return;
+    }
+
     let head = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
@@ -50,19 +67,11 @@ fn main() {
         .trim();
     println!("cargo:rustc-env=BUILD_COMMIT={commit}");
 
-    // Map the cargo target triple to its `uname -sm` output via the
-    // generated `build_platform_for` function. Used to skip the
-    // binaries-cache lookup when deploying to a host of the same platform
-    // as the operator's binary.
-    let target = std::env::var("TARGET").expect("TARGET is set by Cargo");
-    let build_platform = build_platform_for(&target);
-    println!("cargo:rustc-env=BUILD_PLATFORM={build_platform}");
-
     // Release binaries get pushed to target hosts, where stale or ambiguous
-    // identity is a real footgun. Refuse to build a release from a dirty
-    // tree so the commit suffix is always trustworthy. We compare the
-    // working tree to HEAD (covering staged and unstaged changes) but
-    // ignore untracked files, which often contain personal scratch.
+    // identity is a real footgun. Refuse to build a release from a dirty tree
+    // so the commit suffix is always trustworthy. We compare the working tree
+    // to HEAD (covering staged and unstaged changes) but ignore untracked
+    // files, which often contain personal scratch.
     if std::env::var("PROFILE").as_deref() == Ok("release") {
         let diff = Command::new("git")
             .args(["diff", "--quiet", "HEAD"])

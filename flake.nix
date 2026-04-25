@@ -31,7 +31,7 @@
               "git2-0.21.0" = "sha256-Wr2uhMZHRM2ZEnU4YDlcG2YrGyJEk/wERTYjy/1EaRc=";
             };
           };
-          nativeBuildInputs = [ pkgss.pkg-config ];
+          nativeBuildInputs = [ pkgss.pkg-config pkgs.git ];
           buildInputs = with pkgss; [
             libgit2
             libssh2
@@ -39,7 +39,17 @@
             pcre
             zlib
           ];
+          BUILD_COMMIT =
+            if builtins.hasAttr "rev" self
+            then self.rev
+            else throw "Deptool must be built from a clean tree.";
           RUSTFLAGS = "-lm -lssl -lc";
+
+          # The tests must be compiled with debug assertions enabled for the
+          # test binary to skip installation, like the production binary does.
+          # But Nix builds tests in release mode, and then they fail inside the
+          # sandbox. Just skip the tests then.
+          doCheck = false;
         };
       };
 }
