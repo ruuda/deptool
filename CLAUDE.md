@@ -32,7 +32,7 @@
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
  - For large tasks, run `git diff` at the end and review your own work. It is very unlikely that you got a perfect version on your very first iteration, usually there are substantial things to change.
- - Before presenting code to the user, run the post-generation checklist below and fix what you find. Do not skip this step. Do not say "the code looks good" without having run `git diff` and walked every checklist item.
+ - Before presenting code to the user, run the post-generation checklist below and fix what you find. Do not skip this step. Do not say "the code looks good" without having run `git diff` and walked every checklist item. Walking the checklist means articulating *why* each item passes for this change. If your check is "looks fine", that's rubber-stamping; you haven't actually checked. The checklist exists because these items are easy to miss when reviewing your own work — running it as ritual defeats the purpose.
  - I will review your changes afterwards, so optimize for small reviewable diffs. Do not change comments or code without a good reason.
  - If it gets complex, typecheck at intermediate points with `cargo check --quiet`.
  - If the changes touch a test or code covered by tests, confirm with `cargo test --quiet`.
@@ -129,6 +129,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Prefer words over symbols. Symbols can be ambiguous or invisible in certain fonts.
  - Log near the mutation, not near the planning. If the plan and the execution are separate phases, log during execution.
  - One event, one message. Don't have different strings for the log and the protocol for the same error.
+ - Project naming conventions (e.g. `Deptool` for the tool, `deptool` for the binary) apply here too. User-facing prose is user-facing prose, whether it's in docs or in an error string.
 
 ## Writing documentation
 
