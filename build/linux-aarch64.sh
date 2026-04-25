@@ -11,4 +11,3 @@ cargo zigbuild --target=aarch64-unknown-linux-musl --release
 
 mkdir -p "target/deptool-bin/linux-aarch64"
 cp "target/aarch64-unknown-linux-musl/release/deptool" "target/deptool-bin/linux-aarch64/deptool-$VERSION-$COMMIT"
-ln -sf "deptool-$VERSION-$COMMIT" "target/deptool-bin/linux-aarch64/deptool"

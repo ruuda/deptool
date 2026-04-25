@@ -11,4 +11,3 @@ cargo zigbuild --target=armv7-unknown-linux-musleabihf --release
 
 mkdir -p "target/deptool-bin/linux-armv7l"
 cp "target/armv7-unknown-linux-musleabihf/release/deptool" "target/deptool-bin/linux-armv7l/deptool-$VERSION-$COMMIT"
-ln -sf "deptool-$VERSION-$COMMIT" "target/deptool-bin/linux-armv7l/deptool"

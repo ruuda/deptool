@@ -11,4 +11,3 @@ cargo zigbuild --target=x86_64-unknown-linux-musl --release
 
 mkdir -p "target/deptool-bin/linux-x86_64"
 cp "target/x86_64-unknown-linux-musl/release/deptool" "target/deptool-bin/linux-x86_64/deptool-$VERSION-$COMMIT"
-ln -sf "deptool-$VERSION-$COMMIT" "target/deptool-bin/linux-x86_64/deptool"
