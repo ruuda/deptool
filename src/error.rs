@@ -116,8 +116,12 @@ impl fmt::Display for ApplyError {
 pub enum HostError {
     /// SSH or other transport-level connection failure.
     ConnectionFailed(String),
-    /// The binary is not present on the target host.
-    AgentNotInstalled,
+    /// The binary on the target host either isn't present, or it ran and
+    /// exited with code 1 before sending a hello. The two cases are
+    /// indistinguishable from the exit code alone (sudo exits 1 when the
+    /// binary is missing, but a runtime error from the binary exits 1 too),
+    /// so we carry the agent's stderr for diagnosis.
+    AgentNotInstalled { stderr: String },
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
     /// The installed binary doesn't match the expected checksum.
@@ -166,8 +170,15 @@ impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             HostError::ConnectionFailed(msg) => write!(f, "{msg}"),
-            HostError::AgentNotInstalled => {
+            HostError::AgentNotInstalled { stderr } if stderr.is_empty() => {
                 write!(f, "binary not installed on target host")
+            }
+            HostError::AgentNotInstalled { stderr } => {
+                write!(
+                    f,
+                    "binary not installed on target host, or exited before \
+                     hello: {stderr}",
+                )
             }
             HostError::HostnameMismatch(actual) => {
                 write!(f, "hostname mismatch: /etc/hostname contains {actual:?}")

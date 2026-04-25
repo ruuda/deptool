@@ -224,7 +224,11 @@ impl RemoteSession {
                     // code 1. TODO: Would it be better to start the agent as
                     // the current user and the let it reexec itself under sudo
                     // if its uid is unexpected?
-                    Some(1 | 127) => return Err(HostError::AgentNotInstalled),
+                    Some(1 | 127) => {
+                        return Err(HostError::AgentNotInstalled {
+                            stderr: stderr.to_string(),
+                        });
+                    }
                     Some(code) => {
                         return Err(HostError::ProtocolError(format!(
                             "ssh exited with status {code} \
@@ -305,7 +309,7 @@ pub fn try_connect(
     progress.update(host, HostState::Connecting);
     let conn = match connector.connect(host) {
         Ok(c) => c,
-        Err(HostError::AgentNotInstalled) => {
+        Err(HostError::AgentNotInstalled { .. }) => {
             progress.update(host, HostState::InstallingAgent);
             if let Err(err) = connector.install(host) {
                 progress.update(host, err);
