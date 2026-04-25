@@ -32,32 +32,24 @@ let rs_module = [
   "}",
 ];
 
-// build/release.sh: cross-build the release set and arrange the binaries
-// under target/deptool-bin/<platform>/<bin-name>, the layout the runtime
-// expects (point DEPTOOL_BIN_DIR at this directory for local-dev
-// cross-arch deploys).
-let copy_block = t =>
+// build/<platform>.sh: cross-build one platform's binary and lay it out
+// under target/deptool-bin/<platform>/<bin-name>. One script per platform
+// so that you don't need every cross toolchain to build any one of them;
+// run `sh build/*.sh` if you want them all.
+let platform_script = t =>
   let subdir = subdir_of(t.uname);
-  let src = f"'target/{t.triple}/release/deptool'";
   f"""
-  mkdir -p "$DEST/{subdir}"
-  cp {src} "$DEST/{subdir}/$BIN"
-  """;
+  # Run from the repo root.
+  set -euo pipefail
 
-let release_script = [
-  "# Run from the repo root.",
-  "set -euo pipefail",
-  "",
-  for t in release_targets:
-  f"LIBZ_SYS_STATIC=1 cargo zigbuild --target={t.triple} --release",
-  "",
-  "VERSION=$(awk -F'\"' '/^version = / { print $2; exit }' Cargo.toml)",
-  "COMMIT=$(git rev-parse HEAD | cut -c-10)",
-  "BIN=\"deptool-$VERSION-$COMMIT\"",
-  "DEST=target/deptool-bin",
-  "",
-  for t in release_targets: copy_block(t),
-];
+  VERSION=$(awk -F'"' '/^version = / \{ print $2; exit \}' Cargo.toml)
+  COMMIT=$(git rev-parse HEAD | cut -c-10)
+
+  LIBZ_SYS_STATIC=1 cargo zigbuild --target={t.triple} --release
+
+  mkdir -p "target/deptool-bin/{subdir}"
+  cp "target/{t.triple}/release/deptool" "target/deptool-bin/{subdir}/deptool-$VERSION-$COMMIT"
+  """;
 
 {
   "build/build_platform.rs": {
@@ -65,8 +57,9 @@ let release_script = [
     format = "raw",
     banner = "// Generated from build.rcl. Do not edit.\n",
   },
-  "build/release.sh": {
-    contents = release_script,
+  for t in release_targets:
+  f"build/{subdir_of(t.uname)}.sh": {
+    contents = platform_script(t),
     format = "raw",
     banner = "#!/bin/sh\n# Generated from build.rcl. Do not edit.\n",
   },
