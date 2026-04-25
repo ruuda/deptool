@@ -282,16 +282,16 @@ fn run_deploy(
         eprintln!(
             "The agent runs on the target host, so Deptool needs a binary for the\n\
              host's platform, built from the same source as your operator binary\n\
-             (Deptool {} at commit {}). Build or download such a binary for each\n\
-             platform below, and place it at the path shown:",
+             (Deptool {} at commit {}). Build or download such a binary \n\
+             for each platform below, and place it at the path shown:",
             protocol::VERSION,
             &setup::BUILD_COMMIT[..10],
         );
         for (platform, path) in &missing {
             eprintln!();
-            eprintln!("  {platform}");
-            eprintln!("    {}", path.display());
+            eprintln!("  {platform}: {}", path.display());
         }
+        eprintln!();
     }
 
     result
