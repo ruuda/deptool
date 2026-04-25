@@ -61,6 +61,7 @@ dependencies = [
  "git2",
  "hmac-sha256",
  "libc",
+ "libz-sys",
  "parking_lot",
  "serde",
  "serde_json",

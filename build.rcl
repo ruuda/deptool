@@ -45,7 +45,7 @@ let platform_script = t =>
   VERSION=$(awk -F'"' '/^version = / \{ print $2; exit \}' Cargo.toml)
   COMMIT=$(git rev-parse HEAD | cut -c-10)
 
-  LIBZ_SYS_STATIC=1 cargo zigbuild --target={t.triple} --release
+  cargo zigbuild --target={t.triple} --release
 
   mkdir -p "target/deptool-bin/{subdir}"
   cp "target/{t.triple}/release/deptool" "target/deptool-bin/{subdir}/deptool-$VERSION-$COMMIT"

@@ -15,6 +15,10 @@ serde = { version = "1", features = ["derive"] }
 parking_lot = "0.12"
 serde_json = "1"
 
+# Pulled in transitively by git2; declared directly here to enable static
+# linking, so we don't need `LIBZ_SYS_STATIC=1` in the environment.
+libz-sys = { version = "1", default-features = false, features = ["libc", "static"] }
+
 # In `git2 0.20.0`, the `url` dependency pulls in many transitive dependencies,
 # which were more than half of the dependencies of Deptool. In the revision
 # pinned here, that dependency was made optional. [1]. We can switch back to
