@@ -125,6 +125,17 @@ pub enum HostError {
         expected_hash: String,
         actual_hash: String,
     },
+    /// No deptool binary for the host's platform in the local cache.
+    SetupMissingBinary {
+        /// Host's `uname -sm` output, e.g. "Linux x86_64".
+        platform: String,
+        path: PathBuf,
+    },
+    /// I/O error other than `NotFound` while reading a deptool binary
+    /// from the local cache (e.g. permission denied, disk failure).
+    /// Distinct from `SetupMissingBinary`, which is the expected
+    /// "no such file" case with its own remediation hint.
+    SetupReadError { path: PathBuf, cause: String },
     /// Unexpected response during binary installation handshake.
     SetupProtocolError(String),
     /// Unexpected or malformed message from the agent session.
@@ -168,6 +179,13 @@ impl fmt::Display for HostError {
                 f,
                 "setup checksum mismatch: expected {expected_hash}, got {actual_hash}"
             ),
+            HostError::SetupMissingBinary { platform, .. } => write!(
+                f,
+                "unable to deploy to {platform}, no agent binary for this platform"
+            ),
+            HostError::SetupReadError { path, cause } => {
+                write!(f, "failed to read '{}': {cause}", path.display(),)
+            }
             HostError::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
             HostError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             HostError::Store(msg) => write!(f, "{msg}"),

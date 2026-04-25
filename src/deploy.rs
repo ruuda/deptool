@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::Engine;
@@ -132,6 +132,23 @@ impl DeployProgress {
     pub fn num_failed(&self) -> usize {
         let states = &self.inner.lock().states;
         states.values().filter(|s| s.is_failure()).count()
+    }
+
+    /// Distinct host platforms whose deploys failed with `SetupMissingBinary`,
+    /// each mapped to the path the operator's binary was expected at. Used
+    /// to print one remediation block at the end of the deploy.
+    pub fn missing_binaries(&self) -> BTreeMap<String, PathBuf> {
+        self.inner
+            .lock()
+            .states
+            .values()
+            .filter_map(|state| match state {
+                HostState::Failed(HostError::SetupMissingBinary { platform, path }) => {
+                    Some((platform.clone(), path.clone()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     #[cfg(test)]

@@ -7,7 +7,8 @@
 
 //! Installation and cleanup of the `deptool` binary on target hosts.
 
-use std::path::Path;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
@@ -29,60 +30,142 @@ pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 /// the commit alone identifies the source the binary was built from.
 pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
 
+/// Local cache of deptool binaries to push to target hosts, one subdir
+/// per host platform.
+///
+/// Subdir names are the host's `uname -sm` output with spaces hyphenated,
+/// e.g. `Linux-x86_64`. Resolves to `$XDG_CACHE_HOME/deptool` or
+/// `$HOME/.cache/deptool`. Populated by `make dev-install` or by
+/// extracting a release tarball.
+pub fn binaries_dir() -> PathBuf {
+    let root = match std::env::var_os("XDG_CACHE_HOME").filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => {
+            let home = std::env::var_os("HOME").expect("XDG_CACHE_HOME or HOME is set");
+            PathBuf::from(home).join(".cache")
+        }
+    };
+    root.join("deptool")
+}
+
 const GC_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
-/// Install the the binary on the target host.
+/// Install the deptool binary on the target host.
 ///
-/// We execute a single command over SSH. The command reads the binary from
-/// stdin via `dd`, makes it executable, and prints its sha256sum so the
-/// caller can verify the transfer was successful.
+/// We open a single SSH session running a megacommand that probes the
+/// host's kernel and machine, then waits for the binary on stdin via
+/// `dd`. The driver reads the probe output, picks the matching binary
+/// from the local cache, and writes it to the session. The remote
+/// `sha256sum` is read back to verify the transfer was not corrupted.
+///
+/// One SSH session covers probe + install -- saves a round trip versus
+/// probing and installing separately.
 pub fn install_binary(
-    host: &Hostname,
+    binaries_dir: &Path,
+    bin_name: &str,
     remote_bin_path: &str,
-    binary: &[u8],
+    host: &Hostname,
 ) -> std::result::Result<(), HostError> {
     let install_command = [
+        // -sm prints kernel-name and machine, e.g. "Linux x86_64".
+        "uname -sm",
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
         &format!("sudo dd status=none of={remote_bin_path}"),
         &format!("sudo chmod +x {remote_bin_path}"),
         &format!("sudo sha256sum {remote_bin_path}"),
     ]
     .join(" && ");
-    use std::io::Write;
     let mut child = Command::new("ssh")
         .args([&host.0, &install_command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .spawn()
         .map_err(HostError::connection_failed)?;
+
+    // Reap the SSH child on every exit path so we don't leave zombies.
+    let result = run_install_session(&mut child, binaries_dir, bin_name);
+    let _ = child.wait();
+    result
+}
+
+fn run_install_session(
+    child: &mut std::process::Child,
+    binaries_dir: &Path,
+    bin_name: &str,
+) -> std::result::Result<(), HostError> {
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout is piped"));
+
+    // First line on stdout is the uname output. uname runs before dd
+    // in the && chain, so its output reaches us before dd needs the
+    // binary on stdin.
+    let mut uname_line = String::new();
+    stdout
+        .read_line(&mut uname_line)
+        .map_err(HostError::connection_failed)?;
+    if uname_line.is_empty() {
+        return Err(HostError::ConnectionFailed(
+            "host closed connection before reporting uname".into(),
+        ));
+    }
+    // Use uname output verbatim as the cache subdir (with spaces hyphenated
+    // for shell-friendliness). Mapping uname output to Rust target triples
+    // is a build-time concern, kept out of the binary so a release tarball
+    // and an operator's `uname -sm` agree by construction.
+    let platform = uname_line.trim();
+    let cache_subdir = platform.replace(' ', "-");
+    // Defensive: uname comes from a remote host. Refuse anything that
+    // could escape the cache directory when joined as a path component.
+    assert!(
+        !cache_subdir.contains('/'),
+        "uname output is a single path component, got {cache_subdir:?}",
+    );
+    let binary_path = binaries_dir.join(&cache_subdir).join(bin_name);
+    // Distinguish "not in cache" (expected first-time case, with a
+    // remediation hint) from other I/O errors (permission denied, disk
+    // failure, etc.). Conflating them would lie to the operator.
+    let binary = match std::fs::read(&binary_path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(HostError::SetupMissingBinary {
+                platform: platform.to_string(),
+                path: binary_path,
+            });
+        }
+        Err(err) => {
+            return Err(HostError::SetupReadError {
+                path: binary_path,
+                cause: err.to_string(),
+            });
+        }
+    };
+
     child
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(binary)
+        .write_all(&binary)
         .map_err(HostError::connection_failed)?;
 
-    // Compute the expected shasum while sending.
-    // TODO: We could compute it only once at startup and pass it here.
-    let expected_hash: String = hmac_sha256::Hash::hash(binary)
+    // Compute the expected hash in parallel with the remote -- by the
+    // time write_all returns, the remote shell is already running chmod
+    // and sha256sum, so the local hash is ready before we'd otherwise
+    // be able to read the remote sum.
+    // TODO: We could compute this once at startup and pass it in,
+    // avoiding a second pass over the binary on every install.
+    let expected_hash: String = hmac_sha256::Hash::hash(&binary)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
 
-    let output = child
-        .wait_with_output()
-        .map_err(HostError::connection_failed)?
-        .stdout;
-
-    // Parse the hash out of a `sha256sum` output line (`<hash>  <filename>\n`).
-    let make_err =
-        || HostError::SetupProtocolError("Failed to read sha256sum after installation.".into());
-    let actual_hash = std::str::from_utf8(&output)
-        .map_err(|_| make_err())?
-        .split_whitespace()
-        .next()
-        .ok_or_else(make_err)?;
+    // Parse the hash out of a `sha256sum` output line: `<hash>  <filename>\n`.
+    let mut sha_line = String::new();
+    stdout
+        .read_line(&mut sha_line)
+        .map_err(HostError::connection_failed)?;
+    let actual_hash = sha_line.split_whitespace().next().ok_or_else(|| {
+        HostError::SetupProtocolError("missing sha256sum output after install".into())
+    })?;
 
     if actual_hash != expected_hash {
         return Err(HostError::SetupChecksumMismatch {

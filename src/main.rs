@@ -123,7 +123,8 @@ fn is_shell_safe(s: &str) -> bool {
 struct RemoteConnector {
     remote_store: String,
     remote_bin_path: String,
-    binary: Vec<u8>,
+    binaries_dir: PathBuf,
+    bin_name: String,
 }
 
 impl RemoteConnector {
@@ -132,7 +133,6 @@ impl RemoteConnector {
             .to_str()
             .expect("remote store path is valid UTF-8")
             .to_string();
-        let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
 
         // First 10 hex chars of the build commit. Long enough to avoid
         // collisions, short enough to keep paths and commands readable.
@@ -156,7 +156,8 @@ impl RemoteConnector {
         Ok(Self {
             remote_store,
             remote_bin_path,
-            binary,
+            binaries_dir: setup::binaries_dir(),
+            bin_name,
         })
     }
 }
@@ -180,7 +181,12 @@ impl setup::HostConnector for RemoteConnector {
     }
 
     fn install(&self, host: &Hostname) -> std::result::Result<(), HostError> {
-        setup::install_binary(host, &self.remote_bin_path, &self.binary)
+        setup::install_binary(
+            &self.binaries_dir,
+            &self.bin_name,
+            &self.remote_bin_path,
+            host,
+        )
     }
 }
 
@@ -266,7 +272,29 @@ fn run_deploy(
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts, Box::new(observer));
 
-    deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress)
+    let result = deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress);
+
+    // The terse per-host status lacks room to explain how to fix a missing
+    // binary. Print one explanation block at the end if any host hit it.
+    let missing = progress.missing_binaries();
+    if !missing.is_empty() {
+        eprintln!();
+        eprintln!(
+            "The agent runs on the target host, so Deptool needs a binary for the\n\
+             host's platform, built from the same source as your operator binary\n\
+             (Deptool {} at commit {}). Build or download such a binary for each\n\
+             platform below, and place it at the path shown:",
+            protocol::VERSION,
+            &setup::BUILD_COMMIT[..10],
+        );
+        for (platform, path) in &missing {
+            eprintln!();
+            eprintln!("  {platform}");
+            eprintln!("    {}", path.display());
+        }
+    }
+
+    result
 }
 
 fn run() -> Result<()> {
