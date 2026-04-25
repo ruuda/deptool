@@ -22,7 +22,7 @@ use crate::error::{ApplyError, Error, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
-use crate::setup::HostConnector;
+use crate::setup::{BUILD_COMMIT, HostConnector};
 use crate::store::{RefUpdate, Store};
 use crate::sync;
 
@@ -311,6 +311,11 @@ pub fn try_connect(
         conn.hello().version,
         protocol::VERSION,
         "agent version matches operator version"
+    );
+    assert_eq!(
+        conn.hello().build_commit,
+        BUILD_COMMIT,
+        "agent build commit matches operator build commit"
     );
     if conn.hello().hostname != host.0 {
         progress.update(
@@ -832,6 +837,7 @@ mod tests {
             ) -> std::result::Result<Box<dyn Connection>, HostError> {
                 Ok(Box::new(Conn(Hello {
                     version: protocol::VERSION.to_string(),
+                    build_commit: BUILD_COMMIT.to_string(),
                     hostname: "spinner".to_string(),
                     current_commit: None,
                 })))

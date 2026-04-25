@@ -17,20 +17,16 @@ itself. Inside there we have a few directories:
     /var/lib/deptool/bin        Deptool binaries
     /var/lib/deptool/apps       Config for apps deployed through Deptool
 
-Inside the `bin` directory we store `deptool` binaries with a version suffix,
-plus an optional suffix to disambiguate development versions, e.g.
-`deptool-0.1.0-6116850ed6`. Upon installing a new binary, Deptool symlinks
-`/usr/bin/deptool` to the binary in `/var/lib/deptool/bin`.
+Inside the `bin` directory we store `deptool` binaries with a version suffix
+plus the first 10 hex chars of the Git commit they were built from, e.g.
+`deptool-0.1.0-6116850ed6`. Release builds refuse to build from a dirty tree
+(see `build.rs`), so the commit alone identifies the source the binary was
+built from. The commit-based suffix is stable across cross-compiled targets,
+so per-arch binaries from one release share a name on the host.
 
-The optional suffix is included during development to be able to test without
-having to bump the version all the time. It may be based on the short commit
-hash of the commit that `deptool` was built from, if available, or we could set
-it to a prefix of the the sha265sum of the binary itself.
-
-The suffix ensures that both sides use the same binary, which ensures that they
-are compatible. The downside of using the sha256sum of the binary is that we
-can't do cross-architecture deploys (e.g. the operator is on OpenBSD, but the
-target host is Linux), but this is not a use case we need to solve right now.
+The agent's `Hello` carries `version` and `build_commit`, both of which the
+driver asserts equal its own. The suffix is the primary integrity guard; the
+Hello fields are a sanity check for stale or misnamed binaries.
 
 ## Remote agent
 

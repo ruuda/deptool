@@ -23,20 +23,14 @@ pub trait HostConnector: Send + Sync {
 
 pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 
+/// Git commit this binary was built from.
+///
+/// Release builds refuse to start from a dirty tree (see `build.rs`), so
+/// the commit alone identifies the source the binary was built from.
+pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
+
 const GC_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
-
-/// Return the truncated and hex-formatted SHA256 of `bytes`.
-///
-/// The prefix len is in bytes, so the returned hex string is twice as long.
-pub fn truncated_sha256(bytes: &[u8], prefix_len: usize) -> String {
-    let digest = hmac_sha256::Hash::hash(bytes);
-    digest
-        .iter()
-        .take(prefix_len)
-        .map(|b| format!("{b:02x}"))
-        .collect()
-}
 
 /// Install the the binary on the target host.
 ///
@@ -70,9 +64,11 @@ pub fn install_binary(
         .map_err(HostError::connection_failed)?;
 
     // Compute the expected shasum while sending.
-    // SHA256 is 32 bytes, so this is the full hash.
     // TODO: We could compute it only once at startup and pass it here.
-    let expected_hash = truncated_sha256(binary, 32);
+    let expected_hash: String = hmac_sha256::Hash::hash(binary)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
 
     let output = child
         .wait_with_output()

@@ -45,6 +45,10 @@ pub enum Request {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Hello {
     pub version: String,
+    /// Git commit the agent was built from. Driver and agent are expected
+    /// to be the same source build, so this must match the driver's own
+    /// `BUILD_COMMIT`. Catches stale binaries pushed under the wrong name.
+    pub build_commit: String,
     pub hostname: String,
     #[serde(default, with = "crate::prim::ser::oid_option")]
     pub current_commit: Option<Oid>,

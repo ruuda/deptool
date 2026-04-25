@@ -115,8 +115,8 @@ This created a directory `/var/lib/deptool` on the target host:
  * `apps/caddy` contains a directory named after the commit that Deptool created
    for this deployment. It contains the `Caddyfile` that we wanted to deploy.
  * `apps/caddy/current` is a symlink to that directory.
- * `bin` contains a binary `deptool` named after the version and the hash of the
-   binary.[^2]
+ * `bin` contains a binary `deptool` named after the version and the commit it
+   was built from.[^2]
  * `store` contains a bare Git repository which contains a copy of the
    local store.
 

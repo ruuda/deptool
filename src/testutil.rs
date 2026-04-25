@@ -19,7 +19,7 @@ use crate::deploy::{Connection, DeployObserver, DeployProgress, HostState};
 use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
-use crate::setup::HostConnector;
+use crate::setup::{BUILD_COMMIT, HostConnector};
 use crate::store::{RefUpdate, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -317,6 +317,7 @@ impl TestHost {
         let session = AgentSession::new_test(repo, hostname, apps_path);
         let hello = Hello {
             version: protocol::VERSION.to_string(),
+            build_commit: BUILD_COMMIT.to_string(),
             hostname: hostname.to_string(),
             current_commit,
         };

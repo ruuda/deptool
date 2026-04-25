@@ -134,10 +134,12 @@ impl RemoteConnector {
             .to_string();
         let binary = std::fs::read(std::env::current_exe().expect("current exe path is known"))?;
 
-        // 5 bytes (10 hex chars) should be long enough to avoid collisions,
-        // and short enough to keep paths and commands readable and debuggable.
-        let suffix = setup::truncated_sha256(&binary, 5);
-        let bin_name = format!("deptool-{}-{}", protocol::VERSION, &suffix);
+        // First 10 hex chars of the build commit. Long enough to avoid
+        // collisions, short enough to keep paths and commands readable.
+        // Stable across cross-compiled targets built from the same source,
+        // so per-arch binaries from one release share a name on the host.
+        let suffix = &setup::BUILD_COMMIT[..10];
+        let bin_name = format!("deptool-{}-{suffix}", protocol::VERSION);
         let remote_bin_path = format!("{}/{bin_name}", setup::BIN_DIR);
 
         // SSH concatenates remote arguments into a single shell string.
@@ -479,6 +481,7 @@ fn run_agent(store: PathBuf) -> Result<()> {
     let current_commit = store.current_commit();
     let hello = protocol::Hello {
         version: protocol::VERSION.to_string(),
+        build_commit: setup::BUILD_COMMIT.to_string(),
         hostname: config.hostname.clone(),
         current_commit,
     };
@@ -505,7 +508,11 @@ fn main() {
     // Handled outside bpaf so that the output is just `deptool <version>`,
     // rather than bpaf's hardcoded `Version: ...` prefix.
     if std::env::args().nth(1).as_deref() == Some("--version") {
-        println!("Deptool {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "Deptool {} ({})",
+            env!("CARGO_PKG_VERSION"),
+            &setup::BUILD_COMMIT[..10],
+        );
         return;
     }
     if let Err(e) = run() {
