@@ -10,12 +10,26 @@ The `deptool` executable, see the commands for more details. The commands are:
  * [deploy](deptool_deploy.md) — Deploy a config tree to the cluster.
  * [sync](deptool_sync.md) — Fetch the latest cluster state.
 
-Deptool respects the [`NO_COLOR`][nocolor] environment variable.
+## Environment
 
-<!-- TODO(ruuda): Document `DEPTOOL_BIN_DIR`. It overrides the directory
-deptool searches for cross-arch binaries to push to target hosts (one
-subdir per host platform, e.g. `linux-x86_64/`). Defaults to
-`$XDG_CACHE_HOME/deptool` or `$HOME/.cache/deptool`. Useful for
-local-dev pointing at `target/deptool-bin/`. -->
+The following environment variables affect Deptool’s behavior:
+
+### `DEPTOOL_BIN_DIR`
+
+For cross-platform deploys, where the target host is a different platform than
+the operator machine (for example, deploying against a _Linux x86_64_ host from
+a _OpenBSD arm64_ host), Deptool needs a `deptool` binary for the target
+platform. It looks for those binaries in `DEPTOOL_BIN_DIR`, in subdirectories
+named after the target platform (`uname -sm` output lowercased and spaces
+replaced with dashes, e.g. `linux-x86_64`). When this variable is not set,
+Deptool falls back to:
+
+ * `$XDG_CACHE_HOME/deptool`, if `XDG_CACHE_HOME` is set.
+ * `$HOME/.cache/deptool`
+
+### `NO_COLOR`
+
+Setting this variable to a non-empty string inhibits colored output, according
+to the [`NO_COLOR`][nocolor] standard.
 
 [nocolor]: https://no-color.org/
