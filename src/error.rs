@@ -116,11 +116,11 @@ impl fmt::Display for ApplyError {
 pub enum HostError {
     /// SSH or other transport-level connection failure.
     ConnectionFailed(String),
-    /// The agent binary is not present on the target host.
+    /// The binary is not present on the target host.
     AgentNotInstalled,
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
-    /// The installed agent binary doesn't match the expected checksum.
+    /// The installed binary doesn't match the expected checksum.
     SetupChecksumMismatch {
         expected_hash: String,
         actual_hash: String,
@@ -167,7 +167,7 @@ impl fmt::Display for HostError {
         match self {
             HostError::ConnectionFailed(msg) => write!(f, "{msg}"),
             HostError::AgentNotInstalled => {
-                write!(f, "agent binary not installed on target host")
+                write!(f, "binary not installed on target host")
             }
             HostError::HostnameMismatch(actual) => {
                 write!(f, "hostname mismatch: /etc/hostname contains {actual:?}")
@@ -181,7 +181,7 @@ impl fmt::Display for HostError {
             ),
             HostError::SetupMissingBinary { platform, .. } => write!(
                 f,
-                "unable to deploy to {platform}, no agent binary for this platform"
+                "unable to deploy to {platform}, no binary for this platform"
             ),
             HostError::SetupReadError { path, cause } => {
                 write!(f, "failed to read '{}': {cause}", path.display(),)

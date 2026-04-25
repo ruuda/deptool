@@ -30,6 +30,13 @@ pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 /// the commit alone identifies the source the binary was built from.
 pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
 
+/// `uname -sm` output the build target prints, e.g. "Linux x86_64".
+///
+/// Set by `build.rs` from the cargo target triple. Used to skip the
+/// binaries-cache lookup when deploying to a host of the same platform
+/// as the operator's own binary.
+pub const BUILD_PLATFORM: &str = env!("BUILD_PLATFORM");
+
 /// Local cache of deptool binaries to push to target hosts, one subdir
 /// per host platform.
 ///
@@ -89,6 +96,29 @@ pub fn install_binary(
     result
 }
 
+/// Pick the local file to push to a host running `platform`.
+///
+/// If the host's platform matches the operator's own build, return the
+/// running executable -- the common same-arch case shouldn't require a
+/// populated binaries cache. Otherwise, return the cache path; uname
+/// output is used verbatim as the subdir name (with spaces hyphenated).
+/// Mapping uname output to Rust target triples is a build-time concern,
+/// kept out of the binary so a release tarball and an operator's
+/// `uname -sm` agree by construction.
+fn resolve_binary_path(binaries_dir: &Path, bin_name: &str, platform: &str) -> PathBuf {
+    if platform == BUILD_PLATFORM {
+        return std::env::current_exe().expect("current exe path is known");
+    }
+    let cache_subdir = platform.replace(' ', "-");
+    // Defensive: uname comes from a remote host. Refuse anything that
+    // could escape the cache directory when joined as a path component.
+    assert!(
+        !cache_subdir.contains('/'),
+        "uname output is a single path component, got {cache_subdir:?}",
+    );
+    binaries_dir.join(&cache_subdir).join(bin_name)
+}
+
 fn run_install_session(
     child: &mut std::process::Child,
     binaries_dir: &Path,
@@ -108,19 +138,8 @@ fn run_install_session(
             "host closed connection before reporting uname".into(),
         ));
     }
-    // Use uname output verbatim as the cache subdir (with spaces hyphenated
-    // for shell-friendliness). Mapping uname output to Rust target triples
-    // is a build-time concern, kept out of the binary so a release tarball
-    // and an operator's `uname -sm` agree by construction.
     let platform = uname_line.trim();
-    let cache_subdir = platform.replace(' ', "-");
-    // Defensive: uname comes from a remote host. Refuse anything that
-    // could escape the cache directory when joined as a path component.
-    assert!(
-        !cache_subdir.contains('/'),
-        "uname output is a single path component, got {cache_subdir:?}",
-    );
-    let binary_path = binaries_dir.join(&cache_subdir).join(bin_name);
+    let binary_path = resolve_binary_path(binaries_dir, bin_name, platform);
     // Distinguish "not in cache" (expected first-time case, with a
     // remediation hint) from other I/O errors (permission denied, disk
     // failure, etc.). Conflating them would lie to the operator.

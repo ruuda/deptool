@@ -493,7 +493,7 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
 }
 
 fn run_agent(store: PathBuf) -> Result<()> {
-    // Since we install the exact agent binary that the driver needs on
+    // Since we install the exact binary that the driver needs on
     // demand, versions can pile up on the target host (especially
     // during development), so GC the bin directory.
     let gc_result = match std::env::current_exe() {
