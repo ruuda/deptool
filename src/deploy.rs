@@ -536,6 +536,13 @@ pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, S
 /// also runs in parallel after all locks succeed. If any host fails to
 /// lock (stale, busy, or connection error), fetches objects from stale
 /// hosts and aborts without pushing or applying to any host.
+///
+/// Every abort path must either mutate state so the next attempt reflects
+/// reality (e.g. fetch a stale host's commit, delete a reprovisioned
+/// host's tracking ref) or surface an error that needs operator action
+/// (connection, hostname, activation, etc.). Otherwise the cluster gets
+/// stuck repeating the same failure forever. New abort paths must uphold
+/// this invariant.
 pub fn run_deploy(
     store: &Store,
     plan: &Plan,
@@ -546,7 +553,12 @@ pub fn run_deploy(
     let mut lock_result = connect_and_lock(plan, operator, connector, progress);
 
     if lock_result.locked.len() < plan.hosts.len() {
-        // Fetch objects from stale hosts so we have the data for the next plan.
+        // Fetch from stale hosts so the tracking refs converge with
+        // reality -- this is the load-bearing step for forward progress
+        // on the stale class. Other failure classes (LockBusy,
+        // ConnectionFailed, AgentNotInstalled, HostnameMismatch, ...)
+        // need no mutation here: they either self-resolve or require
+        // operator intervention.
         sync::fetch_stale_objects(store, &mut lock_result.stale, progress);
         let n = progress.num_failed();
         return Err(Error::DeployFailed(format!(
