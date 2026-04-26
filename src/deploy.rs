@@ -718,6 +718,38 @@ mod tests {
     }
 
     #[test]
+    fn deploy_clears_tracking_ref_when_host_has_no_current_commit() -> Result<()> {
+        // Models a reprovisioned host: a fresh OS with no `refs/heads/current`,
+        // while the driver still tracks the old commit. The deploy must abort
+        // (the host is stale relative to the plan), but the abort path must
+        // delete the tracking ref so the next plan treats the host as fresh
+        // and the deploy actually makes progress.
+        let driver = TestRepo::new();
+        let commit_v1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        driver.set_host_tracking_ref("web1", commit_v1);
+
+        let target = TestHost::new("web1"); // No current commit.
+
+        let commit_v2 = driver.commit(&[("web1/app/conf", b"v2")]);
+        let plan = make_plan(commit_v2, &[("web1", Some(commit_v1))]);
+        let result = deploy_to(&driver, &[&target], &plan);
+
+        assert!(result.is_err(), "deploy aborts because host is stale");
+        assert_eq!(
+            driver.get_host_tracking_ref("web1"),
+            None,
+            "tracking ref deleted because host has no current commit",
+        );
+
+        // Re-plan and re-deploy: with the ref gone, the plan now expects a
+        // fresh host and the deploy succeeds.
+        let plan = make_plan(commit_v2, &[("web1", None)]);
+        deploy_to(&driver, &[&target], &plan)?;
+        assert_eq!(driver.get_host_tracking_ref("web1"), Some(commit_v2));
+        Ok(())
+    }
+
+    #[test]
     fn deploy_aborts_if_one_host_is_stale() -> Result<()> {
         let web1 = TestHost::new("web1");
         let web2 = TestHost::new("web2");

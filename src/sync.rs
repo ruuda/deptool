@@ -9,7 +9,6 @@
 
 use std::path::Path;
 
-use git2::Oid;
 use parking_lot::Mutex;
 
 use std::collections::BTreeMap;
@@ -17,7 +16,7 @@ use std::collections::BTreeMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::deploy::{self, Connection, DeployObserver, DeployProgress, HostState, StaleHost};
+use crate::deploy::{self, DeployObserver, DeployProgress, HostState, StaleHost};
 use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
@@ -64,7 +63,11 @@ pub fn run_sync(
     let progress = &DeployProgress::new(hosts_to_sync.clone(), observer);
 
     // Connect to all hosts in parallel, checking Hello for staleness.
-    let stale: Mutex<Vec<(Hostname, Oid, Box<dyn Connection>)>> = Mutex::new(Vec::new());
+    // A host is stale whenever its current commit differs from the tracking
+    // ref, including the asymmetric cases: a fresh host (`actual = None`)
+    // with a stale tracking ref still needs to be reconciled, and that's
+    // how we recover from a reprovisioned host.
+    let stale: Mutex<Vec<(Hostname, StaleHost)>> = Mutex::new(Vec::new());
     std::thread::scope(|s| {
         for host in &hosts_to_sync {
             let stale = &stale;
@@ -74,11 +77,18 @@ pub fn run_sync(
                     Some(c) => c,
                     None => return,
                 };
-                match conn.hello().current_commit {
-                    Some(actual) if Some(actual) != expected => {
-                        stale.lock().push((host.clone(), actual, conn));
-                    }
-                    _ => progress.update(host, HostState::Done),
+                let actual = conn.hello().current_commit;
+                if actual == expected {
+                    progress.update(host, HostState::Done);
+                } else {
+                    stale.lock().push((
+                        host.clone(),
+                        StaleHost {
+                            expected_commit: expected,
+                            actual_commit: actual,
+                            connection: conn,
+                        },
+                    ));
                 }
             });
         }
@@ -86,31 +96,18 @@ pub fn run_sync(
 
     // Fetch sequentially: the first fetch may provide objects that later
     // hosts also need, avoiding redundant transfers.
-    let mut stale_hosts = stale
-        .into_inner()
-        .into_iter()
-        .map(|(host, actual, conn)| {
-            let expected = host_refs.get(&host).map(|hr| hr.commit);
-            (
-                host,
-                StaleHost {
-                    expected_commit: expected,
-                    actual_commit: Some(actual),
-                    connection: conn,
-                },
-            )
-        })
-        .collect();
+    let mut stale_hosts = stale.into_inner().into_iter().collect();
     fetch_stale_objects(store, &mut stale_hosts, progress);
 
     Ok(())
 }
 
-/// Fetch objects from stale hosts over their still-open sessions.
+/// Reconcile each stale host's tracking ref with its current commit.
 ///
-/// For each stale host whose actual commit we don't already have, sends
-/// `RequestObjects` and receives a packfile. Updates the local tracking
-/// ref for each host. Reports per-host errors via progress.
+/// For a host that has a current commit we don't already have, fetches a
+/// pack from its still-open session and points the tracking ref at it. For
+/// a host that reports no current commit, deletes the tracking ref. Reports
+/// per-host errors via progress.
 pub fn fetch_stale_objects(
     store: &Store,
     stale: &mut BTreeMap<Hostname, StaleHost>,
@@ -129,9 +126,18 @@ fn fetch_from_stale_host(
     host: &Hostname,
     info: &mut StaleHost,
 ) -> std::result::Result<(), HostError> {
+    let refname = format!("refs/remotes/{host}/current");
+
     let actual_commit = match info.actual_commit {
         Some(c) => c,
-        None => return Ok(()),
+        // Host has no current commit -- a reprovisioned or wiped host. Drop
+        // the tracking ref so the next plan treats this host as fresh;
+        // without this step every subsequent deploy would abort the same way
+        // and never make progress.
+        None => {
+            store.delete_ref(&refname)?;
+            return Ok(());
+        }
     };
 
     // Fetch the pack if we don't already have this commit.
@@ -158,11 +164,7 @@ fn fetch_from_stale_host(
         }
     }
 
-    store.set_ref(
-        &format!("refs/remotes/{host}/current"),
-        actual_commit,
-        RefUpdate::FetchStale,
-    )?;
+    store.set_ref(&refname, actual_commit, RefUpdate::FetchStale)?;
 
     Ok(())
 }
@@ -204,6 +206,37 @@ mod tests {
             driver.get_host_tracking_ref("web1"),
             Some(c2),
             "tracking ref updated to host's current commit",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_clears_tracking_ref_when_host_has_no_current_commit() -> Result<()> {
+        // Models a reprovisioned host: the driver still has a tracking ref
+        // from before, but the host's `refs/heads/current` is gone.
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        driver.set_host_tracking_ref("web1", c1);
+
+        let host = TestHost::new("web1"); // No current commit on the host.
+
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
+        std::fs::write(config.path().join("web1/app/conf"), b"v2").unwrap();
+
+        let connector = test_connector(&[&host]);
+        run_sync(
+            &driver.store,
+            config.path(),
+            &connector,
+            SyncMode::OnlyAffectedHosts,
+            Box::new(NoopObserver),
+        )?;
+
+        assert_eq!(
+            driver.get_host_tracking_ref("web1"),
+            None,
+            "tracking ref deleted because host has no current commit",
         );
         Ok(())
     }

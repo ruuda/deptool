@@ -228,6 +228,18 @@ impl Store {
         Ok(())
     }
 
+    /// Delete a reference if it exists. Idempotent: a missing ref is not an error.
+    pub fn delete_ref(&self, refname: &str) -> Result<()> {
+        match self.repo.find_reference(refname) {
+            Ok(mut r) => {
+                r.delete()?;
+                Ok(())
+            }
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
+            Err(e) => Err(StoreError::Git(e)),
+        }
+    }
+
     pub fn set_ref(&self, refname: &str, oid: Oid, reason: RefUpdate) -> Result<()> {
         let reflog_msg = match reason {
             RefUpdate::SetTarget { operator } => {
