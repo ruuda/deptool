@@ -158,6 +158,30 @@ impl HostError {
     pub fn protocol_error(e: impl std::fmt::Display) -> Self {
         HostError::ProtocolError(e.to_string())
     }
+
+    /// Long-form explanation, if this error class needs one.
+    pub fn explain(&self) -> Option<Explanation> {
+        match self {
+            HostError::SetupMissingBinary { platform, path } => Some(Explanation {
+                description: format!(
+                    "The agent runs on the target host, so Deptool needs a binary for the\n\
+                     host's platform, built from the same source as your operator binary\n\
+                     (Deptool {} at commit {}). Build or download such a binary \n\
+                     for each platform below, and place it at the path shown:",
+                    crate::protocol::VERSION,
+                    &crate::setup::BUILD_COMMIT[..10],
+                ),
+                item: format!("  {platform}: {}", path.display()),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Hosts that share a `description` group under it; their `item` lines list below.
+pub struct Explanation {
+    pub description: String,
+    pub item: String,
 }
 
 impl From<StoreError> for HostError {

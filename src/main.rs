@@ -274,22 +274,14 @@ fn run_deploy(
 
     let result = deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress);
 
-    // The terse per-host status lacks room to explain how to fix a missing
-    // binary. Print one explanation block at the end if any host hit it.
-    let missing = progress.missing_binaries();
-    if !missing.is_empty() {
+    // Per-host status lines have room for one phrase. Print explanation
+    // blocks at the end for failure classes that need more space.
+    for (description, items) in progress.explain_errors() {
         eprintln!();
-        eprintln!(
-            "The agent runs on the target host, so Deptool needs a binary for the\n\
-             host's platform, built from the same source as your operator binary\n\
-             (Deptool {} at commit {}). Build or download such a binary \n\
-             for each platform below, and place it at the path shown:",
-            protocol::VERSION,
-            &setup::BUILD_COMMIT[..10],
-        );
-        for (platform, path) in &missing {
+        eprintln!("{description}");
+        for item in &items {
             eprintln!();
-            eprintln!("  {platform}: {}", path.display());
+            eprintln!("{item}");
         }
         eprintln!();
     }

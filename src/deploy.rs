@@ -7,9 +7,9 @@
 
 //! Execute a deployment plan by driving remote agents.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use base64::Engine;
@@ -18,7 +18,7 @@ use git2::Oid;
 
 use parking_lot::Mutex;
 
-use crate::error::{ApplyError, Error, HostError, Result};
+use crate::error::{ApplyError, Error, Explanation, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
@@ -134,21 +134,22 @@ impl DeployProgress {
         states.values().filter(|s| s.is_failure()).count()
     }
 
-    /// Distinct host platforms whose deploys failed with `SetupMissingBinary`,
-    /// each mapped to the path the operator's binary was expected at. Used
-    /// to print one remediation block at the end of the deploy.
-    pub fn missing_binaries(&self) -> BTreeMap<String, PathBuf> {
-        self.inner
-            .lock()
-            .states
-            .values()
-            .filter_map(|state| match state {
-                HostState::Failed(HostError::SetupMissingBinary { platform, path }) => {
-                    Some((platform.clone(), path.clone()))
-                }
-                _ => None,
-            })
-            .collect()
+    /// Long-form explanations for failed hosts, grouped by description.
+    pub fn explain_errors(&self) -> BTreeMap<String, BTreeSet<String>> {
+        let mut groups = BTreeMap::new();
+        for state in self.inner.lock().states.values() {
+            let HostState::Failed(err) = state else {
+                continue;
+            };
+            let Some(Explanation { description, item }) = err.explain() else {
+                continue;
+            };
+            groups
+                .entry(description)
+                .or_insert(BTreeSet::new())
+                .insert(item);
+        }
+        groups
     }
 
     #[cfg(test)]
@@ -727,6 +728,38 @@ mod tests {
         assert_eq!(driver_b.get_host_tracking_ref("web1"), Some(commit_v2));
 
         Ok(())
+    }
+
+    #[test]
+    fn explain_errors_groups_and_dedupes() {
+        fn missing(platform: &str) -> HostError {
+            HostError::SetupMissingBinary {
+                platform: platform.into(),
+                path: format!("/cache/{platform}").into(),
+            }
+        }
+
+        let progress = test_progress(&["web1", "web2", "web3", "web4"]);
+
+        // Two hosts with identical SetupMissingBinary should collapse to
+        // one item under one description.
+        progress.update(&"web1".into(), missing("x86_64"));
+        progress.update(&"web2".into(), missing("x86_64"));
+
+        // A different platform is a separate item under the same description.
+        progress.update(&"web3".into(), missing("aarch64"));
+
+        // ConnectionFailed has no long form: must not appear at all.
+        progress.update(&"web4".into(), HostError::ConnectionFailed("nope".into()));
+
+        let groups = progress.explain_errors();
+        assert_eq!(
+            groups.len(),
+            1,
+            "one description for the missing-binary class"
+        );
+        let items = groups.into_values().next().expect("one description");
+        assert_eq!(items.len(), 2, "two unique platforms after dedup");
     }
 
     #[test]
