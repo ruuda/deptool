@@ -159,8 +159,10 @@ impl HostError {
         HostError::ProtocolError(e.to_string())
     }
 
-    /// Long-form explanation, if this error class needs one.
-    pub fn explain(&self) -> Option<Explanation> {
+    /// Long-form explanation, if this error class needs one. `host` is the
+    /// hostname this error was raised for, so the item line can name it
+    /// when the per-host detail isn't already in the variant.
+    pub fn explain(&self, host: &str) -> Option<Explanation> {
         match self {
             HostError::SetupMissingBinary { platform, path } => Some(Explanation {
                 description: format!(
@@ -172,6 +174,23 @@ impl HostError {
                     &crate::setup::BUILD_COMMIT[..10],
                 ),
                 item: format!("  {platform}: {}", path.display()),
+            }),
+            HostError::HostnameMismatch(actual) => Some(Explanation {
+                description: "The host's /etc/hostname differs from the name of the host in the config tree.\n\
+                             Out of caution, we don't deploy to hosts when it's not clear that we connected\n\
+                             to the intended target. Either change /etc/hostname on the target, or rename\n\
+                             the host's directory in the config tree to match."
+                    .to_string(),
+                item: format!("  {host}: /etc/hostname contains {actual:?}"),
+            }),
+            HostError::SetupChecksumMismatch {
+                expected_hash,
+                actual_hash,
+            } => Some(Explanation {
+                description: "After installing the deptool binary, the host's sha256 of the\n\
+                             file on disk did not match the sha256 of what we uploaded."
+                    .to_string(),
+                item: format!("  {host}: expected {expected_hash}, got {actual_hash}"),
             }),
             _ => None,
         }
@@ -204,16 +223,8 @@ impl fmt::Display for HostError {
                      hello: {stderr}",
                 )
             }
-            HostError::HostnameMismatch(actual) => {
-                write!(f, "hostname mismatch: /etc/hostname contains {actual:?}")
-            }
-            HostError::SetupChecksumMismatch {
-                expected_hash,
-                actual_hash,
-            } => write!(
-                f,
-                "setup checksum mismatch: expected {expected_hash}, got {actual_hash}"
-            ),
+            HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
+            HostError::SetupChecksumMismatch { .. } => f.write_str("binary checksum mismatch"),
             HostError::SetupMissingBinary { platform, .. } => write!(
                 f,
                 "unable to deploy to {platform}, no binary for this platform"
@@ -302,3 +313,21 @@ impl fmt::Display for Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explain_hostname_mismatch_names_host_and_reported_value() {
+        let err = HostError::HostnameMismatch("spinner".into());
+        let exp = err
+            .explain("web1")
+            .expect("hostname mismatch has explanation");
+        assert!(exp.item.contains("web1"), "item names the expected host");
+        assert!(
+            exp.item.contains("spinner"),
+            "item shows the reported hostname"
+        );
+    }
+}

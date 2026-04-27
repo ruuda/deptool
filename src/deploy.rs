@@ -137,11 +137,11 @@ impl DeployProgress {
     /// Long-form explanations for failed hosts, grouped by description.
     pub fn explain_errors(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut groups = BTreeMap::new();
-        for state in self.inner.lock().states.values() {
+        for (host, state) in &self.inner.lock().states {
             let HostState::Failed(err) = state else {
                 continue;
             };
-            let Some(Explanation { description, item }) = err.explain() else {
+            let Some(Explanation { description, item }) = err.explain(&host.0) else {
                 continue;
             };
             groups
