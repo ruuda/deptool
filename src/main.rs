@@ -289,6 +289,28 @@ fn run_deploy(
     result
 }
 
+fn run_sync(
+    store: PathBuf,
+    dir: Option<PathBuf>,
+    sync_mode: sync::SyncMode,
+    connect_mode: ConnectMode,
+) -> Result<()> {
+    let store = Store::open(&store)?;
+    let dir = resolve_dir(&store, dir)?;
+    let hosts = sync::select_hosts_to_sync(&store, &dir, sync_mode)?;
+    if hosts.is_empty() {
+        eprintln!(
+            "No hosts need syncing based on the current config. Pass --all to sync every host."
+        );
+        return Ok(());
+    }
+    let connector = make_connector(connect_mode)?;
+    let observer = display::StatusPrinter::new(display::UseColor::from_env());
+    let progress = deploy::DeployProgress::new(hosts.keys().cloned().collect(), Box::new(observer));
+    sync::run_sync(&store, &hosts, &*connector, &progress);
+    Ok(())
+}
+
 fn run() -> Result<()> {
     // Register --version with bpaf (with only the long name, no -V) so it
     // appears in --help output. The flag is actually intercepted in main()
@@ -311,13 +333,7 @@ fn run() -> Result<()> {
             sync_mode,
             connect_mode,
             dir,
-        } => {
-            let store = Store::open(&store)?;
-            let dir = resolve_dir(&store, dir)?;
-            let connector = make_connector(connect_mode)?;
-            let observer = display::StatusPrinter::new(display::UseColor::from_env());
-            sync::run_sync(&store, &dir, &*connector, sync_mode, Box::new(observer))?;
-        }
+        } => run_sync(store, dir, sync_mode, connect_mode)?,
         Cmd::Init { store } => {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());

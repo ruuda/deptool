@@ -37,6 +37,11 @@ pub enum HostState {
     Applying,
     RollingBack,
     Done,
+    /// Sync found the host already at the expected commit; nothing to fetch.
+    UpToDate,
+    /// Sync changed the tracking ref. Like `Done`, but tells the operator
+    /// the cluster's view of this host moved.
+    Updated,
     Stale,
     LockBusy(Option<String>),
     RolledBack(ApplyError),
@@ -67,6 +72,8 @@ impl std::fmt::Display for HostState {
             HostState::Applying => f.write_str("applying"),
             HostState::RollingBack => f.write_str("rolling back"),
             HostState::Done => f.write_str("done"),
+            HostState::UpToDate => f.write_str("up to date"),
+            HostState::Updated => f.write_str("updated"),
             HostState::Stale => f.write_str("stale"),
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
@@ -141,7 +148,7 @@ impl DeployProgress {
     }
 
     #[cfg(test)]
-    fn state(&self, host: &str) -> parking_lot::MappedMutexGuard<'_, HostState> {
+    pub fn state(&self, host: &str) -> parking_lot::MappedMutexGuard<'_, HostState> {
         parking_lot::MutexGuard::map(self.inner.lock(), |inner| {
             inner
                 .states

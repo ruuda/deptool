@@ -7,16 +7,15 @@
 
 //! The `deptool sync` command: refresh tracking refs from remote hosts.
 
-use std::path::Path;
-
-use parking_lot::Mutex;
-
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use git2::Oid;
+use parking_lot::Mutex;
 
-use crate::deploy::{self, DeployObserver, DeployProgress, HostState, StaleHost};
+use crate::deploy::{self, DeployProgress, HostState, StaleHost};
 use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
@@ -31,37 +30,45 @@ pub enum SyncMode {
     AllHosts,
 }
 
-/// Connect to hosts and refresh their tracking refs.
-pub fn run_sync(
+/// Pick hosts to sync from `dir` and look up each one's expected commit.
+///
+/// Returns the hosts to contact paired with the commit our tracking refs
+/// say they should be at. `None` means we have no tracking ref for the
+/// host, so any current commit is "new" from our point of view.
+pub fn select_hosts_to_sync(
     store: &Store,
     dir: &Path,
-    connector: &dyn HostConnector,
     mode: SyncMode,
-    observer: Box<dyn DeployObserver>,
-) -> Result<()> {
+) -> Result<BTreeMap<Hostname, Option<Oid>>> {
     let tree_oid = store.build_tree(dir)?;
     let config_hosts = store.host_trees(tree_oid)?;
-
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 
-    let hosts_to_sync: Vec<Hostname> = match mode {
-        SyncMode::AllHosts => host_names,
-        SyncMode::OnlyAffectedHosts => host_names
-            .into_iter()
-            .filter(|host| match host_refs.get(host) {
-                Some(hr) => hr.host_tree != config_hosts[host],
+    let mut to_sync = BTreeMap::new();
+    for (host, host_tree) in config_hosts {
+        let host_ref = host_refs.get(&host);
+        let needs_sync = match mode {
+            SyncMode::AllHosts => true,
+            SyncMode::OnlyAffectedHosts => match host_ref {
+                Some(hr) => hr.host_tree != host_tree,
                 None => true,
-            })
-            .collect(),
-    };
-
-    if hosts_to_sync.is_empty() {
-        eprintln!("All hosts are up to date.");
-        return Ok(());
+            },
+        };
+        if needs_sync {
+            to_sync.insert(host, host_ref.map(|hr| hr.commit));
+        }
     }
-    let progress = &DeployProgress::new(hosts_to_sync.clone(), observer);
+    Ok(to_sync)
+}
 
+/// Connect to hosts and refresh their tracking refs.
+pub fn run_sync(
+    store: &Store,
+    hosts: &BTreeMap<Hostname, Option<Oid>>,
+    connector: &dyn HostConnector,
+    progress: &DeployProgress,
+) {
     // Connect to all hosts in parallel, checking Hello for staleness.
     // A host is stale whenever its current commit differs from the tracking
     // ref, including the asymmetric cases: a fresh host (`actual = None`)
@@ -69,9 +76,9 @@ pub fn run_sync(
     // how we recover from a reprovisioned host.
     let stale: Mutex<Vec<(Hostname, StaleHost)>> = Mutex::new(Vec::new());
     std::thread::scope(|s| {
-        for host in &hosts_to_sync {
+        for (host, expected) in hosts {
             let stale = &stale;
-            let expected = host_refs.get(host).map(|hr| hr.commit);
+            let expected = *expected;
             s.spawn(move || {
                 let conn = match deploy::try_connect(host, connector, progress) {
                     Some(c) => c,
@@ -79,8 +86,9 @@ pub fn run_sync(
                 };
                 let actual = conn.hello().current_commit;
                 if actual == expected {
-                    progress.update(host, HostState::Done);
+                    progress.update(host, HostState::UpToDate);
                 } else {
+                    progress.update(host, HostState::Stale);
                     stale.lock().push((
                         host.clone(),
                         StaleHost {
@@ -96,10 +104,12 @@ pub fn run_sync(
 
     // Fetch sequentially: the first fetch may provide objects that later
     // hosts also need, avoiding redundant transfers.
-    let mut stale_hosts = stale.into_inner().into_iter().collect();
-    fetch_stale_objects(store, &mut stale_hosts, progress);
-
-    Ok(())
+    for (host, mut info) in stale.into_inner() {
+        match fetch_from_stale_host(store, &host, &mut info) {
+            Ok(()) => progress.update(&host, HostState::Updated),
+            Err(err) => progress.update(&host, err),
+        }
+    }
 }
 
 /// Reconcile each stale host's tracking ref with its current commit.
@@ -173,7 +183,21 @@ fn fetch_from_stale_host(
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::testutil::{NoopObserver, TempDir, TestHost, TestRepo, test_connector};
+    use crate::testutil::{TempDir, TestHost, TestRepo, test_connector, test_progress};
+
+    /// Run sync end-to-end and return the progress so tests can inspect state.
+    fn sync_affected(
+        driver: &TestRepo,
+        hosts: &[&TestHost],
+        config: &Path,
+    ) -> Result<DeployProgress> {
+        let to_sync = select_hosts_to_sync(&driver.store, config, SyncMode::OnlyAffectedHosts)?;
+        let names: Vec<&str> = to_sync.keys().map(|h| h.0.as_str()).collect();
+        let progress = test_progress(&names);
+        let connector = test_connector(hosts);
+        run_sync(&driver.store, &to_sync, &connector, &progress);
+        Ok(progress)
+    }
 
     #[test]
     fn sync_updates_stale_tracking_ref() -> Result<()> {
@@ -193,19 +217,43 @@ mod tests {
         std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
         std::fs::write(config.path().join("web1/app/conf"), b"v3").unwrap();
 
-        let connector = test_connector(&[&host]);
-        run_sync(
-            &driver.store,
-            config.path(),
-            &connector,
-            SyncMode::OnlyAffectedHosts,
-            Box::new(NoopObserver),
-        )?;
+        let progress = sync_affected(&driver, &[&host], config.path())?;
 
         assert_eq!(
             driver.get_host_tracking_ref("web1"),
             Some(c2),
             "tracking ref updated to host's current commit",
+        );
+        assert!(
+            matches!(*progress.state("web1"), HostState::Updated),
+            "stale host reaches terminal Updated state after sync",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_marks_host_up_to_date_when_commit_matches_tracking_ref() -> Result<()> {
+        // Host's current commit matches the tracking ref, but the config has
+        // new content -- so the host is in to_sync, yet there's nothing to
+        // fetch. UpToDate (not Updated) reports that the ref didn't move.
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+
+        let host = TestHost::new("web1");
+        let pack = driver.store.create_pack(c1, None)?;
+        host.session.store.write_pack(&pack)?;
+        host.set_current(c1);
+        driver.set_host_tracking_ref("web1", c1);
+
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
+        std::fs::write(config.path().join("web1/app/conf"), b"v2").unwrap();
+
+        let progress = sync_affected(&driver, &[&host], config.path())?;
+
+        assert!(
+            matches!(*progress.state("web1"), HostState::UpToDate),
+            "host already at tracking ref commit reaches UpToDate state",
         );
         Ok(())
     }
@@ -224,19 +272,16 @@ mod tests {
         std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
         std::fs::write(config.path().join("web1/app/conf"), b"v2").unwrap();
 
-        let connector = test_connector(&[&host]);
-        run_sync(
-            &driver.store,
-            config.path(),
-            &connector,
-            SyncMode::OnlyAffectedHosts,
-            Box::new(NoopObserver),
-        )?;
+        let progress = sync_affected(&driver, &[&host], config.path())?;
 
         assert_eq!(
             driver.get_host_tracking_ref("web1"),
             None,
             "tracking ref deleted because host has no current commit",
+        );
+        assert!(
+            matches!(*progress.state("web1"), HostState::Updated),
+            "stale host reaches terminal Updated state after deleting ref",
         );
         Ok(())
     }

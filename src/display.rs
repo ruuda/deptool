@@ -383,7 +383,9 @@ impl StatusPrinter {
 
     fn color_state(&self, state: &HostState) -> String {
         match state {
-            HostState::Done => self.color.green(&state.to_string()),
+            HostState::Done | HostState::UpToDate | HostState::Updated => {
+                self.color.green(&state.to_string())
+            }
             HostState::Failed(_)
             | HostState::RolledBack(_)
             | HostState::Stale
