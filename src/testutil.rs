@@ -231,6 +231,21 @@ impl TestHost {
         (host, oid)
     }
 
+    /// Create a host pre-populated with `commit`, fetched from `driver`.
+    pub fn at_commit(driver: &TestRepo, hostname: &str, commit: Oid) -> Self {
+        let host = Self::new(hostname);
+        let pack = driver
+            .store
+            .create_pack(commit, None)
+            .expect("pack is created");
+        host.session
+            .store
+            .write_pack(&pack)
+            .expect("pack is written");
+        host.set_current(commit);
+        host
+    }
+
     /// Set the host-local `refs/heads/current` ref.
     pub fn set_current(&self, commit_oid: Oid) {
         self.session

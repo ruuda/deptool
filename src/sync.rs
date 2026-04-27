@@ -199,24 +199,28 @@ mod tests {
         Ok(progress)
     }
 
+    /// Create a temp dir populated with the given files (with parent dirs).
+    fn config_with(files: &[(&str, &[u8])]) -> TempDir {
+        let dir = TempDir::new("config");
+        for (path, content) in files {
+            let full = dir.path().join(path);
+            let parent = full.parent().expect("path has a parent dir");
+            std::fs::create_dir_all(parent).expect("parent dir is created");
+            std::fs::write(&full, content).expect("file is written");
+        }
+        dir
+    }
+
     #[test]
     fn sync_updates_stale_tracking_ref() -> Result<()> {
+        // Host has c2 deployed, but the driver only knows about c1.
         let driver = TestRepo::new();
         let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
         let c2 = driver.commit(&[("web1/app/conf", b"v2")]);
-
-        // Host has c2 deployed, but the driver only knows about c1.
-        let host = TestHost::new("web1");
-        let pack = driver.store.create_pack(c2, None)?;
-        host.session.store.write_pack(&pack)?;
-        host.set_current(c2);
+        let host = TestHost::at_commit(&driver, "web1", c2);
         driver.set_host_tracking_ref("web1", c1);
 
-        // Create a config dir with changes so the host looks affected.
-        let config = TempDir::new("config");
-        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
-        std::fs::write(config.path().join("web1/app/conf"), b"v3").unwrap();
-
+        let config = config_with(&[("web1/app/conf", b"v3")]);
         let progress = sync_affected(&driver, &[&host], config.path())?;
 
         assert_eq!(
@@ -238,17 +242,10 @@ mod tests {
         // fetch. UpToDate (not Updated) reports that the ref didn't move.
         let driver = TestRepo::new();
         let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
-
-        let host = TestHost::new("web1");
-        let pack = driver.store.create_pack(c1, None)?;
-        host.session.store.write_pack(&pack)?;
-        host.set_current(c1);
+        let host = TestHost::at_commit(&driver, "web1", c1);
         driver.set_host_tracking_ref("web1", c1);
 
-        let config = TempDir::new("config");
-        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
-        std::fs::write(config.path().join("web1/app/conf"), b"v2").unwrap();
-
+        let config = config_with(&[("web1/app/conf", b"v2")]);
         let progress = sync_affected(&driver, &[&host], config.path())?;
 
         assert!(
@@ -265,13 +262,9 @@ mod tests {
         let driver = TestRepo::new();
         let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
         driver.set_host_tracking_ref("web1", c1);
-
         let host = TestHost::new("web1"); // No current commit on the host.
 
-        let config = TempDir::new("config");
-        std::fs::create_dir_all(config.path().join("web1/app")).unwrap();
-        std::fs::write(config.path().join("web1/app/conf"), b"v2").unwrap();
-
+        let config = config_with(&[("web1/app/conf", b"v2")]);
         let progress = sync_affected(&driver, &[&host], config.path())?;
 
         assert_eq!(
