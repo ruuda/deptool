@@ -531,6 +531,25 @@ mod tests {
     }
 
     #[test]
+    fn checkout_app_makes_files_readonly() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+
+        let conf = t
+            .apps
+            .path()
+            .join("nginx")
+            .join(oid_prefix(c1))
+            .join("nginx.conf");
+        let mode = fs::metadata(&conf)?.permissions().mode();
+        assert_eq!(mode & 0o222, 0, "no write bits set, mode is {mode:o}");
+
+        Ok(())
+    }
+
+    #[test]
     fn remove_app_deletes_the_app_directory() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);

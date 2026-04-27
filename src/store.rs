@@ -9,6 +9,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use git2::{Commit, Oid, Repository, Tree};
@@ -225,6 +226,7 @@ impl Store {
         cb.target_dir(target).force();
         self.repo
             .checkout_tree(subtree.as_object(), Some(&mut cb))?;
+        make_files_readonly(target)?;
         Ok(())
     }
 
@@ -500,6 +502,26 @@ impl Store {
             None => Ok(BTreeMap::new()),
         }
     }
+}
+
+/// Drop write bits from every regular file under `dir`, recursively.
+///
+/// Checked-out files are not meant to be edited in place; users should deploy
+/// a new version instead. Directories stay writable so that `remove_dir_all`
+/// (used by gc and by re-checkout) can still unlink the files inside.
+fn make_files_readonly(dir: &Path) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            make_files_readonly(&entry.path())?;
+        } else if ft.is_file() {
+            let mut perms = entry.metadata()?.permissions();
+            perms.set_mode(perms.mode() & !0o222);
+            fs::set_permissions(entry.path(), perms)?;
+        }
+    }
+    Ok(())
 }
 
 pub enum RefUpdate<'a> {
