@@ -203,7 +203,7 @@ impl HostError {
             }),
             HostError::ApplyFailed(apply_error) => Some(Explanation {
                 description: "Apply failed and we did not roll back because the changes were not\n\
-                              rollback-safe. The host is partially modified, inspect it before redeploying:"
+                              rollback-safe. The host is partially modified:"
                     .to_string(),
                 item: format!("  {host}: {apply_error}"),
             }),
@@ -212,7 +212,7 @@ impl HostError {
                 rollback_error,
             } => Some(Explanation {
                 description: "Apply failed and the rollback we attempted also failed. The host is\n\
-                             partially modified, inspect it before redeploying:"
+                             partially modified:"
                     .to_string(),
                 item: [
                     format!("  {host}:"),
@@ -264,8 +264,8 @@ impl fmt::Display for HostError {
             HostError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             HostError::Store(msg) => write!(f, "{msg}"),
             HostError::PreApply(err) => write!(f, "{err}"),
-            HostError::ApplyFailed(_) => f.write_str("host inconsistent, rollback skipped"),
-            HostError::RollbackFailed { .. } => f.write_str("host inconsistent, rollback failed"),
+            HostError::ApplyFailed(_) => f.write_str("error during apply"),
+            HostError::RollbackFailed { .. } => f.write_str("error during apply, rollback failed"),
         }
     }
 }
