@@ -84,7 +84,7 @@ Post-generation checklist (run after writing code, before presenting):
 
  - Git is available.
  - Do not commit unless asked. I will do that at logical points on our behalf.
- - Before embarking on a large task, record the current Git head, so you can later review what you did against that commit.
+ - Before embarking on a new change, confirm the current branch is `master`, then create a new branch with `git checkout -b`. Creating branches is allowed; committing still requires explicit instruction. Diff against `master` to review the change. I will merge back into master when done.
  - For large tasks, check the intermediate status with `git diff --shortstat` or `git diff --numstat`.
  - Negative diffstats are good. Codebase growth needs to be justified. Ask yourself whether the lines spent are well-spent.
  - Don't game the line stats. Readability is more important than line count.
