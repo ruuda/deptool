@@ -93,10 +93,15 @@ pub enum Message {
     RolledBack {
         error: ApplyError,
     },
-    /// The forward deploy failed and rollback also failed.
+    /// Apply failed; rollback wasn't attempted because the changes weren't
+    /// rollback-safe.
+    ApplyFailed(ApplyError),
+    /// Apply failed and rollback also failed.
     RollbackFailed {
         apply_error: ApplyError,
         rollback_error: ApplyError,
     },
-    Error(ApplyError),
+    /// Agent error before any host modification (e.g. lock failure, pack
+    /// write failure).
+    ErrorPreApply(ApplyError),
 }

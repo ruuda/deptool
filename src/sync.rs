@@ -153,8 +153,8 @@ fn fetch_from_stale_host(
                     .expect("SendPack contains valid base64");
                 store.write_pack(&bytes)?;
             }
-            Some(Message::Error(apply_err)) => {
-                return Err(HostError::Apply(apply_err));
+            Some(Message::ErrorPreApply(apply_err)) => {
+                return Err(HostError::PreApply(apply_err));
             }
             other => {
                 return Err(HostError::ProtocolError(format!(

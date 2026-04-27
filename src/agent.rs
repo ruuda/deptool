@@ -7,6 +7,7 @@
 
 //! Agent-side session: handles requests from the driver and applies changes.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ use git2::Oid;
 use crate::checkout::{self, CheckoutMode, checkout};
 use crate::error::ApplyError;
 use crate::log::FileLog;
-use crate::plan::{DesiredState, SystemDiff, diff_host};
+use crate::plan::{AppDiff, DesiredState, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::store::{RefUpdate, Store};
@@ -171,7 +172,7 @@ impl AgentSession {
         {
             Ok(f) => f,
             Err(err) => {
-                emit_message(Message::Error(ApplyError::Io(format!(
+                emit_message(Message::ErrorPreApply(ApplyError::Io(format!(
                     "failed to open lock file: {err}",
                 ))));
                 return;
@@ -193,7 +194,7 @@ impl AgentSession {
                 return;
             }
             Err(err) => {
-                emit_message(Message::Error(ApplyError::Io(format!(
+                emit_message(Message::ErrorPreApply(ApplyError::Io(format!(
                     "flock failed: {err}",
                 ))));
                 return;
@@ -238,7 +239,7 @@ impl AgentSession {
             Err(err) => {
                 let msg = format!("failed to write pack: {err}");
                 self.log(format_args!("{msg}"));
-                emit_message(Message::Error(ApplyError::Store(msg)));
+                emit_message(Message::ErrorPreApply(ApplyError::Store(msg)));
             }
         }
     }
@@ -265,7 +266,7 @@ impl AgentSession {
                     Err(err) => {
                         let msg = format!("failed to create pack: {err}");
                         self.log(format_args!("{msg}"));
-                        emit_message(Message::Error(ApplyError::Store(msg)));
+                        emit_message(Message::ErrorPreApply(ApplyError::Store(msg)));
                     }
                 }
             }
@@ -280,25 +281,34 @@ impl AgentSession {
                         target_commit,
                         is_rollback_safe,
                     };
-                    if let Err(err) = self.handle_apply(&ctx, emit_message) {
-                        self.log(format_args!("deploy failed: {err}"));
-                        emit_message(Message::Error(err));
+                    let (app_diffs, system_diff) = match self.prepare_apply(&ctx) {
+                        Ok(prepared) => prepared,
+                        Err(err) => {
+                            self.log(format_args!("pre-apply failed: {err}"));
+                            emit_message(Message::ErrorPreApply(err));
+                            return;
+                        }
+                    };
+                    match self.apply_modification(&ctx, &app_diffs, system_diff, emit_message) {
+                        Ok(()) => {}
+                        Err(err) => {
+                            self.log(format_args!("apply failed: {err}"));
+                            emit_message(Message::ApplyFailed(err));
+                        }
                     }
                 }
-                SessionState::Unlocked => {
-                    emit_message(Message::Error(ApplyError::Store(
-                        "Apply request without Lock".into(),
-                    )));
-                }
+                // The driver always sends Lock before Apply; reaching this
+                // arm means a protocol bug, not an expected runtime case.
+                SessionState::Unlocked => panic!("Apply request without prior Lock"),
             },
         }
     }
 
-    fn handle_apply(
+    /// Pre-modification phase: diffs, descendant check, set target ref.
+    fn prepare_apply(
         &self,
         ctx: &ApplyContext,
-        emit_message: &mut impl FnMut(Message),
-    ) -> std::result::Result<(), ApplyError> {
+    ) -> Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>), ApplyError> {
         self.log(format_args!(
             "deploying {} -> {}",
             format_opt_oid(ctx.current_commit),
@@ -338,10 +348,22 @@ impl AgentSession {
             },
         )?;
 
+        Ok((app_diffs, system_diff))
+    }
+
+    /// Modification phase. Rollback-safe activation failures trigger a
+    /// rollback inline; other errors flow out via `Err`.
+    fn apply_modification(
+        &self,
+        ctx: &ApplyContext,
+        app_diffs: &BTreeMap<String, AppDiff>,
+        system_diff: SystemDiff<PathBuf>,
+        emit_message: &mut impl FnMut(Message),
+    ) -> Result<(), ApplyError> {
         checkout(
             &self.store,
             Some(ctx.target_commit),
-            &app_diffs,
+            app_diffs,
             &self.hostname,
             &self.apps_dir,
             CheckoutMode::Fresh,
@@ -366,10 +388,7 @@ impl AgentSession {
                 self.log(format_args!("activation failed, rolling back: {err}"));
                 return self.handle_rollback(err, ctx, emit_message);
             }
-            Err(err) => {
-                self.log(format_args!("activation failed: {err}"));
-                return Err(err);
-            }
+            Err(err) => return Err(err),
         }
 
         self.store.set_ref(
@@ -701,7 +720,7 @@ mod tests {
             is_rollback_safe: false,
         });
 
-        assert!(matches!(msgs.as_slice(), [Message::Error(_)],));
+        assert!(matches!(msgs.as_slice(), [Message::ApplyFailed(_)]));
     }
 
     #[test]

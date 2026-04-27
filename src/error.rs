@@ -146,8 +146,17 @@ pub enum HostError {
     ProtocolError(String),
     /// A store operation failed.
     Store(StoreError),
-    /// The agent reported an error during the apply phase.
-    Apply(ApplyError),
+    /// Agent error before any host modification (e.g. lock failure, pack
+    /// write failure).
+    PreApply(ApplyError),
+    /// Apply failed; rollback wasn't attempted because the changes weren't
+    /// rollback-safe.
+    ApplyFailed(ApplyError),
+    /// Apply failed and rollback also failed.
+    RollbackFailed {
+        apply_error: ApplyError,
+        rollback_error: ApplyError,
+    },
 }
 
 impl HostError {
@@ -192,6 +201,25 @@ impl HostError {
                     .to_string(),
                 item: format!("  {host}: expected {expected_hash}, got {actual_hash}"),
             }),
+            HostError::ApplyFailed(apply_error) => Some(Explanation {
+                description: "Apply failed and we did not roll back because the changes were not\n\
+                              rollback-safe. The host is partially modified, inspect it before redeploying:"
+                    .to_string(),
+                item: format!("  {host}: {apply_error}"),
+            }),
+            HostError::RollbackFailed {
+                apply_error,
+                rollback_error,
+            } => Some(Explanation {
+                description: "Apply failed and the rollback we attempted also failed. The host is\n\
+                             partially modified, inspect it before redeploying:"
+                    .to_string(),
+                item: [
+                    format!("  {host}:"),
+                    format!("    apply: {apply_error}"),
+                    format!("    rollback: {rollback_error}"),
+                ].join("\n"),
+            }),
             _ => None,
         }
     }
@@ -235,7 +263,9 @@ impl fmt::Display for HostError {
             HostError::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
             HostError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             HostError::Store(msg) => write!(f, "{msg}"),
-            HostError::Apply(err) => write!(f, "{err}"),
+            HostError::PreApply(err) => write!(f, "{err}"),
+            HostError::ApplyFailed(_) => f.write_str("host inconsistent, rollback skipped"),
+            HostError::RollbackFailed { .. } => f.write_str("host inconsistent, rollback failed"),
         }
     }
 }
