@@ -2,13 +2,14 @@
 
     deptool sync [--all] [--] [<dir>]
 
-<!-- TODO(ruuda): Document that <dir> is optional and falls back to the config
-     tree recorded by the most recent deploy or sync. -->
-
 ## Description
 
 Connect to the hosts defined in the config tree in `<dir>`, and pull their
 latest state, so the local store has an up to date view of the cluster.
+
+See also [`deptool deploy`](deptool_deploy.md) for details about the config tree
+directory `<dir>`. Just like deploy, sync defaults to the last-used cluster when
+you omit it.
 
 Sync is primarily useful in collaborative settings, where you have out of band
 knowledge that things were deployed to the cluster from a different store than

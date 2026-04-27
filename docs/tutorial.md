@@ -129,7 +129,7 @@ Back on the operator machine, let’s make a change to our Caddyfile and deploy
 again:
 
     $ vim prod/webserver/caddy/Caddyfile
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         update caddy
             ~ Caddyfile
@@ -137,9 +137,10 @@ again:
     Auto-rollback if deploy fails.
     Apply to 1 host in cluster 'prod'? [y/N/d]
 
-When we deploy this, Deptool indicates that the file `Caddyfile`, part of app
-`caddy` on host `webserver`, has changes. Press `d` to diff the contents of
-Caddyfile, `y` to deploy.
+Deptool saves the last-used cluster, so this time we don’t have to include
+`prod` in the command. When we deploy the new configuration, Deptool indicates
+that the file `Caddyfile`, part of app `caddy` on host `webserver`, has changes.
+Press `d` to diff the contents of Caddyfile, `y` to deploy.
 
     Apply to 1 host in cluster 'prod'? [y/N/d] y
     
@@ -218,7 +219,7 @@ Our `prod` directory now looks like this:
 
 Let’s deploy it:
 
-    $ deptool deploy prod
+    $ deptool deploy
     webserver (rollback unavailable)
         update caddy
             + manifest.json
@@ -264,7 +265,7 @@ you diagnose why it failed.
 Let’s update our Caddy configuration again, and deploy:
 
     $ vim prod/webserver/caddy/Caddyfile
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         update caddy
             ~ Caddyfile
@@ -333,7 +334,7 @@ Next we update `manifest.json` to include a `symlinks` section:
 
 Deploy this:
 
-    $ deptool deploy prod
+    $ deptool deploy
     webserver (rollback unavailable)
         update caddy
             ~ manifest.json
@@ -354,7 +355,7 @@ This means that if we make another change, the symlink will not change, only the
 target file. For example, let’s change the group owner from `caddy` to `www`:
 
     $ echo 'd /var/lib/caddy 0770 caddy www - -' > prod/webserver/caddy/tmpfiles.conf
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         update caddy
             ~ tmpfiles.conf
@@ -372,7 +373,7 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
 
     $ rm prod/webserver/caddy/tmpfiles.conf
     $ vim prod/webserver/caddy/manifest.json
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         update caddy
             ~ manifest.json
@@ -405,7 +406,7 @@ ignores empty directories. We can work around this by adding an empty file:
 
     $ rm -fr prod/webserver/caddy
     $ touch prod/webserver/intentionally-left-blank
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         remove caddy
             - Caddyfile
