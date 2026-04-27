@@ -67,6 +67,7 @@ Post-generation checklist (run after writing code, before presenting):
  - For each error path: what does the operator/user actually see? Trace it to the display.
  - For each new function: are the arguments in the right order (stable before varying, old before new)?
  - For each `replace_all` edit: will it match inside longer lines at different indentation levels? When in doubt, edit distinct groups separately.
+ - For each new test: what specific bug would it catch? If breaking the test would require an implementation change you'd obviously notice without the test, drop it or rework it to test a real property.
  - For each deleted test: where is that behavior tested now?
  - For each deleted or moved piece of code: what invariant or purpose did it serve at its original location? Is that still enforced?
  - For each bug fix: does the same bug exist in a shared function that this code calls? Fix it at the root, not the leaf.
@@ -107,8 +108,8 @@ Post-generation checklist (run after writing code, before presenting):
  - A reader who does not know the function args by heart can't tell what a call site like `frobnicate(true, None, 32)` does. Extract arguments into named variables when needed, prefer enums with descriptive names if possible.
  - At the call site, `frobnicate(true)` is meaningless but `frobnicate(FrobMode::IncludeWidgets)` is self-documenting.
  - Order function arguments from least-varying to most-varying. Configuration and context arguments (like a directory path) go before data arguments (like the specific changes to apply).
- - Prefer plain `match` over fancy method chains or `let-else` when simpler.
- - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()` when the ok-path is the important one -- `if let Err` buries the function call after the error handling keyword.
+ - Prefer plain `match` over fancy method chains or `let-else`.
+ - Prefer `match f() { Ok(v) => ..., Err(e) => ... }` over `if let Err(e) = f()`. The thing being done should come first; result handling reads after, not in the binding position. `match` keeps the flow linear; `if let Err(...) =` buries the call. (`if let Some(...)` on `Option` is fine.)
  - Prefer making invalid states unrepresentable in the type system over excessive reliance on tests.
  - Prefer linear data ownership over shared mutable state. If you're reaching for a Mutex, first ask whether restructuring ownership would eliminate the sharing.
  - Prefer safe APIs over unsafe. Check `std` and `std::os::unix` before reaching for `libc`.
