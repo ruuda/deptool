@@ -545,9 +545,10 @@ fn main() {
     // rather than bpaf's hardcoded `Version: ...` prefix.
     if std::env::args().nth(1).as_deref() == Some("--version") {
         println!(
-            "Deptool {} ({})",
+            "Deptool {} ({}, {})",
             env!("CARGO_PKG_VERSION"),
             &setup::BUILD_COMMIT[..10],
+            setup::BUILD_COMMIT_DATE,
         );
         return;
     }

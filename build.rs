@@ -5,13 +5,18 @@
 // you may not use this file except in compliance with the License.
 // A copy of the License has been included in the root of the repository.
 
-//! Bake build identity into the binary as `BUILD_COMMIT` and `BUILD_PLATFORM`.
+//! Bake build identity into the binary as `BUILD_COMMIT`, `BUILD_COMMIT_DATE`,
+//! and `BUILD_PLATFORM`.
 //!
 //! `BUILD_COMMIT` is the suffix in the installed binary name
 //! (`deptool-{VERSION}-{COMMIT[:10]}`). It identifies content at the source
 //! level rather than the binary level, so per-target binaries built from the
 //! same source tree share a name on the target host. Release builds refuse
 //! to start from a dirty tree, so the suffix is unambiguous in practice.
+//!
+//! `BUILD_COMMIT_DATE` is the committer date of `BUILD_COMMIT` in `YYYY-MM-DD`
+//! form. Shown in `--version` so the user can tell at a glance how old the
+//! binary is without resolving the commit hash.
 //!
 //! `BUILD_PLATFORM` is the `uname -sm` output the binary's target prints,
 //! e.g. "Linux x86_64". It lets the driver short-circuit the binaries-cache
@@ -46,26 +51,30 @@ fn main() {
     // If BUILD_COMMIT is not set, then we use Git to look up the current
     // commit below. This is the default case for local development. We allow
     // bypassing Git by setting the env var, so that the application can be
-    // built as a Nix flake as well. In that case we assume the tree is not
-    // dirty.
+    // built as a Nix flake as well. In that case the caller must also supply
+    // BUILD_COMMIT_DATE, and we assume the tree is not dirty.
     if std::env::var("BUILD_COMMIT").is_ok() {
         return;
     }
 
     let head = Command::new("git")
-        .args(["rev-parse", "HEAD"])
+        .args(["show", "-s", "--format=%H %cs", "HEAD"])
         .output()
         .expect("git is installed");
     if !head.status.success() {
         panic!(
-            "git rev-parse HEAD failed: {}",
+            "git show HEAD failed: {}",
             String::from_utf8_lossy(&head.stderr).trim()
         );
     }
-    let commit = std::str::from_utf8(&head.stdout)
-        .expect("git rev-parse output is valid UTF-8")
+    let head = std::str::from_utf8(&head.stdout)
+        .expect("git show output is valid UTF-8")
         .trim();
+    let (commit, date) = head
+        .split_once(' ')
+        .expect("git show prints commit and date separated by a space");
     println!("cargo:rustc-env=BUILD_COMMIT={commit}");
+    println!("cargo:rustc-env=BUILD_COMMIT_DATE={date}");
 
     // Release binaries get pushed to target hosts, where stale or ambiguous
     // identity is a real footgun. Refuse to build a release from a dirty tree

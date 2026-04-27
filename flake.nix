@@ -43,6 +43,11 @@
             if builtins.hasAttr "rev" self
             then self.rev
             else throw "Deptool must be built from a clean tree.";
+          # `lastModifiedDate` is the commit time of `self.rev` in the format
+          # YYYYMMDDHHMMSS. Reformat to YYYY-MM-DD to match build.rs.
+          BUILD_COMMIT_DATE =
+            let d = self.lastModifiedDate; in
+            "${builtins.substring 0 4 d}-${builtins.substring 4 2 d}-${builtins.substring 6 2 d}";
           RUSTFLAGS = "-lm -lssl -lc";
 
           # The tests must be compiled with debug assertions enabled for the

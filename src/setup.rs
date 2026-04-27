@@ -30,6 +30,9 @@ pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 /// the commit alone identifies the source the binary was built from.
 pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
 
+/// Committer date of `BUILD_COMMIT` in `YYYY-MM-DD` form.
+pub const BUILD_COMMIT_DATE: &str = env!("BUILD_COMMIT_DATE");
+
 /// `uname -sm` output the build target prints, e.g. "Linux x86_64".
 ///
 /// Set by `build.rs` from the cargo target triple. Used to skip the
