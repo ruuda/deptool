@@ -24,6 +24,28 @@ pub trait HostConnector: Send + Sync {
 
 pub const BIN_DIR: &str = "/var/lib/deptool/bin";
 
+/// Build an `ssh` command with our connection-tuning options.
+///
+/// Bounds the connect handshake -- so unreachable hosts fail fast
+/// instead of waiting the OS TCP default (~2 min) -- and the idle
+/// keepalive, so a host that hangs mid-session releases the deploy
+/// instead of blocking it indefinitely.
+pub fn ssh_command() -> Command {
+    let connect_timeout_seconds = 10;
+    let server_alive_interval_seconds = 10;
+    let server_alive_count_max = 3;
+    let mut cmd = Command::new("ssh");
+    cmd.args([
+        "-o",
+        &format!("ConnectTimeout={connect_timeout_seconds}"),
+        "-o",
+        &format!("ServerAliveInterval={server_alive_interval_seconds}"),
+        "-o",
+        &format!("ServerAliveCountMax={server_alive_count_max}"),
+    ]);
+    cmd
+}
+
 /// Git commit this binary was built from.
 ///
 /// Release builds refuse to start from a dirty tree (see `build.rs`), so
@@ -105,7 +127,7 @@ pub fn install_binary(
         &format!("sudo sha256sum {remote_bin_path}"),
     ]
     .join(" && ");
-    let mut child = Command::new("ssh")
+    let mut child = ssh_command()
         .args([&host.0, &install_command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

@@ -168,7 +168,7 @@ impl setup::HostConnector for RemoteConnector {
             is_shell_safe(&host.0),
             "hostname is free of shell metacharacters"
         );
-        let mut cmd = Command::new("ssh");
+        let mut cmd = setup::ssh_command();
         cmd.args([
             &host.0,
             "sudo",
