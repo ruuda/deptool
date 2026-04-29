@@ -17,6 +17,7 @@
  - When the compiler warns, it's right. Investigate instead of suppressing.
  - Verify subagent work: check that agents committed on the right branch with actual changes.
  - Never use `find` or `grep` to navigate the repo, they waste context on untracked files. Use `git grep` and `git ls-files` instead.
+ - When memory and CLAUDE.md disagree, treat it as a signal to verify before acting, not to pick a side on autopilot. Memory is observation and may drift; CLAUDE.md is also written and can be stale or wrong. For destructive or externally visible actions especially, ask rather than guess which one is right.
 
 ## Project details
 
@@ -79,6 +80,9 @@ Post-generation checklist (run after writing code, before presenting):
  - For each `replace_all` on a word: will it match inside a longer word (e.g. "started" inside "restarted")? Use more context or targeted edits.
  - For each doc comment on changed code: does it still match the current signature and behavior? Re-read it after every refactor.
  - For each change to user-visible output (plan display, logs, errors): `git grep` for fragments of the old output in `docs/` and tests. Update every match.
+ - For each new free function: should it be a method? If it takes `&Foo`/`Foo` and operates on its fields, prefer `foo.bar()` over `bar(&foo)`. After landing it, sweep the call sites: do paired functions always feed each other (fold), is `let x = match ... ; f(x)` collapsible into the success arm, is the call qualified inline when a `use` would do?
+ - For each "Rust idiom" in the diff (`as _`, `.iter().flat_map()...`, `let X { .. } = self`, fancy combinators): sketch the plain alternative -- `for` loop with early break, direct field access, `match`. Idioms must justify themselves against the simpler form, not the other way around. Closure/ref/deref noise often tips the balance toward the loop.
+ - For each doc comment in a non-domain module: do the nouns make sense from outside? "The commit" in `plan.rs` is ambiguous because plans don't make commits; "the deploy commit" is. Ground cross-module nouns.
 
 ## Working with Git
 
