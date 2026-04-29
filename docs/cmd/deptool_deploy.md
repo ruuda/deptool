@@ -32,7 +32,10 @@ Compute the plan and exit, do not connect to any host.
 
 ### `--limit <hosts>`
 
-TODO(ruuda): document `--limit`.
+Limit the hosts to deploy to. Can be provided multiple times, and supports a
+comma-separated list of hosts too. For example, in a cluster with hosts `web1`
+through `web5`, passing `--limit web1,web2 --limit web3` would exclude `web4`
+and `web5` from the deploy.
 
 ### `--store`
 

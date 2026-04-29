@@ -35,7 +35,14 @@ hosts defined in the config tree.
 
 ### `--limit <hosts>`
 
-TODO(ruuda): document `--limit`.
+Limit the hosts to sync to just those listed. Can be provided multiple times,
+and supports a comma-separated list of hosts too. For example, in a cluster with
+hosts `web1` through `web5`, passing `--limit web1,web2 --limit web3` would
+exclude `web4` and `web5` from the sync.
+
+A limit only excludes hosts from the sync. It does not cause the included hosts
+to be synced if a regular `deptool sync` does not sync them. Combine `--all`
+with `--limit` force the listed hosts to be synced.
 
 ### `--store`
 
