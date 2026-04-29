@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use git2::Oid;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Result, StoreError};
+use crate::error::{Error, Result, StoreError};
 use crate::prim::Hostname;
 use crate::store::{Store, tree_entries};
 
@@ -452,16 +452,68 @@ pub fn diff_host(
     Ok((app_diffs, system))
 }
 
+pub enum HostFilter {
+    All,
+    Only(Vec<Hostname>),
+}
+
+impl HostFilter {
+    /// Build a filter from repeated --limit values.
+    ///
+    /// We accept both repetition (`--limit a --limit b`) and comma-separated
+    /// values (`--limit a,b`), with append semantics. Empty pieces from a
+    /// stray comma (`--limit a,`) are dropped. No `--limit` at all yields
+    /// `HostFilter::All`.
+    pub fn from_limit(args: &[String]) -> Self {
+        let hosts: Vec<Hostname> = args
+            .iter()
+            .flat_map(|s| s.split(','))
+            .filter(|s| !s.is_empty())
+            .map(Hostname::from)
+            .collect();
+        if hosts.is_empty() {
+            HostFilter::All
+        } else {
+            HostFilter::Only(hosts)
+        }
+    }
+
+    /// Drop entries from `hosts` that the filter excludes.
+    ///
+    /// Returns an error listing every name in the limit that does not
+    /// appear in `hosts`, so the operator can fix typos in one round trip
+    /// rather than rerun-and-discover.
+    pub fn apply<T>(&self, hosts: &mut BTreeMap<Hostname, T>) -> Result<()> {
+        let limit = match self {
+            HostFilter::All => return Ok(()),
+            HostFilter::Only(limit) => limit,
+        };
+        let unknown: Vec<Hostname> = limit
+            .iter()
+            .filter(|h| !hosts.contains_key(h))
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return Err(Error::UnknownHosts(unknown));
+        }
+        hosts.retain(|h, _| limit.contains(h));
+        Ok(())
+    }
+}
+
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
 /// Returns `None` if no hosts need changes. Creates a commit with the
-/// frontier of affected hosts' tracking refs as parents.
-pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<Plan>> {
+/// frontier of affected hosts' tracking refs as parents. `filter` narrows
+/// the set of hosts considered; any limit name not in the tree is reported
+/// as an error before the plan is built.
+pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Option<Plan>> {
     // Validate first so we don't do diff work or create commits from
     // invalid config.
     store.validate(tree_oid)?;
 
-    let config_hosts = store.host_trees(tree_oid)?;
+    let mut config_hosts = store.host_trees(tree_oid)?;
+    filter.apply(&mut config_hosts)?;
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 
@@ -585,8 +637,44 @@ mod tests {
         t.set_host_tracking_ref("web1", c1);
 
         let tree_oid = t.get_commit_tree_oid(c1);
-        assert!(make_plan(&t.store, tree_oid)?.is_none());
+        assert!(make_plan(&t.store, tree_oid, &HostFilter::All)?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn plan_with_limit_includes_only_listed_hosts() -> Result<()> {
+        let t = TestRepo::new();
+        let c = t.commit(&[
+            ("web1/app/conf", b"a"),
+            ("web2/app/conf", b"b"),
+            ("web3/app/conf", b"c"),
+        ]);
+        let tree_oid = t.get_commit_tree_oid(c);
+        let filter = HostFilter::Only(vec!["web1".into(), "web3".into()]);
+        let plan = make_plan(&t.store, tree_oid, &filter)?.expect("plan has changes");
+        assert_eq!(
+            plan.hosts.keys().cloned().collect::<Vec<_>>(),
+            vec![Hostname::from("web1"), Hostname::from("web3")],
+            "limit narrows the plan to exactly the listed hosts",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn plan_errors_when_limit_contains_unknown_host() {
+        let t = TestRepo::new();
+        let c = t.commit(&[("web1/app/conf", b"a")]);
+        let tree_oid = t.get_commit_tree_oid(c);
+        let filter = HostFilter::Only(vec!["nope".into(), "also_nope".into()]);
+        let result = make_plan(&t.store, tree_oid, &filter);
+        match result {
+            Err(Error::UnknownHosts(hosts)) => assert_eq!(
+                hosts,
+                vec![Hostname::from("nope"), Hostname::from("also_nope")],
+                "all unknown hosts are reported",
+            ),
+            other => panic!("expected UnknownHosts, got {other:?}"),
+        }
     }
 
     /// Plan a single-host update and return the resulting SystemDiff.

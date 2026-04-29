@@ -12,6 +12,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::prim::Hostname;
+
 /// An error from the Git store or its contents.
 #[derive(Debug)]
 pub enum StoreError {
@@ -281,6 +283,8 @@ pub enum Error {
     Json(serde_json::Error),
     /// No config tree was passed and none is recorded in the store.
     NoDefaultCluster,
+    /// Hostnames passed via --limit don't appear in the cluster.
+    UnknownHosts(Vec<Hostname>),
     /// One or more hosts failed during a deploy.
     DeployFailed(String),
 }
@@ -333,6 +337,10 @@ impl fmt::Display for Error {
                 f,
                 "no default cluster; pass a config tree directory to set one",
             ),
+            Error::UnknownHosts(hosts) => {
+                let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
+                write!(f, "unknown hosts in --limit: {}", names.join(", "))
+            }
             // TODO: Later we could also find the common ancestor `cc` between
             // what the host has (`current`) and what we try to deploy, and then
             // we can show the `git log cc..current` to point out the culprit,

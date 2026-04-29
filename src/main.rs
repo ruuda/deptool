@@ -17,6 +17,7 @@ use bpaf::{Bpaf, long};
 
 use deploy::Connection;
 use error::{ApplyError, Error, HostError, Result};
+use plan::HostFilter;
 use prim::Hostname;
 use store::Store;
 
@@ -49,6 +50,9 @@ enum Cmd {
             flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
         )]
         confirm_mode: ConfirmMode,
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         mode: ConnectMode,
         /// Directory containing the config tree to deploy. If omitted, use the
@@ -68,6 +72,9 @@ enum Cmd {
             flag(sync::SyncMode::AllHosts, sync::SyncMode::OnlyAffectedHosts)
         )]
         sync_mode: sync::SyncMode,
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         connect_mode: ConnectMode,
         /// Directory containing the config tree. If omitted, use the one
@@ -234,12 +241,13 @@ fn run_deploy(
     plan_only: bool,
     confirm_mode: ConfirmMode,
     mode: ConnectMode,
+    filter: &HostFilter,
 ) -> Result<()> {
     let repo = Store::open(&store)?;
     let dir = resolve_dir(&repo, dir)?;
     let tree_oid = repo.build_tree(&dir)?;
 
-    let plan = match plan::make_plan(&repo, tree_oid)? {
+    let plan = match plan::make_plan(&repo, tree_oid, filter)? {
         Some(plan) => plan,
         None => {
             eprintln!("All hosts are up to date.");
@@ -294,10 +302,11 @@ fn run_sync(
     dir: Option<PathBuf>,
     sync_mode: sync::SyncMode,
     connect_mode: ConnectMode,
+    filter: &HostFilter,
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let hosts = sync::select_hosts_to_sync(&store, &dir, sync_mode)?;
+    let hosts = sync::select_hosts_to_sync(&store, &dir, sync_mode, filter)?;
     if hosts.is_empty() {
         eprintln!(
             "No hosts need syncing based on the current config. Pass --all to sync every host."
@@ -325,15 +334,30 @@ fn run() -> Result<()> {
             store,
             plan_only,
             confirm_mode,
+            limit,
             mode,
             dir,
-        } => run_deploy(store, dir, plan_only, confirm_mode, mode)?,
+        } => run_deploy(
+            store,
+            dir,
+            plan_only,
+            confirm_mode,
+            mode,
+            &HostFilter::from_limit(&limit),
+        )?,
         Cmd::Sync {
             store,
             sync_mode,
+            limit,
             connect_mode,
             dir,
-        } => run_sync(store, dir, sync_mode, connect_mode)?,
+        } => run_sync(
+            store,
+            dir,
+            sync_mode,
+            connect_mode,
+            &HostFilter::from_limit(&limit),
+        )?,
         Cmd::Init { store } => {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());

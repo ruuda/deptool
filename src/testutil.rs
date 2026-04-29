@@ -147,7 +147,7 @@ impl TestRepo {
     /// Plan a deploy from a commit's tree.
     pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
         let tree_oid = self.get_commit_tree_oid(commit);
-        crate::plan::make_plan(&self.store, tree_oid)
+        crate::plan::make_plan(&self.store, tree_oid, &crate::plan::HostFilter::All)
             .expect("plan succeeds")
             .expect("plan has changes")
     }

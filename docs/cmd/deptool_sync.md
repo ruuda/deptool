@@ -1,6 +1,6 @@
 # deptool sync
 
-    deptool sync [--all] [--] [<dir>]
+    deptool sync [--all] [--limit <hosts>]... [--] [<dir>]
 
 ## Description
 
@@ -32,6 +32,10 @@ config tree in `<dir>`, and the latest known state based on the remote tracking
 refs in the store. This is the same set of hosts that `deptool deploy` would
 connect to. With `--all`, Deptool instead fetches the latest state from _all_
 hosts defined in the config tree.
+
+### `--limit <hosts>`
+
+TODO(ruuda): document `--limit`.
 
 ### `--store`
 

@@ -17,6 +17,7 @@ use parking_lot::Mutex;
 
 use crate::deploy::{self, DeployProgress, HostState, StaleHost};
 use crate::error::{HostError, Result};
+use crate::plan::HostFilter;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::setup::HostConnector;
@@ -34,14 +35,18 @@ pub enum SyncMode {
 ///
 /// Returns the hosts to contact paired with the commit our tracking refs
 /// say they should be at. `None` means we have no tracking ref for the
-/// host, so any current commit is "new" from our point of view.
+/// host, so any current commit is "new" from our point of view. `filter`
+/// narrows the candidate set; any limit name not in the tree is reported
+/// as an error before any host is contacted.
 pub fn select_hosts_to_sync(
     store: &Store,
     dir: &Path,
     mode: SyncMode,
+    filter: &HostFilter,
 ) -> Result<BTreeMap<Hostname, Option<Oid>>> {
     let tree_oid = store.build_tree(dir)?;
-    let config_hosts = store.host_trees(tree_oid)?;
+    let mut config_hosts = store.host_trees(tree_oid)?;
+    filter.apply(&mut config_hosts)?;
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 
@@ -191,7 +196,12 @@ mod tests {
         hosts: &[&TestHost],
         config: &Path,
     ) -> Result<DeployProgress> {
-        let to_sync = select_hosts_to_sync(&driver.store, config, SyncMode::OnlyAffectedHosts)?;
+        let to_sync = select_hosts_to_sync(
+            &driver.store,
+            config,
+            SyncMode::OnlyAffectedHosts,
+            &HostFilter::All,
+        )?;
         let names: Vec<&str> = to_sync.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&names);
         let connector = test_connector(hosts);
@@ -251,6 +261,25 @@ mod tests {
         assert!(
             matches!(*progress.state("web1"), HostState::UpToDate),
             "host already at tracking ref commit reaches UpToDate state",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sync_with_limit_includes_only_listed_hosts() -> Result<()> {
+        let driver = TestRepo::new();
+        let config = config_with(&[
+            ("web1/app/conf", b"a"),
+            ("web2/app/conf", b"b"),
+            ("web3/app/conf", b"c"),
+        ]);
+        let filter = HostFilter::Only(vec!["web1".into(), "web3".into()]);
+        let to_sync =
+            select_hosts_to_sync(&driver.store, config.path(), SyncMode::AllHosts, &filter)?;
+        assert_eq!(
+            to_sync.keys().cloned().collect::<Vec<_>>(),
+            vec![Hostname::from("web1"), Hostname::from("web3")],
+            "limit narrows the sync set to exactly the listed hosts",
         );
         Ok(())
     }

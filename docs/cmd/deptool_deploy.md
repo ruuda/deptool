@@ -1,6 +1,6 @@
 # deptool deploy
 
-    deptool deploy [--no-confirm] [--plan-only] [--] [<dir>]
+    deptool deploy [--no-confirm] [--plan-only] [--limit <hosts>]... [--] [<dir>]
 
 ## Description
 
@@ -29,6 +29,10 @@ plan. With this flag, it instead proceeds automatically.
 ### `--plan-only`
 
 Compute the plan and exit, do not connect to any host.
+
+### `--limit <hosts>`
+
+TODO(ruuda): document `--limit`.
 
 ### `--store`
 
