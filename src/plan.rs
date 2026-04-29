@@ -645,13 +645,12 @@ impl DraftPlan {
     pub fn commit_message(&self) -> String {
         use std::fmt::Write;
 
-        let mut out = String::new();
-        writeln!(out, "{}", self.subject()).expect("writes to String are infallible");
-        writeln!(out).expect("writes to String are infallible");
+        let mut out = self.subject();
+        out.push('\n');
         for (host, host_plan) in &self.hosts {
             match host_plan.expected_current {
-                Some(oid) => writeln!(out, "{host} (changed from {oid})"),
-                None => writeln!(out, "{host} (new host)"),
+                Some(oid) => writeln!(out, "\n{host} (changed from {oid})"),
+                None => writeln!(out, "\n{host} (new host)"),
             }
             .expect("writes to String are infallible");
             for (app, app_plan) in &host_plan.apps {
@@ -1126,6 +1125,7 @@ web1 (changed from b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f)
     add foo
     remove lego
     update nginx
+
 web2 (new host)
     add lego
 ",
