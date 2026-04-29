@@ -579,28 +579,74 @@ pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Op
     }))
 }
 
-impl DraftPlan {
-    /// Build the commit message for this draft.
-    ///
-    /// Subject is a short summary like "Deploy 4 apps on 13 hosts". The body
-    /// lists each affected host with its previous deployed commit (or "new
-    /// host"), and one line per app change (`add`, `update`, or `remove`).
-    pub fn commit_message(&self) -> String {
-        use std::fmt::Write;
+/// Maximum width for a deploy commit's subject line.
+///
+/// 52 is the conventional Git commit subject budget that lets `git log
+/// --oneline` and most code-hosting UIs show the subject without truncation.
+const SUBJECT_BUDGET: usize = 52;
 
+/// Join names with commas and a final "and": `["a","b","c"]` → `"a, b, and c"`.
+fn oxford_join(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => a.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [front @ .., last] => format!("{}, and {last}", front.join(", ")),
+    }
+}
+
+impl DraftPlan {
+    /// The subject line for the deploy commit this draft will produce.
+    ///
+    /// Tries progressively terser candidates and returns the first that fits
+    /// `SUBJECT_BUDGET`. Apps are kept in full longer than hosts -- given the
+    /// app you usually know which hosts run it, but not the other way around.
+    pub fn subject(&self) -> String {
         let unique_apps: BTreeSet<&str> = self
             .hosts
             .values()
             .flat_map(|h| h.apps.keys().map(String::as_str))
             .collect();
-        let n_apps = unique_apps.len();
-        let n_hosts = self.hosts.len();
-        let app_word = if n_apps == 1 { "app" } else { "apps" };
-        let host_word = if n_hosts == 1 { "host" } else { "hosts" };
+        let app_names: Vec<&str> = unique_apps.iter().copied().collect();
+        let host_names: Vec<&str> = self.hosts.keys().map(|h| h.0.as_str()).collect();
+        let n_apps = app_names.len();
+        let n_hosts = host_names.len();
+
+        let full_apps = oxford_join(&app_names);
+        let full_hosts = oxford_join(&host_names);
+        let count_apps = format!("{n_apps} {}", if n_apps == 1 { "app" } else { "apps" });
+        let count_hosts = format!("{n_hosts} {}", if n_hosts == 1 { "host" } else { "hosts" });
+
+        // "Update" only when every change is an update; otherwise the deploy
+        // also adds or removes apps, and "Deploy" covers all three.
+        let mut verb = "Update";
+        for app in self.hosts.values().flat_map(|h| h.apps.values()) {
+            if !matches!(app.diff, AppDiff::Update { .. }) {
+                verb = "Deploy";
+                break;
+            }
+        }
+
+        [
+            format!("{verb} {full_apps} on {full_hosts}"),
+            format!("{verb} {full_apps} on {count_hosts}"),
+            format!("{verb} {count_apps} on {count_hosts}"),
+        ]
+        .into_iter()
+        .find(|s| s.len() <= SUBJECT_BUDGET)
+        .expect("count-only candidate always fits the budget")
+    }
+
+    /// The full commit message for the deploy commit this draft will produce.
+    ///
+    /// The subject is a short summary produced by [`Self::subject`]. The body
+    /// lists each affected host with its previous deployed commit (or "new
+    /// host"), and one line per app change (`add`, `update`, or `remove`).
+    pub fn commit_message(&self) -> String {
+        use std::fmt::Write;
 
         let mut out = String::new();
-        writeln!(out, "Deploy {n_apps} {app_word} on {n_hosts} {host_word}")
-            .expect("writes to String are infallible");
+        writeln!(out, "{}", self.subject()).expect("writes to String are infallible");
         writeln!(out).expect("writes to String are infallible");
         for (host, host_plan) in &self.hosts {
             match host_plan.expected_current {
@@ -958,20 +1004,61 @@ mod tests {
     }
 
     #[test]
-    fn commit_subject_uses_singular_for_one_app_on_one_host() {
+    fn commit_subject_renders_one_app_one_host_descriptively() {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/nginx/conf", b"v1")]);
         let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy 1 app on 1 host");
+        assert_eq!(subject_of(&message), "Deploy nginx on web1");
     }
 
     #[test]
-    fn commit_subject_pluralizes_for_multiple_apps_and_hosts() {
+    fn commit_subject_oxford_joins_apps_and_hosts_when_descriptive_form_fits() {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/lego/conf", b"v1")]);
         let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy 2 apps on 2 hosts");
+        assert_eq!(subject_of(&message), "Deploy lego and nginx on web1 and web2");
     }
+
+    #[test]
+    fn commit_subject_uses_update_verb_when_all_changes_are_updates() {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
+        let message = draft(&t, c2).commit_message();
+        assert_eq!(subject_of(&message), "Update nginx on web1");
+    }
+
+    #[test]
+    fn commit_subject_collapses_hosts_first_when_descriptive_form_too_long() {
+        let t = TestRepo::new();
+        // Three long hostnames overflow the 52-col budget when listed in
+        // full, but the apps part is short, so apps stay full and hosts
+        // collapse to a count.
+        let c = t.commit(&[
+            ("verylongname01/nginx/conf", b"v1"),
+            ("verylongname02/nginx/conf", b"v1"),
+            ("verylongname03/nginx/conf", b"v1"),
+        ]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy nginx on 3 hosts");
+    }
+
+    #[test]
+    fn commit_subject_falls_back_to_count_form_when_apps_too_long() {
+        let t = TestRepo::new();
+        // Many long-named apps push past the budget even with a single
+        // host, so apps collapse too.
+        let c = t.commit(&[
+            ("web1/superlongappname01/conf", b"v1"),
+            ("web1/superlongappname02/conf", b"v1"),
+            ("web1/superlongappname03/conf", b"v1"),
+            ("web1/superlongappname04/conf", b"v1"),
+        ]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy 4 apps on 1 host");
+    }
+
 
     #[test]
     fn commit_body_shows_previous_oid_when_host_was_already_deployed() {
@@ -1033,7 +1120,7 @@ mod tests {
         assert_eq!(
             message,
             "\
-Deploy 3 apps on 2 hosts
+Deploy foo, lego, and nginx on web1 and web2
 
 web1 (changed from b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f)
     add foo
