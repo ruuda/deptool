@@ -144,6 +144,18 @@ pub struct Plan {
     pub commit: Oid,
 }
 
+/// A plan that has not yet been committed to the store.
+///
+/// Carries everything `finalize` needs to create the commit: the host data,
+/// the tree the commit will point at, and the parent oids (frontier of the
+/// affected hosts' tracking refs).
+#[derive(Debug)]
+pub struct DraftPlan {
+    pub hosts: BTreeMap<Hostname, HostPlan>,
+    pub tree_oid: Oid,
+    pub parents: Vec<Oid>,
+}
+
 /// Systemd unit lifecycle actions, derived from Git trees only.
 ///
 /// We don't query actual system state; actions are based on comparing the
@@ -503,11 +515,12 @@ impl HostFilter {
 
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
-/// Returns `None` if no hosts need changes. Creates a commit with the
-/// frontier of affected hosts' tracking refs as parents. `filter` narrows
-/// the set of hosts considered; any limit name not in the tree is reported
-/// as an error before the plan is built.
-pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Option<Plan>> {
+/// Returns `None` if no hosts need changes. The returned `DraftPlan` is not
+/// yet committed -- the caller renders a commit message and calls `finalize`
+/// to create the commit. `filter` narrows the set of hosts considered; any
+/// limit name not in the tree is reported as an error before the plan is
+/// built.
+pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Option<DraftPlan>> {
     // Validate first so we don't do diff work or create commits from
     // invalid config.
     store.validate(tree_oid)?;
@@ -559,8 +572,109 @@ pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Op
     }
 
     let parents = store.frontier(&parent_commits)?;
-    let commit = store.commit_tree(tree_oid, &parents)?;
-    Ok(Some(Plan { hosts, commit }))
+    Ok(Some(DraftPlan {
+        hosts,
+        tree_oid,
+        parents,
+    }))
+}
+
+/// Maximum width for a deploy commit's subject line.
+///
+/// 52 is the conventional Git commit subject budget that lets `git log
+/// --oneline` and most code-hosting UIs show the subject without truncation.
+const SUBJECT_BUDGET: usize = 52;
+
+/// Join names with commas and a final "and": `["a","b","c"]` → `"a, b, and c"`.
+fn oxford_join(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [a] => a.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [front @ .., last] => format!("{}, and {last}", front.join(", ")),
+    }
+}
+
+impl DraftPlan {
+    /// The subject line for the deploy commit this draft will produce.
+    ///
+    /// Tries progressively terser candidates and returns the first that fits
+    /// `SUBJECT_BUDGET`. Apps are kept in full longer than hosts -- given the
+    /// app you usually know which hosts run it, but not the other way around.
+    pub fn subject(&self) -> String {
+        let unique_apps: BTreeSet<&str> = self
+            .hosts
+            .values()
+            .flat_map(|h| h.apps.keys().map(String::as_str))
+            .collect();
+        let app_names: Vec<&str> = unique_apps.iter().copied().collect();
+        let host_names: Vec<&str> = self.hosts.keys().map(|h| h.0.as_str()).collect();
+        let n_apps = app_names.len();
+        let n_hosts = host_names.len();
+
+        let full_apps = oxford_join(&app_names);
+        let full_hosts = oxford_join(&host_names);
+        let count_apps = format!("{n_apps} {}", if n_apps == 1 { "app" } else { "apps" });
+        let count_hosts = format!("{n_hosts} {}", if n_hosts == 1 { "host" } else { "hosts" });
+
+        // "Update" only when every change is an update; otherwise the deploy
+        // also adds or removes apps, and "Deploy" covers all three.
+        let mut verb = "Update";
+        for app in self.hosts.values().flat_map(|h| h.apps.values()) {
+            if !matches!(app.diff, AppDiff::Update { .. }) {
+                verb = "Deploy";
+                break;
+            }
+        }
+
+        [
+            format!("{verb} {full_apps} on {full_hosts}"),
+            format!("{verb} {full_apps} on {count_hosts}"),
+            format!("{verb} {count_apps} on {count_hosts}"),
+        ]
+        .into_iter()
+        .find(|s| s.len() <= SUBJECT_BUDGET)
+        .expect("count-only candidate always fits the budget")
+    }
+
+    /// The full commit message for the deploy commit this draft will produce.
+    ///
+    /// The subject is a short summary produced by [`Self::subject`]. The body
+    /// lists each affected host with its previous deployed commit (or "new
+    /// host"), and one line per app change (`add`, `update`, or `remove`).
+    pub fn commit_message(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::new();
+        writeln!(out, "{}", self.subject()).expect("writes to String are infallible");
+        writeln!(out).expect("writes to String are infallible");
+        for (host, host_plan) in &self.hosts {
+            match host_plan.expected_current {
+                Some(oid) => writeln!(out, "{host} (changed from {oid})"),
+                None => writeln!(out, "{host} (new host)"),
+            }
+            .expect("writes to String are infallible");
+            for (app, app_plan) in &host_plan.apps {
+                let action = match &app_plan.diff {
+                    AppDiff::Add { .. } => "add",
+                    AppDiff::Update { .. } => "update",
+                    AppDiff::Remove { .. } => "remove",
+                };
+                writeln!(out, "    {action} {app}").expect("writes to String are infallible");
+            }
+        }
+        out
+    }
+
+    /// Create the deploy commit and produce a finalized `Plan`.
+    pub fn finalize(self, store: &Store) -> Result<Plan> {
+        let message = self.commit_message();
+        let commit = store.commit_tree(self.tree_oid, &self.parents, &message)?;
+        Ok(Plan {
+            hosts: self.hosts,
+            commit,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -876,5 +990,145 @@ mod tests {
         assert!(parents.contains(&c_a), "commit descends from web1's ref");
         assert!(parents.contains(&c_b), "commit descends from web2's ref");
         Ok(())
+    }
+
+    fn draft(t: &TestRepo, commit: Oid) -> DraftPlan {
+        let tree_oid = t.get_commit_tree_oid(commit);
+        make_plan(&t.store, tree_oid, &HostFilter::All)
+            .expect("plan succeeds")
+            .expect("plan has changes")
+    }
+
+    fn subject_of(message: &str) -> &str {
+        message.lines().next().expect("message has a subject line")
+    }
+
+    #[test]
+    fn commit_subject_renders_one_app_one_host_descriptively() {
+        let t = TestRepo::new();
+        let c = t.commit(&[("web1/nginx/conf", b"v1")]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy nginx on web1");
+    }
+
+    #[test]
+    fn commit_subject_oxford_joins_apps_and_hosts_when_descriptive_form_fits() {
+        let t = TestRepo::new();
+        let c = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/lego/conf", b"v1")]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy lego and nginx on web1 and web2");
+    }
+
+    #[test]
+    fn commit_subject_uses_update_verb_when_all_changes_are_updates() {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
+        let message = draft(&t, c2).commit_message();
+        assert_eq!(subject_of(&message), "Update nginx on web1");
+    }
+
+    #[test]
+    fn commit_subject_collapses_hosts_first_when_descriptive_form_too_long() {
+        let t = TestRepo::new();
+        // Three long hostnames overflow the 52-col budget when listed in
+        // full, but the apps part is short, so apps stay full and hosts
+        // collapse to a count.
+        let c = t.commit(&[
+            ("verylongname01/nginx/conf", b"v1"),
+            ("verylongname02/nginx/conf", b"v1"),
+            ("verylongname03/nginx/conf", b"v1"),
+        ]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy nginx on 3 hosts");
+    }
+
+    #[test]
+    fn commit_subject_falls_back_to_count_form_when_apps_too_long() {
+        let t = TestRepo::new();
+        // Many long-named apps push past the budget even with a single
+        // host, so apps collapse too.
+        let c = t.commit(&[
+            ("web1/superlongappname01/conf", b"v1"),
+            ("web1/superlongappname02/conf", b"v1"),
+            ("web1/superlongappname03/conf", b"v1"),
+            ("web1/superlongappname04/conf", b"v1"),
+        ]);
+        let message = draft(&t, c).commit_message();
+        assert_eq!(subject_of(&message), "Deploy 4 apps on 1 host");
+    }
+
+
+    #[test]
+    fn commit_body_shows_previous_oid_when_host_was_already_deployed() {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
+        let message = draft(&t, c2).commit_message();
+        let expected = format!("web1 (changed from {c1})");
+        assert!(
+            message.contains(&expected),
+            "message must contain {expected:?}, got:\n{message}",
+        );
+    }
+
+    #[test]
+    fn commit_body_marks_new_host_when_no_previous_deploy() {
+        let t = TestRepo::new();
+        let c = t.commit(&[("web1/nginx/conf", b"v1")]);
+        let message = draft(&t, c).commit_message();
+        assert!(
+            message.contains("web1 (new host)"),
+            "message must mark web1 as new host, got:\n{message}",
+        );
+    }
+
+    #[test]
+    fn commit_body_uses_distinct_verbs_for_add_update_remove() {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/lego/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        let c2 = t.commit(&[("web1/nginx/conf", b"v2"), ("web1/foo/conf", b"v1")]);
+        let message = draft(&t, c2).commit_message();
+        assert!(message.contains("    add foo"), "got:\n{message}");
+        assert!(message.contains("    update nginx"), "got:\n{message}");
+        assert!(message.contains("    remove lego"), "got:\n{message}");
+    }
+
+    #[test]
+    fn commit_message_renders_as_expected_for_mixed_scenario() {
+        let t = TestRepo::new();
+        // web1 was already deployed; web2 is brand new.
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/lego/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+        // Target: web1 updates nginx, removes lego, adds foo;
+        // web2 is a new host with one app.
+        let c2 = t.commit(&[
+            ("web1/nginx/conf", b"v2"),
+            ("web1/foo/conf", b"v1"),
+            ("web2/lego/conf", b"v1"),
+        ]);
+        // Commit oids depend on timestamps and are not stable across test
+        // runs. Substitute a fixed oid so the assertion is deterministic and
+        // the reader sees a realistic message.
+        let message = draft(&t, c2).commit_message().replace(
+            &c1.to_string(),
+            "b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f",
+        );
+        assert_eq!(
+            message,
+            "\
+Deploy foo, lego, and nginx on web1 and web2
+
+web1 (changed from b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f)
+    add foo
+    remove lego
+    update nginx
+web2 (new host)
+    add lego
+",
+        );
     }
 }

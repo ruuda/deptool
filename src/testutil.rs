@@ -82,7 +82,7 @@ pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
         .map(|r| r.peel_to_commit().expect("main points to a commit").id())
         .into_iter()
         .collect();
-    let oid = store.commit_tree(tree_oid, &parent)?;
+    let oid = store.commit_tree(tree_oid, &parent, "test commit")?;
     store.set_ref("refs/heads/main", oid, RefUpdate::SetMain)?;
     Ok(oid)
 }
@@ -147,9 +147,10 @@ impl TestRepo {
     /// Plan a deploy from a commit's tree.
     pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
         let tree_oid = self.get_commit_tree_oid(commit);
-        crate::plan::make_plan(&self.store, tree_oid, &crate::plan::HostFilter::All)
+        let draft = crate::plan::make_plan(&self.store, tree_oid, &crate::plan::HostFilter::All)
             .expect("plan succeeds")
-            .expect("plan has changes")
+            .expect("plan has changes");
+        draft.finalize(&self.store).expect("finalize succeeds")
     }
 
     /// Get the tree OID for a commit.

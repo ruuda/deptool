@@ -248,7 +248,7 @@ fn run_deploy(
     let tree_oid = repo.build_tree(&dir)?;
 
     let plan = match plan::make_plan(&repo, tree_oid, filter)? {
-        Some(plan) => plan,
+        Some(draft) => draft.finalize(&repo)?,
         None => {
             eprintln!("All hosts are up to date.");
             return Ok(());

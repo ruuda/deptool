@@ -130,10 +130,10 @@ impl Store {
         }
     }
 
-    /// Create a commit with the given tree and parent commits.
+    /// Create a commit with the given tree, parent commits, and message.
     ///
     /// Does not update any ref -- the caller decides where to point.
-    pub fn commit_tree(&self, tree_oid: Oid, parent_oids: &[Oid]) -> Result<Oid> {
+    pub fn commit_tree(&self, tree_oid: Oid, parent_oids: &[Oid], message: &str) -> Result<Oid> {
         let tree = self.repo.find_tree(tree_oid)?;
         let author_sig = match self.repo.signature() {
             Ok(sig) => sig,
@@ -145,14 +145,9 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?;
         let parent_refs: Vec<&Commit> = parents.iter().collect();
 
-        Ok(self.repo.commit(
-            None,
-            &author_sig,
-            &author_sig,
-            "Update config",
-            &tree,
-            &parent_refs,
-        )?)
+        Ok(self
+            .repo
+            .commit(None, &author_sig, &author_sig, message, &tree, &parent_refs)?)
     }
 
     /// Map hostnames to their subtree OIDs from a config tree.
@@ -615,7 +610,7 @@ mod tests {
         let tree_oid = t.get_commit_tree_oid(c2);
         let c3 = t
             .store
-            .commit_tree(tree_oid, &[c1, c2])
+            .commit_tree(tree_oid, &[c1, c2], "test commit")
             .expect("commit succeeds");
 
         let commit = t.store.repo.find_commit(c3).expect("commit exists");
