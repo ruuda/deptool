@@ -81,11 +81,7 @@ fn fmt_slot(d: Option<Duration>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 /// One thread per host; hosts run independently. RTT covers the agent
 /// session's request/response round-trip; SSH connection setup is in
 /// `try_connect` and is not included.
-pub fn run_ping(
-    hosts: &[Hostname],
-    connector: &dyn HostConnector,
-    progress: &DeployProgress,
-) {
+pub fn run_ping(hosts: &[Hostname], connector: &dyn HostConnector, progress: &DeployProgress) {
     std::thread::scope(|s| {
         for host in hosts {
             s.spawn(move || match ping_host(host, connector, progress) {
@@ -123,9 +119,19 @@ fn ping_host(
                 )));
             }
         }
-        progress.update(host, HostState::Pinging { stats: PingStats::compute(&samples) });
+        progress.update(
+            host,
+            HostState::Pinging {
+                stats: PingStats::compute(&samples),
+            },
+        );
     }
-    progress.update(host, HostState::Pinged { stats: PingStats::compute(&samples) });
+    progress.update(
+        host,
+        HostState::Pinged {
+            stats: PingStats::compute(&samples),
+        },
+    );
     Ok(())
 }
 
@@ -163,9 +169,9 @@ mod tests {
     fn ping_stats_display_aligns_three_digits_and_pending_p95() {
         let stats = PingStats {
             count: 12,
-            min: Some(Duration::from_micros(800)),     // sub-1: "  0.8"
+            min: Some(Duration::from_micros(800)), // sub-1: "  0.8"
             p50: Some(Duration::from_micros(127_500)), // 3-digit: "127.5"
-            p95: None,                                 // pending: "   --"
+            p95: None,                             // pending: "   --"
         };
         assert_eq!(
             stats.to_string(),

@@ -45,9 +45,13 @@ pub enum HostState {
     /// the cluster's view of this host moved.
     Updated,
     /// Ping: run in progress; live-updated stats.
-    Pinging { stats: PingStats },
+    Pinging {
+        stats: PingStats,
+    },
     /// Ping: run finished; final stats.
-    Pinged { stats: PingStats },
+    Pinged {
+        stats: PingStats,
+    },
     Stale,
     LockBusy(Option<String>),
     RolledBack(ApplyError),

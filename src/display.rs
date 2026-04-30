@@ -59,7 +59,9 @@ fn sort_for_display<'a>(
     entries.sort_by_key(|(_, state)| match state {
         HostState::Pinged { stats } => (
             0,
-            stats.p50.expect("Pinged is only emitted after at least one sample"),
+            stats
+                .p50
+                .expect("Pinged is only emitted after at least one sample"),
         ),
         _ => (1, Duration::ZERO),
     });
@@ -868,10 +870,20 @@ web1
             stats: PingStats::compute(&[Duration::from_millis(ms); 5]),
         };
         let states = BTreeMap::from([
-            (Hostname::from("z-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
+            (
+                Hostname::from("z-host"),
+                HostState::Pinging {
+                    stats: PingStats::compute(&[]),
+                },
+            ),
             (Hostname::from("slow"), pinged(50)),
             (Hostname::from("fast"), pinged(10)),
-            (Hostname::from("a-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
+            (
+                Hostname::from("a-host"),
+                HostState::Pinging {
+                    stats: PingStats::compute(&[]),
+                },
+            ),
         ]);
         let order: Vec<&str> = sort_for_display(&states)
             .iter()
