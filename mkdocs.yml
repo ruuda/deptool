@@ -30,3 +30,4 @@ nav:
       - "deptool init": "cmd/deptool_init.md"
       - "deptool deploy": "cmd/deptool_deploy.md"
       - "deptool sync": "cmd/deptool_sync.md"
+      - "deptool ping": "cmd/deptool_ping.md"

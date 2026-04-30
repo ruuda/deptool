@@ -16,6 +16,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
+    /// Round-trip probe. The agent answers with `Pong` and does nothing else.
+    /// Used by `deptool ping` to measure SSH-session latency.
+    Ping,
     /// Acquire the deploy lock and verify the host's current commit.
     Lock {
         #[serde(with = "crate::prim::ser::oid_option")]
@@ -56,6 +59,8 @@ pub struct Hello {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Message {
+    /// Reply to `Ping`.
+    Pong,
     Locked,
     PackReceived,
     LockStale {

@@ -246,6 +246,7 @@ impl AgentSession {
 
     pub fn handle_request(&mut self, request: Request, emit_message: &mut impl FnMut(Message)) {
         match request {
+            Request::Ping => emit_message(Message::Pong),
             Request::Lock {
                 expected_current_commit,
                 operator,
@@ -511,6 +512,12 @@ fn format_opt_oid(oid: Option<Oid>) -> String {
 mod tests {
     use super::*;
     use crate::testutil::{TempDir, TestHost, commit_files};
+
+    #[test]
+    fn ping_returns_pong() {
+        let mut host = TestHost::new("web1");
+        assert_eq!(host.interact(Request::Ping), vec![Message::Pong]);
+    }
 
     #[test]
     fn lock_succeeds_on_fresh_host_with_no_expected_current() {

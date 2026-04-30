@@ -55,8 +55,8 @@ enum Cmd {
         limit: Vec<String>,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         mode: ConnectMode,
-        /// Directory containing the config tree to deploy. If omitted, use the
-        /// one recorded by the most recent deploy or sync.
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
@@ -77,8 +77,24 @@ enum Cmd {
         limit: Vec<String>,
         #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
         connect_mode: ConnectMode,
-        /// Directory containing the config tree. If omitted, use the one
-        /// recorded by the most recent deploy or sync.
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
+    /// Measure round-trip latency to each host in the cluster.
+    #[bpaf(command)]
+    Ping {
+        /// Path to the local store (default: ./.deptool).
+        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
+        store: PathBuf,
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
+        #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
+        connect_mode: ConnectMode,
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
@@ -297,6 +313,26 @@ fn run_deploy(
     result
 }
 
+fn run_ping(
+    store: PathBuf,
+    dir: Option<PathBuf>,
+    connect_mode: ConnectMode,
+    filter: &HostFilter,
+) -> Result<()> {
+    let store = Store::open(&store)?;
+    let dir = resolve_dir(&store, dir)?;
+    let hosts = ping::select_hosts_to_ping(&store, &dir, filter)?;
+    if hosts.is_empty() {
+        eprintln!("No hosts to ping.");
+        return Ok(());
+    }
+    let connector = make_connector(connect_mode)?;
+    let observer = display::StatusPrinter::new(display::UseColor::from_env());
+    let progress = deploy::DeployProgress::new(hosts.clone(), Box::new(observer));
+    ping::run_ping(&hosts, &*connector, &progress);
+    Ok(())
+}
+
 fn run_sync(
     store: PathBuf,
     dir: Option<PathBuf>,
@@ -358,6 +394,12 @@ fn run() -> Result<()> {
             connect_mode,
             &HostFilter::from_limit(&limit),
         )?,
+        Cmd::Ping {
+            store,
+            limit,
+            connect_mode,
+            dir,
+        } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
         Cmd::Init { store } => {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());

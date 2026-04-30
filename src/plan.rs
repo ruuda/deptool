@@ -1015,7 +1015,10 @@ mod tests {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/lego/conf", b"v1")]);
         let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy lego and nginx on web1 and web2");
+        assert_eq!(
+            subject_of(&message),
+            "Deploy lego and nginx on web1 and web2"
+        );
     }
 
     #[test]
@@ -1057,7 +1060,6 @@ mod tests {
         let message = draft(&t, c).commit_message();
         assert_eq!(subject_of(&message), "Deploy 4 apps on 1 host");
     }
-
 
     #[test]
     fn commit_body_shows_previous_oid_when_host_was_already_deployed() {
@@ -1112,10 +1114,9 @@ mod tests {
         // Commit oids depend on timestamps and are not stable across test
         // runs. Substitute a fixed oid so the assertion is deterministic and
         // the reader sees a realistic message.
-        let message = draft(&t, c2).commit_message().replace(
-            &c1.to_string(),
-            "b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f",
-        );
+        let message = draft(&t, c2)
+            .commit_message()
+            .replace(&c1.to_string(), "b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f");
         assert_eq!(
             message,
             "\
