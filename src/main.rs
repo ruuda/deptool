@@ -332,13 +332,7 @@ fn run_ping(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.clone(), Box::new(observer));
-    ping::run_ping(
-        ping::PING_COUNT,
-        ping::PING_PERIOD,
-        &hosts,
-        &*connector,
-        &progress,
-    );
+    ping::run_ping(&hosts, &*connector, &progress);
     Ok(())
 }
 

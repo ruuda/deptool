@@ -16,75 +16,50 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::ping::{self, PingStats};
 use crate::plan::{AppDiff, Plan, SymlinkChanges, SysusersChanges, UnitChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
 
-impl HostState {
-    /// Render the state for display. `ping_x_scale` sets the X-axis upper
-    /// bound for ping sparklines and is ignored for non-ping states. Pass
-    /// `Duration::ZERO` (e.g. via `Display`) to render ping with a baseline
-    /// sparkline only.
-    pub fn render(&self, ping_x_scale: Duration) -> String {
-        match self {
-            HostState::Pending => "pending".to_string(),
-            HostState::Connecting => "connecting".to_string(),
-            HostState::InstallingAgent => "installing agent".to_string(),
-            HostState::Connected => "connected".to_string(),
-            HostState::Locked => "locked".to_string(),
-            HostState::Pushing => "pushing".to_string(),
-            HostState::Applying => "applying".to_string(),
-            HostState::RollingBack => "rolling back".to_string(),
-            HostState::Done => "done".to_string(),
-            HostState::UpToDate => "up to date".to_string(),
-            HostState::Updated => "updated".to_string(),
-            HostState::Pinging { samples } | HostState::Pinged { samples } => {
-                ping::render(samples, ping_x_scale)
-            }
-            HostState::Stale => "stale".to_string(),
-            HostState::LockBusy(Some(who)) => format!("locked by {who}"),
-            HostState::LockBusy(None) => "locked by another deploy".to_string(),
-            HostState::RolledBack(err) => format!("rolled back after failure: {err}"),
-            HostState::Failed(err) => format!("failed: {err}"),
-        }
-    }
-}
-
 impl std::fmt::Display for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.render(Duration::ZERO))
-    }
-}
-
-/// Compute the global X-axis upper bound for ping sparklines: the largest
-/// p95 across all hosts, times 1.1 so the typical tail mass sits comfortably
-/// inside the visible range. Returns `Duration::ZERO` until at least one
-/// host has reached the p95 threshold; sparklines render at baseline until
-/// then.
-pub fn ping_scale(states: &BTreeMap<Hostname, HostState>) -> Duration {
-    let mut max_p95 = Duration::ZERO;
-    for state in states.values() {
-        if let HostState::Pinging { samples } | HostState::Pinged { samples } = state {
-            if let Some(p95) = PingStats::compute(samples).p95 {
-                max_p95 = max_p95.max(p95);
-            }
+        match self {
+            HostState::Pending => f.write_str("pending"),
+            HostState::Connecting => f.write_str("connecting"),
+            HostState::InstallingAgent => f.write_str("installing agent"),
+            HostState::Connected => f.write_str("connected"),
+            HostState::Locked => f.write_str("locked"),
+            HostState::Pushing => f.write_str("pushing"),
+            HostState::Applying => f.write_str("applying"),
+            HostState::RollingBack => f.write_str("rolling back"),
+            HostState::Done => f.write_str("done"),
+            HostState::UpToDate => f.write_str("up to date"),
+            HostState::Updated => f.write_str("updated"),
+            HostState::Pinging { stats } | HostState::Pinged { stats } => stats.fmt(f),
+            HostState::Stale => f.write_str("stale"),
+            HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
+            HostState::LockBusy(None) => f.write_str("locked by another deploy"),
+            HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
+            HostState::Failed(err) => write!(f, "failed: {err}"),
         }
     }
-    max_p95.mul_f64(1.1)
 }
 
 /// Order hosts for display: completed pings first (sorted by ascending p50),
-/// then everything else in the input order. Sort is stable, so within each
-/// group hosts keep their alphabetical order from the `BTreeMap`.
+/// then everything else in the input order. The sort is stable, so within
+/// each group hosts keep their alphabetical order from the `BTreeMap`.
+///
+/// Only `deptool ping` ever produces `Pinged` states, so for every other
+/// command this collapses to the identity sort and the result is the same
+/// alphabetical iteration we'd get from the map directly. Cheap enough to
+/// run on every render unconditionally rather than branch on command.
 fn sort_for_display<'a>(
     states: &'a BTreeMap<Hostname, HostState>,
 ) -> Vec<(&'a Hostname, &'a HostState)> {
     let mut entries: Vec<_> = states.iter().collect();
     entries.sort_by_key(|(_, state)| match state {
-        HostState::Pinged { samples } => (
+        HostState::Pinged { stats } => (
             0,
-            PingStats::compute(samples).p50.unwrap_or(Duration::MAX),
+            stats.p50.expect("Pinged is only emitted after at least one sample"),
         ),
         _ => (1, Duration::ZERO),
     });
@@ -432,16 +407,12 @@ impl StatusPrinter {
             writeln!(out)?;
         }
         let name_width = states.keys().map(|h| h.0.len()).max().unwrap_or(0);
-        let ping_x_scale = ping_scale(states);
         let mut max_width = 0_usize;
         for (host, state) in sort_for_display(states) {
             let label = format!("{host}:");
-            let text = state.render(ping_x_scale);
-            let state_str = self.colorize(state, &text);
-            // Visible width: "  " + label (padded) + " " + state text. The
-            // sparkline contains multi-byte UTF-8, so count chars (one cell
-            // each for our charset), not bytes.
-            let visible_len = 2 + name_width + 1 + 1 + text.chars().count();
+            let state_str = self.color_state(state);
+            // Visible width: "  " + label (padded) + " " + state text.
+            let visible_len = 2 + name_width + 1 + 1 + state.to_string().len();
             let pad = self.prev_width.saturating_sub(visible_len);
             writeln!(
                 out,
@@ -457,17 +428,17 @@ impl StatusPrinter {
         Ok(())
     }
 
-    fn colorize(&self, state: &HostState, text: &str) -> String {
+    fn color_state(&self, state: &HostState) -> String {
         match state {
             HostState::Done
             | HostState::UpToDate
             | HostState::Updated
-            | HostState::Pinged { .. } => self.color.green(text),
+            | HostState::Pinged { .. } => self.color.green(&state.to_string()),
             HostState::Failed(_)
             | HostState::RolledBack(_)
             | HostState::Stale
-            | HostState::LockBusy(_) => self.color.red(text),
-            _ => self.color.yellow(text),
+            | HostState::LockBusy(_) => self.color.red(&state.to_string()),
+            _ => self.color.yellow(&state.to_string()),
         }
     }
 
@@ -515,6 +486,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
+    use crate::ping::PingStats;
     use crate::plan::{AppDiff, Plan};
     use crate::prim::Hostname;
     use crate::testutil::TestRepo;
@@ -893,13 +865,13 @@ web1
         // Pinged group first (sorted by p50: smaller first), then the others
         // in alphabetical order from the BTreeMap.
         let pinged = |ms: u64| HostState::Pinged {
-            samples: vec![Duration::from_millis(ms); 5],
+            stats: PingStats::compute(&[Duration::from_millis(ms); 5]),
         };
         let states = BTreeMap::from([
-            (Hostname::from("z-host"), HostState::Pinging { samples: vec![] }),
+            (Hostname::from("z-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
             (Hostname::from("slow"), pinged(50)),
             (Hostname::from("fast"), pinged(10)),
-            (Hostname::from("a-host"), HostState::Pinging { samples: vec![] }),
+            (Hostname::from("a-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
         ]);
         let order: Vec<&str> = sort_for_display(&states)
             .iter()

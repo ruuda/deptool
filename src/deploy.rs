@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::Duration;
+
+use crate::ping::PingStats;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -43,10 +44,10 @@ pub enum HostState {
     /// Sync changed the tracking ref. Like `Done`, but tells the operator
     /// the cluster's view of this host moved.
     Updated,
-    /// Ping: run in progress; live-updated samples.
-    Pinging { samples: Vec<Duration> },
-    /// Ping: run finished; final samples.
-    Pinged { samples: Vec<Duration> },
+    /// Ping: run in progress; live-updated stats.
+    Pinging { stats: PingStats },
+    /// Ping: run finished; final stats.
+    Pinged { stats: PingStats },
     Stale,
     LockBusy(Option<String>),
     RolledBack(ApplyError),
