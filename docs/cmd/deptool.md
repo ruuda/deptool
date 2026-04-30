@@ -6,10 +6,19 @@
 
 The `deptool` executable, see the commands for more details. The commands are:
 
- * [init](deptool_init.md) — Create an empty store in the current directory.
- * [deploy](deptool_deploy.md) — Deploy a config tree to the cluster.
- * [sync](deptool_sync.md) — Fetch the latest cluster state.
- * [ping](deptool_ping.md) — Measure round-trip latency to each host.
+<dl>
+ <dt><a href="../deptool_init/"><strong>init</strong></a></dt>
+ <dd>Create an empty store in the current directory.</dd>
+
+ <dt><a href="../deptool_deploy/"><strong>deploy</strong></a></dt>
+ <dd>Deploy a config tree to the cluster.</dd>
+
+ <dt><a href="../deptool_sync/"><strong>sync</strong></a></dt>
+ <dd>Fetch the latest cluster state.</dd>
+
+ <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
+ <dd>Measure round-trip latency to each host.</dd>
+</dl>
 
 ## Environment
 
