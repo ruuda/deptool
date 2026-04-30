@@ -59,19 +59,20 @@ impl PingStats {
 impl fmt::Display for PingStats {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt_slot(self.min, f)?;
-        f.write_str(" / ")?;
+        f.write_str(" | ")?;
         fmt_slot(self.p50, f)?;
-        f.write_str(" / ")?;
+        f.write_str(" | ")?;
         fmt_slot(self.p95, f)?;
-        write!(f, " ms rtt (min/p50/p95, n={})", self.count)
+        write!(f, "  (min/p50/p95 rtt, n={})", self.count)
     }
 }
 
-/// Width 5 keeps three-digit ms aligned; `--` placeholder same width.
+/// Width 5 keeps three-digit ms aligned; the `--` placeholder right-aligns
+/// to the same width via the same format spec.
 fn fmt_slot(d: Option<Duration>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match d {
-        Some(d) => write!(f, "{:>5.1}", d.as_secs_f64() * 1000.0),
-        None => f.write_str("   --"),
+        Some(d) => write!(f, "{:>5.1} ms", d.as_secs_f64() * 1000.0),
+        None => write!(f, "{:>5} ms", "--"),
     }
 }
 
@@ -184,7 +185,7 @@ mod tests {
         };
         assert_eq!(
             stats.to_string(),
-            "  0.8 / 127.5 /    -- ms rtt (min/p50/p95, n=12)",
+            "  0.8 ms | 127.5 ms |    -- ms  (min/p50/p95 rtt, n=12)",
         );
     }
 }
