@@ -30,6 +30,7 @@
 ## Working through a task
 
  - Keep testability in mind from the start. Functional approaches (pure core, IO at the edge) are often more feasible to test than imperative code.
+ - Tests must not call `sleep`, `Instant::now`, `SystemTime::now`, or perform real I/O -- even with zero durations, timing calls couple test speed and stability to the scheduler, and "fast" tests on a developer laptop become flaky on a slow CI box. When code measures time or does IO, push those calls up to the caller so tests can pass deterministic substitutes (or test the pure data-in/data-out layer separately).
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
  - For large tasks, run `git diff` at the end and review your own work. It is very unlikely that you got a perfect version on your very first iteration, usually there are substantial things to change.
@@ -106,6 +107,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Optimize for readability.
  - Aim for self-documenting code, use comments when the purpose or workings of a piece of code is not obvious.
  - Comments explain *why*, not *what*. Don't state the obvious.
+ - Don't write apologetic or defensive comments. If a choice is the obvious one in context, just make it; don't justify it against unchosen alternatives. "X doesn't need Y, we use Z so that W" suggests Z is suspect when it shouldn't be.
  - Simpler is more readable than complex.
  - Linear is more readable than branchy.
  - Name things after what they are and do, not after their purpose. Names must be clear without consulting their definition.
@@ -129,6 +131,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Use `.expect()` for logically impossible states and programming errors. Reserve `Result`/`Error` for expected runtime failures.
  - Don't annotate closure types when the compiler can infer them.
  - Use `.to_str().ok_or()` not `.to_string_lossy()` when loss would break the program.
+ - For time values use `Duration` -- the type carries the unit, callers don't have to remember if a `u64` is ms or us. For elapsed-time measurement use `Instant::now()` (monotonic), not `SystemTime::now()` (wall clock, jumps around on adjustments).
  - Newtypes go all the way down. If a callee unwraps a newtype, it should accept the newtype instead.
  - Use named struct fields, not tuples, when fields have the same type. Named fields prevent silent swaps.
  - Don't reuse error variants for unrelated failures -- the Display output lies. Read the doc comment before reusing a variant.
@@ -139,6 +142,7 @@ Post-generation checklist (run after writing code, before presenting):
 ## User-facing output (logs, plan display, errors)
 
  - Write for someone who has never seen the source code and does not know the tool's internals.
+ - User-facing text describes the behavior the user observes, not the tool's internal mechanism. "Defaults to the previously used directory" is what they see; "uses the one recorded by the most recent deploy or sync" enumerates internals that may change. Phrase prose so it stays correct as the implementation evolves.
  - Prefer words over symbols. Symbols can be ambiguous or invisible in certain fonts.
  - Log near the mutation, not near the planning. If the plan and the execution are separate phases, log during execution.
  - One event, one message. Don't have different strings for the log and the protocol for the same error.
