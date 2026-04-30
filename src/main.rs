@@ -321,7 +321,10 @@ fn run_ping(
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let hosts = ping::select_hosts_to_ping(&store, &dir, filter)?;
+    let tree_oid = store.build_tree(&dir)?;
+    let mut hosts_map = store.host_trees(tree_oid)?;
+    filter.apply(&mut hosts_map)?;
+    let hosts: Vec<_> = hosts_map.into_keys().collect();
     if hosts.is_empty() {
         eprintln!("No hosts to ping.");
         return Ok(());
@@ -329,7 +332,13 @@ fn run_ping(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.clone(), Box::new(observer));
-    ping::run_ping(&hosts, &*connector, &progress);
+    ping::run_ping(
+        ping::PING_COUNT,
+        ping::PING_PERIOD,
+        &hosts,
+        &*connector,
+        &progress,
+    );
     Ok(())
 }
 

@@ -11,7 +11,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::time::Duration;
+
+use crate::ping::PingStats;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -43,11 +44,13 @@ pub enum HostState {
     /// Sync changed the tracking ref. Like `Done`, but tells the operator
     /// the cluster's view of this host moved.
     Updated,
-    /// Ping: round-trip in flight.
-    Pinging,
-    /// Ping: round-trip completed.
+    /// Ping: run in progress; live-updated stats.
+    Pinging {
+        stats: PingStats,
+    },
+    /// Ping: run finished; final stats.
     Pinged {
-        rtt: Duration,
+        stats: PingStats,
     },
     Stale,
     LockBusy(Option<String>),
@@ -81,8 +84,7 @@ impl std::fmt::Display for HostState {
             HostState::Done => f.write_str("done"),
             HostState::UpToDate => f.write_str("up to date"),
             HostState::Updated => f.write_str("updated"),
-            HostState::Pinging => f.write_str("pinging"),
-            HostState::Pinged { rtt } => write!(f, "{:.1} ms", rtt.as_secs_f64() * 1000.0),
+            HostState::Pinging { stats } | HostState::Pinged { stats } => stats.fmt(f),
             HostState::Stale => f.write_str("stale"),
             HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
             HostState::LockBusy(None) => f.write_str("locked by another deploy"),
