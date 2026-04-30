@@ -12,6 +12,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
+use crate::ping::PingStats;
+
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
@@ -42,6 +44,10 @@ pub enum HostState {
     /// Sync changed the tracking ref. Like `Done`, but tells the operator
     /// the cluster's view of this host moved.
     Updated,
+    /// Ping: run in progress; live-updated stats.
+    Pinging { stats: PingStats },
+    /// Ping: run finished; final stats.
+    Pinged { stats: PingStats },
     Stale,
     LockBusy(Option<String>),
     RolledBack(ApplyError),
@@ -57,29 +63,6 @@ impl HostState {
                 | HostState::RolledBack(_)
                 | HostState::Failed(_)
         )
-    }
-}
-
-impl std::fmt::Display for HostState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HostState::Pending => f.write_str("pending"),
-            HostState::Connecting => f.write_str("connecting"),
-            HostState::InstallingAgent => f.write_str("installing agent"),
-            HostState::Connected => f.write_str("connected"),
-            HostState::Locked => f.write_str("locked"),
-            HostState::Pushing => f.write_str("pushing"),
-            HostState::Applying => f.write_str("applying"),
-            HostState::RollingBack => f.write_str("rolling back"),
-            HostState::Done => f.write_str("done"),
-            HostState::UpToDate => f.write_str("up to date"),
-            HostState::Updated => f.write_str("updated"),
-            HostState::Stale => f.write_str("stale"),
-            HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
-            HostState::LockBusy(None) => f.write_str("locked by another deploy"),
-            HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
-            HostState::Failed(err) => write!(f, "failed: {err}"),
-        }
     }
 }
 

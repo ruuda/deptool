@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use git2::{Delta, Oid, Repository};
 
@@ -18,6 +19,52 @@ use crate::error::Result;
 use crate::plan::{AppDiff, Plan, SymlinkChanges, SysusersChanges, UnitChanges};
 use crate::prim::Hostname;
 use crate::store::Store;
+
+impl std::fmt::Display for HostState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HostState::Pending => f.write_str("pending"),
+            HostState::Connecting => f.write_str("connecting"),
+            HostState::InstallingAgent => f.write_str("installing agent"),
+            HostState::Connected => f.write_str("connected"),
+            HostState::Locked => f.write_str("locked"),
+            HostState::Pushing => f.write_str("pushing"),
+            HostState::Applying => f.write_str("applying"),
+            HostState::RollingBack => f.write_str("rolling back"),
+            HostState::Done => f.write_str("done"),
+            HostState::UpToDate => f.write_str("up to date"),
+            HostState::Updated => f.write_str("updated"),
+            HostState::Pinging { stats } | HostState::Pinged { stats } => stats.fmt(f),
+            HostState::Stale => f.write_str("stale"),
+            HostState::LockBusy(Some(who)) => write!(f, "locked by {who}"),
+            HostState::LockBusy(None) => f.write_str("locked by another deploy"),
+            HostState::RolledBack(err) => write!(f, "rolled back after failure: {err}"),
+            HostState::Failed(err) => write!(f, "failed: {err}"),
+        }
+    }
+}
+
+/// Order hosts for display: completed pings first (sorted by ascending p50),
+/// then everything else in the input order. The sort is stable, so within
+/// each group hosts keep their alphabetical order from the `BTreeMap`.
+///
+/// Only `deptool ping` ever produces `Pinged` states, so for every other
+/// command this collapses to the identity sort and the result is the same
+/// alphabetical iteration we'd get from the map directly. Cheap enough to
+/// run on every render unconditionally rather than branch on command.
+fn sort_for_display<'a>(
+    states: &'a BTreeMap<Hostname, HostState>,
+) -> Vec<(&'a Hostname, &'a HostState)> {
+    let mut entries: Vec<_> = states.iter().collect();
+    entries.sort_by_key(|(_, state)| match state {
+        HostState::Pinged { stats } => (
+            0,
+            stats.p50.expect("Pinged is only emitted after at least one sample"),
+        ),
+        _ => (1, Duration::ZERO),
+    });
+    entries
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub enum UseColor {
@@ -361,7 +408,7 @@ impl StatusPrinter {
         }
         let name_width = states.keys().map(|h| h.0.len()).max().unwrap_or(0);
         let mut max_width = 0_usize;
-        for (host, state) in states {
+        for (host, state) in sort_for_display(states) {
             let label = format!("{host}:");
             let state_str = self.color_state(state);
             // Visible width: "  " + label (padded) + " " + state text.
@@ -383,9 +430,10 @@ impl StatusPrinter {
 
     fn color_state(&self, state: &HostState) -> String {
         match state {
-            HostState::Done | HostState::UpToDate | HostState::Updated => {
-                self.color.green(&state.to_string())
-            }
+            HostState::Done
+            | HostState::UpToDate
+            | HostState::Updated
+            | HostState::Pinged { .. } => self.color.green(&state.to_string()),
             HostState::Failed(_)
             | HostState::RolledBack(_)
             | HostState::Stale
@@ -438,6 +486,7 @@ mod tests {
 
     use super::*;
     use crate::error::Result;
+    use crate::ping::PingStats;
     use crate::plan::{AppDiff, Plan};
     use crate::prim::Hostname;
     use crate::testutil::TestRepo;
@@ -808,6 +857,27 @@ web1
 ",
         );
         Ok(())
+    }
+
+    #[test]
+    fn sort_for_display_orders_pinged_by_p50_then_others_alphabetical() {
+        // Two completed hosts (with different p50s) and two still pinging.
+        // Pinged group first (sorted by p50: smaller first), then the others
+        // in alphabetical order from the BTreeMap.
+        let pinged = |ms: u64| HostState::Pinged {
+            stats: PingStats::compute(&[Duration::from_millis(ms); 5]),
+        };
+        let states = BTreeMap::from([
+            (Hostname::from("z-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
+            (Hostname::from("slow"), pinged(50)),
+            (Hostname::from("fast"), pinged(10)),
+            (Hostname::from("a-host"), HostState::Pinging { stats: PingStats::compute(&[]) }),
+        ]);
+        let order: Vec<&str> = sort_for_display(&states)
+            .iter()
+            .map(|(h, _)| h.0.as_str())
+            .collect();
+        assert_eq!(order, vec!["fast", "slow", "a-host", "z-host"]);
     }
 
     #[test]
