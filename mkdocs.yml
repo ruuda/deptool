@@ -1,6 +1,6 @@
 site_name: Deptool
 site_url: https://docs.ruuda.nl/deptool
-repo_url: https://github.com/ruuda/deptool
+repo_url: https://codeberg.org/ruuda/deptool
 strict: true
 
 theme:
