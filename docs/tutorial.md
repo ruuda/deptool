@@ -23,18 +23,15 @@ this works:
 
 Deptool uses a _store_ to track its deployment history and cluster state. Under
 the hood the store is a bare Git repository, by default located at `.deptool`.
-Let’s create it:
+To populate the store, we need a directory to hold the cluster configuration:
+the _config tree_. This directory is named after the cluster, and it lives next
+to the store.[^1] Let’s create a cluster named `prod`:
 
-    $ deptool init
+    $ deptool init prod
     Initialized store at '.deptool'.
+    Created cluster directory 'prod' and recorded it as the default.
 
-To populate the store, we will first create a new directory to hold the cluster
-configuration, named after the cluster we are about to manage. This directory
-lives next to the store[^1]:
-
-    $ mkdir prod
-
-In this directory, we create one directory per target host:
+In the cluster directory, we create one directory per target host:
 
     $ mkdir prod/webserver
 
@@ -65,7 +62,7 @@ Upon deploy, Deptool will commit this directory tree to its store.
 
 Let’s deploy this to our 1-host cluster!
 
-    $ deptool deploy prod
+    $ deptool deploy
     webserver
         add caddy
             + Caddyfile
@@ -137,10 +134,9 @@ again:
     Auto-rollback if deploy fails.
     Apply to 1 host in cluster 'prod'? [y/N/d]
 
-Deptool saves the last-used cluster, so this time we don’t have to include
-`prod` in the command. When we deploy the new configuration, Deptool indicates
-that the file `Caddyfile`, part of app `caddy` on host `webserver`, has changes.
-Press `d` to diff the contents of Caddyfile, `y` to deploy.
+When we deploy the new configuration, Deptool indicates that the file
+`Caddyfile`, part of app `caddy` on host `webserver`, has changes. Press `d`
+to diff the contents of Caddyfile, `y` to deploy.
 
     Apply to 1 host in cluster 'prod'? [y/N/d] y
     

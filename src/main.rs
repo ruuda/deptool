@@ -118,8 +118,15 @@ enum Cmd {
         dir: Option<PathBuf>,
     },
     /// Create an empty store in the current directory.
+    ///
+    /// If `<dir>` is provided, it is recorded as the default cluster directory
+    /// for subsequent commands.
     #[bpaf(command)]
-    Init,
+    Init {
+        /// Cluster directory to record as the default for subsequent commands.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
     /// Run the agent on a target host (invoked internally over SSH).
     #[bpaf(command, hide)]
     Agent {
@@ -466,9 +473,19 @@ fn run() -> Result<()> {
         Cmd::Diff { mode, limit, dir } => {
             run_diff(store, dir, mode, &HostFilter::from_limit(&limit))?
         }
-        Cmd::Init => {
-            Store::open_or_init(&store)?;
+        Cmd::Init { dir } => {
+            let initialized = Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());
+            if let Some(dir) = dir {
+                let already_existed = dir.exists();
+                std::fs::create_dir_all(&dir)?;
+                initialized.set_default_cluster(&dir)?;
+                let verb = if already_existed { "Using" } else { "Created" };
+                eprintln!(
+                    "{verb} cluster directory '{}' and recorded it as the default.",
+                    dir.display(),
+                );
+            }
         }
         Cmd::Agent { store } => run_agent(store)?,
     }
