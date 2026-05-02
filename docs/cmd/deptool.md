@@ -4,7 +4,8 @@
 
 ## Description
 
-The `deptool` executable, see the commands for more details. The commands are:
+The `deptool` executable, see the commands for more details. The two commands
+to get started:
 
 <dl>
  <dt><a href="../deptool_init/"><strong>init</strong></a></dt>
@@ -12,15 +13,19 @@ The `deptool` executable, see the commands for more details. The commands are:
 
  <dt><a href="../deptool_deploy/"><strong>deploy</strong></a></dt>
  <dd>Deploy a config tree to the cluster.</dd>
+</dl>
+
+Additional commands:
+
+<dl>
+ <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
+ <dd>Measure round-trip latency to each host.</dd>
 
  <dt><a href="../deptool_sync/"><strong>sync</strong></a></dt>
  <dd>Fetch the latest cluster state.</dd>
 
  <dt><a href="../deptool_status/"><strong>status</strong></a></dt>
- <dd>Show per-host deployment status.</dd>
-
- <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
- <dd>Measure round-trip latency to each host.</dd>
+ <dd>Show per-host deployment status, computed offline.</dd>
 </dl>
 
 ## Environment

@@ -30,6 +30,6 @@ nav:
       - "deptool": "cmd/deptool.md"
       - "deptool init": "cmd/deptool_init.md"
       - "deptool deploy": "cmd/deptool_deploy.md"
-      - "deptool sync": "cmd/deptool_sync.md"
-      - "deptool status": "cmd/deptool_status.md"
       - "deptool ping": "cmd/deptool_ping.md"
+      - "deptool status": "cmd/deptool_status.md"
+      - "deptool sync": "cmd/deptool_sync.md"

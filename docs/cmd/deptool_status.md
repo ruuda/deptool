@@ -4,9 +4,14 @@
 
 ## Description
 
-TODO(ruuda): one-line summary, then explain that this command is purely local
-(like `git status`), comparing the config tree to the operator-side tracking
-refs without contacting any host.
+Show the deployment status of every host in the cluster defined in `<dir>`,
+based on the local tracking refs in the [store](../store.md). This means that
+the status computation is entirely offline. To get the most up to date view of
+the cluster, run [`deptool sync`](deptool_sync.md) first.
+
+See also [`deptool deploy`](deptool_deploy.md) for details about the cluster
+config tree directory `<dir>`. As with other commands, status defaults to the
+last-used cluster when you omit it.
 
 ## Output
 
