@@ -18,7 +18,7 @@ To get started, these are the most useful chapters from the manual:
 
 ## Status
 
- * Deptool is a hobby project without stability promise. I use it to manay my
+ * Deptool is a hobby project without stability promise. I use it to manage my
    own personal infra, and it works very well for this use case.
  * I’m open sourcing it in the hope that others find it useful too, bug reports
    are welcome.
