@@ -27,9 +27,10 @@ the cluster state, so you can avoid trying to deploy a stale plan.
 
 ### `--changed`
 
-TODO(ruuda): default is now to sync all hosts. With `--changed`, only sync
-hosts whose deployed state differs from the config tree (the same set
-`deptool deploy` would connect to).
+By default, `deptool sync` syncs all hosts, which for large clusters can
+be wasteful. `--changed` limits this to only the hosts whose last know state
+differs from the config tree in `<dir>`. In other words, `deptool sync --changed`
+syncs only those hosts that `deptool deploy` would connect to.
 
 ### `--limit <hosts>`
 
