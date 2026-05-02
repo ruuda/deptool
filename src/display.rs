@@ -17,7 +17,7 @@ use git2::{Delta, Oid, Repository};
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, SymlinkChanges, SysusersChanges, UnitChanges};
-use crate::prim::Hostname;
+use crate::prim::{Hostname, gmtime};
 use crate::store::Store;
 
 impl std::fmt::Display for HostState {
@@ -83,21 +83,21 @@ impl UseColor {
         }
     }
 
-    fn green(self, text: &str) -> String {
+    pub fn green(self, text: &str) -> String {
         match self {
             UseColor::Yes => format!("\x1b[32m{text}\x1b[0m"),
             UseColor::No => text.to_string(),
         }
     }
 
-    fn red(self, text: &str) -> String {
+    pub fn red(self, text: &str) -> String {
         match self {
             UseColor::Yes => format!("\x1b[31m{text}\x1b[0m"),
             UseColor::No => text.to_string(),
         }
     }
 
-    fn yellow(self, text: &str) -> String {
+    pub fn yellow(self, text: &str) -> String {
         match self {
             UseColor::Yes => format!("\x1b[33m{text}\x1b[0m"),
             UseColor::No => text.to_string(),
@@ -158,6 +158,31 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
         }
     }
     Ok(())
+}
+
+/// Format a Git commit time as `YYYY-MM-DD HH:MM:SS ±HHMM` in its original zone.
+///
+/// Matches `git log`'s `%ci` (committer date, ISO 8601 with offset) format.
+/// Preserves the offset the commit was made in rather than converting to UTC.
+pub fn format_git_time(time: git2::Time) -> String {
+    // Apply the offset by hand and break that down via gmtime: there's no
+    // portable POSIX function that takes a precomputed offset directly.
+    let tm = gmtime(time.seconds() + (time.offset_minutes() as i64) * 60);
+    let off = time.offset_minutes();
+    let off_sign = if off >= 0 { '+' } else { '-' };
+    let off_abs = off.abs();
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}{:02}{:02}",
+        tm.tm_year + 1900,
+        tm.tm_mon + 1,
+        tm.tm_mday,
+        tm.tm_hour,
+        tm.tm_min,
+        tm.tm_sec,
+        off_sign,
+        off_abs / 60,
+        off_abs % 60,
+    )
 }
 
 fn color_prefix(color: UseColor, prefix: char) -> String {
@@ -989,6 +1014,34 @@ web1
              \n\
              \r  web1: applying\n\
              \r  web2: done\n",
+        );
+    }
+
+    #[test]
+    fn format_git_time_renders_all_fields_in_utc() {
+        // 1970-01-01 12:34:56 UTC: every field is distinct so the test
+        // catches any mix-up (e.g. seconds rendered as zero, or HH/MM swapped).
+        assert_eq!(
+            format_git_time(git2::Time::new(45296, 0)),
+            "1970-01-01 12:34:56 +0000",
+        );
+    }
+
+    #[test]
+    fn format_git_time_preserves_eastern_offset() {
+        // At UTC epoch, +0100 zone reads 01:00 on the same date.
+        assert_eq!(
+            format_git_time(git2::Time::new(0, 60)),
+            "1970-01-01 01:00:00 +0100",
+        );
+    }
+
+    #[test]
+    fn format_git_time_preserves_western_offset() {
+        // At UTC epoch, -0100 zone reads 23:00 on the previous date.
+        assert_eq!(
+            format_git_time(git2::Time::new(0, -60)),
+            "1969-12-31 23:00:00 -0100",
         );
     }
 }

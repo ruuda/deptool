@@ -15,6 +15,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use crate::prim::gmtime;
+
 /// Appends timestamped lines to a file.
 ///
 /// Each line is formatted into a local buffer and written in a single
@@ -44,16 +46,7 @@ fn write_timestamp(buf: &mut Vec<u8>) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is after 1970");
-    // Cast through `libc::time_t` so this builds on 32-bit targets too,
-    // where it's `i32` rather than `i64`. The libc crate marks this
-    // alias deprecated because it will widen to 64-bit on all musl
-    // targets in a future release; that's a width change we'll absorb
-    // for free, not a reason to switch APIs.
-    #[allow(deprecated)]
-    let secs = now.as_secs() as libc::time_t;
-    let ms = now.subsec_millis();
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::gmtime_r(&secs, &mut tm) };
+    let tm = gmtime(now.as_secs() as i64);
     let _ = write!(
         buf,
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -63,6 +56,6 @@ fn write_timestamp(buf: &mut Vec<u8>) {
         tm.tm_hour,
         tm.tm_min,
         tm.tm_sec,
-        ms,
+        now.subsec_millis(),
     );
 }

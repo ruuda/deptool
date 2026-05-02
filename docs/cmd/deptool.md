@@ -16,6 +16,9 @@ The `deptool` executable, see the commands for more details. The commands are:
  <dt><a href="../deptool_sync/"><strong>sync</strong></a></dt>
  <dd>Fetch the latest cluster state.</dd>
 
+ <dt><a href="../deptool_status/"><strong>status</strong></a></dt>
+ <dd>Show per-host deployment status.</dd>
+
  <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
  <dd>Measure round-trip latency to each host.</dd>
 </dl>

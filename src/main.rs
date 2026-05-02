@@ -89,6 +89,17 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
+    /// Show per-host deployment status, computed offline.
+    #[bpaf(command)]
+    Status {
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
     /// Create an empty store in the current directory.
     #[bpaf(command)]
     Init,
@@ -357,6 +368,16 @@ fn run_sync(
     Ok(())
 }
 
+fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result<()> {
+    let store = Store::open(&store)?;
+    let dir = resolve_dir(&store, dir)?;
+    let states = status::compute_status(&store, &dir, filter)?;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    status::print_status(&mut out, &states, display::UseColor::from_env())?;
+    Ok(())
+}
+
 fn run() -> Result<()> {
     // Register --version with bpaf (with only the long name, no -V) so it
     // appears in --help output. The flag is actually intercepted in main()
@@ -399,6 +420,9 @@ fn run() -> Result<()> {
             connect_mode,
             dir,
         } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
+        Cmd::Status { limit, dir } => {
+            run_status(store, dir, &HostFilter::from_limit(&limit))?
+        }
         Cmd::Init => {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());

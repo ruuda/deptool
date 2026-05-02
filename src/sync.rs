@@ -188,7 +188,7 @@ fn fetch_from_stale_host(
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::testutil::{TempDir, TestHost, TestRepo, test_connector, test_progress};
+    use crate::testutil::{TestHost, TestRepo, config_with, test_connector, test_progress};
 
     /// Run sync end-to-end and return the progress so tests can inspect state.
     fn sync_changed(
@@ -207,18 +207,6 @@ mod tests {
         let connector = test_connector(hosts);
         run_sync(&driver.store, &to_sync, &connector, &progress);
         Ok(progress)
-    }
-
-    /// Create a temp dir populated with the given files (with parent dirs).
-    fn config_with(files: &[(&str, &[u8])]) -> TempDir {
-        let dir = TempDir::new("config");
-        for (path, content) in files {
-            let full = dir.path().join(path);
-            let parent = full.parent().expect("path has a parent dir");
-            std::fs::create_dir_all(parent).expect("parent dir is created");
-            std::fs::write(&full, content).expect("file is written");
-        }
-        dir
     }
 
     #[test]

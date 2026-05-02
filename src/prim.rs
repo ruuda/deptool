@@ -80,6 +80,20 @@ pub fn read_hostname() -> String {
         .to_string()
 }
 
+/// Break down a Unix epoch second into a UTC `libc::tm`.
+///
+/// We cast through `libc::time_t` so this builds on 32-bit targets too,
+/// where it's `i32` rather than `i64`. The libc crate marks this alias
+/// deprecated to flag a future widening to 64-bit on musl, which is a
+/// width change we'll absorb for free.
+pub fn gmtime(secs: i64) -> libc::tm {
+    #[allow(deprecated)]
+    let secs = secs as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::gmtime_r(&secs, &mut tm) };
+    tm
+}
+
 /// Read a test override from an env var, falling back to the production
 /// default. Compiled out of release builds so a deployed binary can't be
 /// swayed by a stray environment variable.

@@ -46,6 +46,18 @@ impl Drop for TempDir {
     }
 }
 
+/// Create a temp dir populated with the given files (parent dirs created).
+pub fn config_with(files: &[(&str, &[u8])]) -> TempDir {
+    let dir = TempDir::new("config");
+    for (path, content) in files {
+        let full = dir.path().join(path);
+        let parent = full.parent().expect("path has a parent dir");
+        fs::create_dir_all(parent).expect("parent dir is created");
+        fs::write(&full, content).expect("file is written");
+    }
+    dir
+}
+
 /// Build a tree from in-memory file data, supporting nested paths like "a/b/c".
 fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<Oid> {
     let mut subdirs: BTreeMap<&str, Vec<(&str, &[u8])>> = BTreeMap::new();
