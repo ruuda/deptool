@@ -18,15 +18,25 @@ last-used cluster when you omit it.
 Example output:
 
 ```
-a.example.com 2024-04-27 16:24:43 +0200 0a89f71
-b.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: nginx
-c.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: caddy, nginx
-d.example.com new host
+a.example.com 2026-04-29 12:32:43 +0200 19bfbda
+b.example.com 2026-04-29 12:32:43 +0200 19bfbda undeployed changes: nginx
+c.example.com 2026-05-02 14:03:31 +0200 df9b19e
+d.example.com 2026-04-29 12:32:43 +0200 19bfbda
+e.example.com new host
 ```
 
-TODO(ruuda): show example output for the three states (`new host`, `up to
-date`, `undeployed changes: ...`) and explain the timestamp format
-(`YYYY-MM-DD HH:MM:SS ±HHMM`, matches `git log %ci`, in the original commit zone).
+This shows per host:
+
+ * The last time something was deployed there, and the commit hash of the
+   deployed version. The hash refers to the commit in the [store](../store.md).
+   The time is the time at which the operator initiated the deploy, formatted
+   in the original operator’s local time zone.
+ * If the config tree in `<dir>` does not match what is deployed on that host,
+   a summary of which apps have changes.
+
+Note that different hosts can be at different commits, and still be up to date.
+This happens because a commit that modifies only a subset of hosts, does not
+need to be deployed to the entire cluster.
 
 ## Options
 
