@@ -17,17 +17,17 @@ last-used cluster when you omit it.
 
 ## Options
 
-### `--stat`
-
-TODO(ruuda): describe that this passes `--stat` through to `git diff`,
-producing a per-file diffstat instead of the full content diff.
-
 ### `--limit <hosts>`
 
 Limit the diff to those listed. Can be provided multiple times, and supports a
 comma-separated list of hosts too. For example, in a cluster with hosts `web1`
 through `web5`, passing `--limit web1,web2 --limit web3` would exclude `web4`
 and `web5` from the diff even if they had changes.
+
+### `--stat`
+
+Pass `--stat` to `git diff` to produce a summarized diffstat instead of a full
+line-based diff.
 
 ## Environment
 
