@@ -272,7 +272,7 @@ fn empty_tree_oid() -> Oid {
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.
 fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
     for unit in &units.disable {
-        writeln!(out, "        {} {unit}", color.red("disable"))?;
+        writeln!(out, "        {} {unit}", color.red("disable unit"))?;
     }
     for unit in &units.unlink {
         writeln!(out, "        {} {unit}", color.red("unlink unit"))?;
@@ -281,10 +281,10 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
         writeln!(out, "        {} {unit}", color.green("link unit"))?;
     }
     for unit in &units.enable {
-        writeln!(out, "        {} {unit}", color.green("enable"))?;
+        writeln!(out, "        {} {unit}", color.green("enable unit"))?;
     }
     for unit in &units.restart {
-        writeln!(out, "        {} {unit}", color.yellow("restart"))?;
+        writeln!(out, "        {} {unit}", color.yellow("restart unit"))?;
     }
     Ok(())
 }
@@ -546,7 +546,7 @@ web1 (rollback unavailable)
     add nginx
         + manifest.json
         + nginx.conf
-        enable nginx.service
+        enable unit nginx.service
 
 ",
         );
@@ -578,7 +578,7 @@ web1 (rollback unavailable)
         + systemd/nginx.service
         link unit nginx-reload.timer
         link unit nginx.service
-        enable nginx.service
+        enable unit nginx.service
 
 ",
         );
@@ -606,7 +606,7 @@ web1
         - manifest.json
         - systemd/nginx-reload.timer
         - systemd/nginx.service
-        disable nginx.service
+        disable unit nginx.service
         unlink unit nginx-reload.timer
         unlink unit nginx.service
 
@@ -634,7 +634,7 @@ web1
     remove nginx
         - manifest.json
         - nginx.conf
-        disable nginx.service
+        disable unit nginx.service
 
 ",
         );
@@ -682,7 +682,7 @@ web1
 web1
     update nginx
         ~ nginx.conf
-        restart nginx.service
+        restart unit nginx.service
 
 ",
         );
@@ -756,7 +756,7 @@ web1 (rollback unavailable)
         + manifest.json
         + nginx.conf
         link /etc/nginx/nginx.conf -> nginx.conf
-        enable nginx.service
+        enable unit nginx.service
 
 ",
         );

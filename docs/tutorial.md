@@ -225,7 +225,7 @@ Let’s deploy it:
             + manifest.json
             + systemd/caddy.service
             link unit caddy.service
-            enable caddy.service
+            enable unit caddy.service
 
     Rollback unavailable for some hosts.
     Apply to 1 host in cluster 'prod'? [y/N/d]
@@ -269,7 +269,7 @@ Let’s update our Caddy configuration again, and deploy:
     webserver
         update caddy
             ~ Caddyfile
-            restart caddy.service
+            restart unit caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host in cluster 'prod'? [y/N/d]
@@ -340,7 +340,7 @@ Deploy this:
             ~ manifest.json
             + tmpfiles.conf
             link /etc/tmpfiles.d/caddy.conf -> tmpfiles.conf
-            restart caddy.service
+            restart unit caddy.service
 
     Rollback unavailable for some hosts.
     Apply to 1 host in cluster 'prod'? [y/N/d]
@@ -359,7 +359,7 @@ target file. For example, let’s change the group owner from `caddy` to `www`:
     webserver
         update caddy
             ~ tmpfiles.conf
-            restart caddy.service
+            restart unit caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host in cluster 'prod'? [y/N/d]
@@ -379,7 +379,7 @@ entire `symlinks` section), Deptool will remove the symlink from the host:
             ~ manifest.json
             - tmpfiles.conf
             unlink /etc/tmpfiles.d/caddy.conf
-            restart caddy.service
+            restart unit caddy.service
 
     Auto-rollback if deploy fails.
     Apply to 1 host in cluster 'prod'? [y/N/d]
@@ -412,7 +412,7 @@ ignores empty directories. We can work around this by adding an empty file:
             - Caddyfile
             - manifest.json
             - systemd/caddy.service
-            disable caddy.service
+            disable unit caddy.service
             unlink unit caddy.service
 
     Auto-rollback if deploy fails.
