@@ -100,6 +100,17 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
+    /// Show the full diff that would be applied by the next deploy.
+    #[bpaf(command)]
+    Diff {
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
     /// Create an empty store in the current directory.
     #[bpaf(command)]
     Init,
@@ -379,6 +390,23 @@ fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Resu
     Ok(())
 }
 
+fn run_diff(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result<()> {
+    let store = Store::open(&store)?;
+    let dir = resolve_dir(&store, dir)?;
+    let tree_oid = store.build_tree(&dir)?;
+    match plan::make_plan(&store, tree_oid, filter)? {
+        Some(draft) => {
+            // This creates a dangling commit in the store, but a GC will
+            // collect it at some point, it's not worth complicating the code
+            // to avoid this.
+            let plan = draft.finalize(&store)?;
+            display::print_diff(&store, &plan, display::UseColor::from_env())?;
+        }
+        None => eprintln!("All hosts are up to date."),
+    }
+    Ok(())
+}
+
 fn run() -> Result<()> {
     // Register --version with bpaf (with only the long name, no -V) so it
     // appears in --help output. The flag is actually intercepted in main()
@@ -423,6 +451,9 @@ fn run() -> Result<()> {
         } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
         Cmd::Status { limit, dir } => {
             run_status(store, dir, &HostFilter::from_limit(&limit))?
+        }
+        Cmd::Diff { limit, dir } => {
+            run_diff(store, dir, &HostFilter::from_limit(&limit))?
         }
         Cmd::Init => {
             Store::open_or_init(&store)?;

@@ -26,6 +26,9 @@ Additional commands:
 
  <dt><a href="../deptool_status/"><strong>status</strong></a></dt>
  <dd>Show per-host deployment status, computed offline.</dd>
+
+ <dt><a href="../deptool_diff/"><strong>diff</strong></a></dt>
+ <dd>Show the full diff that would be applied by the next deploy.</dd>
 </dl>
 
 ## Environment
