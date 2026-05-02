@@ -295,7 +295,7 @@ fn run_deploy(
     let plan = match plan::make_plan(&repo, tree_oid, filter)? {
         Some(draft) => draft.finalize(&repo)?,
         None => {
-            eprintln!("All hosts are up to date.");
+            eprintln!("All hosts in cluster '{}' are up to date.", cluster_name(&dir));
             return Ok(());
         }
     };
@@ -355,7 +355,7 @@ fn run_ping(
     filter.apply(&mut hosts_map)?;
     let hosts: Vec<_> = hosts_map.into_keys().collect();
     if hosts.is_empty() {
-        eprintln!("No hosts to ping.");
+        eprintln!("No hosts to ping in cluster '{}'.", cluster_name(&dir));
         return Ok(());
     }
     let connector = make_connector(connect_mode)?;
@@ -376,13 +376,14 @@ fn run_sync(
     let dir = resolve_dir(&store, dir)?;
     let hosts = sync::select_hosts_to_sync(&store, &dir, sync_mode, filter)?;
     if hosts.is_empty() {
-        let hint = match sync_mode {
-            sync::SyncMode::OnlyChanged => {
-                "No hosts have config changes. Drop --changed to sync every host."
-            }
-            sync::SyncMode::AllHosts => "No hosts to sync.",
-        };
-        eprintln!("{hint}");
+        let cluster = cluster_name(&dir);
+        match sync_mode {
+            sync::SyncMode::OnlyChanged => eprintln!(
+                "No hosts in cluster '{cluster}' have config changes. \
+                 Drop --changed to sync every host.",
+            ),
+            sync::SyncMode::AllHosts => eprintln!("No hosts to sync in cluster '{cluster}'."),
+        }
         return Ok(());
     }
     let connector = make_connector(connect_mode)?;
@@ -420,7 +421,7 @@ fn run_diff(
             let plan = draft.finalize(&store)?;
             display::print_diff(&store, &plan, mode, display::UseColor::from_env())?;
         }
-        None => eprintln!("All hosts are up to date."),
+        None => eprintln!("All hosts in cluster '{}' are up to date.", cluster_name(&dir)),
     }
     Ok(())
 }
