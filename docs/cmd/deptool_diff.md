@@ -1,6 +1,6 @@
 # deptool diff
 
-    deptool diff [--limit <hosts>]... [--] [<dir>]
+    deptool diff [--stat] [--limit <hosts>]... [--] [<dir>]
 
 ## Description
 
@@ -16,6 +16,11 @@ config tree directory `<dir>`. As with other commands, diff defaults to the
 last-used cluster when you omit it.
 
 ## Options
+
+### `--stat`
+
+TODO(ruuda): describe that this passes `--stat` through to `git diff`,
+producing a per-file diffstat instead of the full content diff.
 
 ### `--limit <hosts>`
 

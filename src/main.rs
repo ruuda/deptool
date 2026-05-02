@@ -103,6 +103,12 @@ enum Cmd {
     /// Show the full diff that would be applied by the next deploy.
     #[bpaf(command)]
     Diff {
+        /// Show a per-file diffstat instead of the full diff.
+        #[bpaf(
+            long("stat"),
+            flag(display::DiffMode::Stat, display::DiffMode::Full)
+        )]
+        mode: display::DiffMode,
         /// Restrict to the listed hosts (comma-separated, repeatable).
         #[bpaf(long("limit"), argument("HOSTS"), many)]
         limit: Vec<String>,
@@ -390,7 +396,12 @@ fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Resu
     Ok(())
 }
 
-fn run_diff(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result<()> {
+fn run_diff(
+    store: PathBuf,
+    dir: Option<PathBuf>,
+    mode: display::DiffMode,
+    filter: &HostFilter,
+) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
     let tree_oid = store.build_tree(&dir)?;
@@ -400,7 +411,7 @@ fn run_diff(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result
             // collect it at some point, it's not worth complicating the code
             // to avoid this.
             let plan = draft.finalize(&store)?;
-            display::print_diff(&store, &plan, display::UseColor::from_env())?;
+            display::print_diff(&store, &plan, mode, display::UseColor::from_env())?;
         }
         None => eprintln!("All hosts are up to date."),
     }
@@ -452,8 +463,8 @@ fn run() -> Result<()> {
         Cmd::Status { limit, dir } => {
             run_status(store, dir, &HostFilter::from_limit(&limit))?
         }
-        Cmd::Diff { limit, dir } => {
-            run_diff(store, dir, &HostFilter::from_limit(&limit))?
+        Cmd::Diff { mode, limit, dir } => {
+            run_diff(store, dir, mode, &HostFilter::from_limit(&limit))?
         }
         Cmd::Init => {
             Store::open_or_init(&store)?;

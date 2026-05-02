@@ -198,6 +198,12 @@ pub enum Decision {
     Abort,
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum DiffMode {
+    Full,
+    Stat,
+}
+
 /// Show the confirmation prompt.
 ///
 /// `d` shows the full file diff for all hosts in a single pager, then
@@ -220,7 +226,7 @@ pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Re
         io::stdin().read_line(&mut input)?;
         match input.trim() {
             "y" | "Y" => return Ok(Decision::Apply),
-            "d" | "D" => print_diff(store, plan, color)?,
+            "d" | "D" => print_diff(store, plan, DiffMode::Full, color)?,
             _ => return Ok(Decision::Abort),
         }
     }
@@ -230,7 +236,7 @@ pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Re
 ///
 /// Without this, each `git diff` invocation opens its own pager, so deploying
 /// to N hosts means dismissing N pagers.
-pub fn print_diff(store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
+pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -> Result<()> {
     println!();
     let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
@@ -240,10 +246,15 @@ pub fn print_diff(store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
             writeln!(combined)?;
         }
         writeln!(combined, "{}", color.blue(&host.to_string()))?;
+        let mode_args: &[&str] = match mode {
+            DiffMode::Full => &[],
+            DiffMode::Stat => &["--stat"],
+        };
         let child = Command::new("git")
             .arg("--git-dir")
             .arg(store.path())
             .args(["diff", "--color=always"])
+            .args(mode_args)
             .arg(old_oid.to_string())
             .arg(new_oid.to_string())
             .stdout(Stdio::piped())
