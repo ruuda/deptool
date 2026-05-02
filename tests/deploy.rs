@@ -39,8 +39,8 @@ impl LocalEnv {
             hostname,
         };
         let output = Command::new(DEPTOOL)
-            .args(["init", "--store"])
-            .arg(env.store.path())
+            .arg("init")
+            .env("DEPTOOL_STORE", env.store.path())
             .output()
             .expect("deptool runs");
         assert!(output.status.success(), "init exits successfully");
@@ -68,9 +68,8 @@ impl LocalEnv {
     fn run(&self, args: &[&str]) -> std::process::Output {
         Command::new(DEPTOOL)
             .args(args)
-            .arg("--store")
-            .arg(self.store.path())
             .arg("--local")
+            .env("DEPTOOL_STORE", self.store.path())
             .env("DEPTOOL_HOSTNAME", self.hostname)
             .env("DEPTOOL_APPS_DIR", self.apps.path())
             .env("DEPTOOL_UNIT_DIR", self.units.path())
@@ -93,8 +92,8 @@ fn help_does_not_crash() {
 fn init_creates_bare_repo() {
     let store = TempDir::new("store");
     let output = Command::new(DEPTOOL)
-        .args(["init", "--store"])
-        .arg(store.path())
+        .arg("init")
+        .env("DEPTOOL_STORE", store.path())
         .output()
         .expect("deptool runs");
     assert!(output.status.success(), "init exits successfully");
@@ -137,8 +136,9 @@ fn deploy_without_dir_or_default_names_the_problem() {
 fn deploy_without_store_points_to_init() {
     let config = TempDir::new("config");
     let output = Command::new(DEPTOOL)
-        .args(["deploy", "--store", "does-not-exist"])
+        .arg("deploy")
         .arg(config.path())
+        .env("DEPTOOL_STORE", "does-not-exist")
         .output()
         .expect("deptool runs");
     assert!(!output.status.success(), "deploy without store fails");

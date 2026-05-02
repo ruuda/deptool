@@ -37,6 +37,3 @@ comma-separated list of hosts too. For example, in a cluster with hosts `web1`
 through `web5`, passing `--limit web1,web2 --limit web3` would exclude `web4`
 and `web5` from the deploy.
 
-### `--store`
-
-Path to the local [store](../store.md), by default `.deptool`.

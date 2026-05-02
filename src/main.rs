@@ -38,9 +38,6 @@ enum Cmd {
     /// Plan and apply changes to all hosts.
     #[bpaf(command)]
     Deploy {
-        /// Path to the local store (default: ./.deptool).
-        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
-        store: PathBuf,
         /// Compute and display the plan, then exit without applying.
         #[bpaf(long("plan-only"), switch)]
         plan_only: bool,
@@ -63,9 +60,6 @@ enum Cmd {
     /// Refresh tracking refs by connecting to hosts.
     #[bpaf(command)]
     Sync {
-        /// Path to the local store (default: ./.deptool).
-        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
-        store: PathBuf,
         /// Only sync hosts whose deployed state differs from the config tree.
         #[bpaf(
             long("changed"),
@@ -85,9 +79,6 @@ enum Cmd {
     /// Measure round-trip latency to each host in the cluster.
     #[bpaf(command)]
     Ping {
-        /// Path to the local store (default: ./.deptool).
-        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
-        store: PathBuf,
         /// Restrict to the listed hosts (comma-separated, repeatable).
         #[bpaf(long("limit"), argument("HOSTS"), many)]
         limit: Vec<String>,
@@ -100,11 +91,7 @@ enum Cmd {
     },
     /// Create an empty store in the current directory.
     #[bpaf(command)]
-    Init {
-        /// Path to the store to create (default: ./.deptool).
-        #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
-        store: PathBuf,
-    },
+    Init,
     /// Run the agent on a target host (invoked internally over SSH).
     #[bpaf(command, hide)]
     Agent {
@@ -119,6 +106,13 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
+}
+
+/// Resolve the local store path: `$DEPTOOL_STORE` if set, else `.deptool`.
+fn store_path() -> PathBuf {
+    std::env::var_os("DEPTOOL_STORE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".deptool"))
 }
 
 fn make_connector(mode: ConnectMode) -> Result<Box<dyn setup::HostConnector>> {
@@ -372,9 +366,9 @@ fn run() -> Result<()> {
         .version_parser(long("version").help("Print version and exit"))
         .run();
 
+    let store = store_path();
     match args.cmd {
         Cmd::Deploy {
-            store,
             plan_only,
             confirm_mode,
             limit,
@@ -389,7 +383,6 @@ fn run() -> Result<()> {
             &HostFilter::from_limit(&limit),
         )?,
         Cmd::Sync {
-            store,
             sync_mode,
             limit,
             connect_mode,
@@ -402,12 +395,11 @@ fn run() -> Result<()> {
             &HostFilter::from_limit(&limit),
         )?,
         Cmd::Ping {
-            store,
             limit,
             connect_mode,
             dir,
         } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
-        Cmd::Init { store } => {
+        Cmd::Init => {
             Store::open_or_init(&store)?;
             eprintln!("Initialized store at '{}'.", store.display());
         }
