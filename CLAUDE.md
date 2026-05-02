@@ -146,7 +146,7 @@ Post-generation checklist (run after writing code, before presenting):
  - Prefer words over symbols. Symbols can be ambiguous or invisible in certain fonts.
  - Log near the mutation, not near the planning. If the plan and the execution are separate phases, log during execution.
  - One event, one message. Don't have different strings for the log and the protocol for the same error.
- - Project naming conventions (e.g. `Deptool` for the tool, `deptool` for the binary) apply here too. User-facing prose is user-facing prose, whether it's in docs or in an error string.
+ - Project naming conventions (e.g. `Deptool` for the tool, `deptool` for the binary) apply here too. User-facing prose is user-facing prose, whether it's in docs or in an error string. The same rule applies to other named tools: `Git`/`git`, `Nix`/`nix`, `Cargo`/`cargo`, `Linux`/`linux` — capitalized for the project, lowercase (in backticks) for the binary or invocation.
 
 ## Writing documentation
 
