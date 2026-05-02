@@ -13,7 +13,6 @@ use std::path::Path;
 
 use git2::{Oid, Time};
 
-use crate::checkout::oid_prefix;
 use crate::display::{UseColor, format_git_time};
 use crate::error::Result;
 use crate::plan::{HostFilter, diff_apps};
@@ -81,32 +80,64 @@ pub fn compute_status(
     Ok(result)
 }
 
+/// Smallest abbreviation length that's unambiguous in the object database
+/// for every commit in `states`. Use to pick a uniform SHA column width.
+pub fn min_unambiguous_short_len(
+    store: &Store,
+    states: &BTreeMap<Hostname, HostState>,
+) -> Result<usize> {
+    let mut max_len = 0;
+    for state in states.values() {
+        let oid = match state {
+            HostState::UpToDate { commit, .. } | HostState::HasChanges { commit, .. } => *commit,
+            HostState::NewHost => continue,
+        };
+        let buf = store.repo.find_object(oid, None)?.short_id()?;
+        max_len = max_len.max(buf.as_str().expect("short_id is utf-8 hex").len());
+    }
+    Ok(max_len)
+}
+
 /// Write per-host status as one line per host, in input (sorted) order.
+///
+/// `short_len` is the number of hex characters to display for each commit
+/// (typically from [`min_unambiguous_short_len`]).
 pub fn print_status(
     out: &mut impl Write,
     states: &BTreeMap<Hostname, HostState>,
+    short_len: usize,
     color: UseColor,
 ) -> Result<()> {
+    let short = |c: &Oid| {
+        let mut s = c.to_string();
+        s.truncate(short_len);
+        s
+    };
     for (host, state) in states {
-        let (commit, time, label) = match state {
+        let yellow_host = color.yellow(&host.to_string());
+        match state {
             HostState::NewHost => {
-                writeln!(out, "{host}: {}", color.yellow("new host"))?;
-                continue;
+                writeln!(out, "{yellow_host} {}", color.yellow("new host"))?;
             }
             HostState::UpToDate { commit, time } => {
-                (commit, time, color.green("up to date"))
+                writeln!(
+                    out,
+                    "{yellow_host} {} {}",
+                    format_git_time(*time),
+                    color.blue(&short(commit)),
+                )?;
             }
             HostState::HasChanges { commit, time, apps } => {
-                let phrase = format!("undeployed changes in {}", apps.join(", "));
-                (commit, time, color.red(&phrase))
+                let label = format!("undeployed changes: {}", apps.join(", "));
+                writeln!(
+                    out,
+                    "{yellow_host} {} {} {}",
+                    format_git_time(*time),
+                    color.blue(&short(commit)),
+                    color.red(&label),
+                )?;
             }
-        };
-        writeln!(
-            out,
-            "{host}: {} ({}), {label}",
-            color.yellow(&oid_prefix(*commit)),
-            format_git_time(*time),
-        )?;
+        }
     }
     Ok(())
 }
@@ -131,9 +162,9 @@ mod tests {
         Time::new(1714227883, 120)
     }
 
-    fn render_status(states: &BTreeMap<Hostname, HostState>) -> String {
+    fn render_status(states: &BTreeMap<Hostname, HostState>, short_len: usize) -> String {
         let mut out = Vec::new();
-        print_status(&mut out, states, UseColor::No).expect("write succeeds");
+        print_status(&mut out, states, short_len, UseColor::No).expect("write succeeds");
         String::from_utf8(out).expect("output is utf-8")
     }
 
@@ -202,12 +233,12 @@ mod tests {
         states.insert(Hostname::from("d.example.com"), HostState::NewHost);
 
         assert_eq!(
-            render_status(&states),
+            render_status(&states, 7),
             "\
-a.example.com: 0a89f71caf (2024-04-27 16:24:43 +0200), up to date
-b.example.com: 0a89f71caf (2024-04-27 16:24:43 +0200), undeployed changes in nginx
-c.example.com: 0a89f71caf (2024-04-27 16:24:43 +0200), undeployed changes in caddy, nginx
-d.example.com: new host
+a.example.com 2024-04-27 16:24:43 +0200 0a89f71
+b.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: nginx
+c.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: caddy, nginx
+d.example.com new host
 ",
         );
     }

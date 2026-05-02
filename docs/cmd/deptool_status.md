@@ -15,8 +15,17 @@ last-used cluster when you omit it.
 
 ## Output
 
+Example output:
+
+```
+a.example.com 2024-04-27 16:24:43 +0200 0a89f71
+b.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: nginx
+c.example.com 2024-04-27 16:24:43 +0200 0a89f71 undeployed changes: caddy, nginx
+d.example.com new host
+```
+
 TODO(ruuda): show example output for the three states (`new host`, `up to
-date`, `undeployed changes in ...`) and explain the timestamp format
+date`, `undeployed changes: ...`) and explain the timestamp format
 (`YYYY-MM-DD HH:MM:SS ±HHMM`, matches `git log %ci`, in the original commit zone).
 
 ## Options

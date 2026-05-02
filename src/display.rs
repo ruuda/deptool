@@ -104,7 +104,7 @@ impl UseColor {
         }
     }
 
-    fn blue(self, text: &str) -> String {
+    pub fn blue(self, text: &str) -> String {
         match self {
             UseColor::Yes => format!("\x1b[34m{text}\x1b[0m"),
             UseColor::No => text.to_string(),

@@ -372,9 +372,10 @@ fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Resu
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
     let states = status::compute_status(&store, &dir, filter)?;
+    let short_len = status::min_unambiguous_short_len(&store, &states)?;
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    status::print_status(&mut out, &states, display::UseColor::from_env())?;
+    status::print_status(&mut out, &states, short_len, display::UseColor::from_env())?;
     Ok(())
 }
 
