@@ -1,6 +1,6 @@
 # deptool sync
 
-    deptool sync [--all] [--limit <hosts>]... [--] [<dir>]
+    deptool sync [--changed] [--limit <hosts>]... [--] [<dir>]
 
 ## Description
 
@@ -25,13 +25,11 @@ the cluster state, so you can avoid trying to deploy a stale plan.
 
 ## Options
 
-### `--all`
+### `--changed`
 
-By default Deptool only fetches the state from the hosts that differ between the
-config tree in `<dir>`, and the latest known state based on the remote tracking
-refs in the store. This is the same set of hosts that `deptool deploy` would
-connect to. With `--all`, Deptool instead fetches the latest state from _all_
-hosts defined in the config tree.
+TODO(ruuda): default is now to sync all hosts. With `--changed`, only sync
+hosts whose deployed state differs from the config tree (the same set
+`deptool deploy` would connect to).
 
 ### `--limit <hosts>`
 
@@ -39,10 +37,6 @@ Limit the hosts to sync to just those listed. Can be provided multiple times,
 and supports a comma-separated list of hosts too. For example, in a cluster with
 hosts `web1` through `web5`, passing `--limit web1,web2 --limit web3` would
 exclude `web4` and `web5` from the sync.
-
-A limit only excludes hosts from the sync. It does not cause the included hosts
-to be synced if a regular `deptool sync` does not sync them. Combine `--all`
-with `--limit` force the listed hosts to be synced.
 
 ### `--store`
 

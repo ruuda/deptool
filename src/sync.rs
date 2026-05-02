@@ -23,12 +23,12 @@ use crate::protocol::{Message, Request};
 use crate::setup::HostConnector;
 use crate::store::{RefUpdate, Store};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum SyncMode {
-    /// Only sync hosts whose config tree differs from the tracking ref.
-    OnlyAffectedHosts,
     /// Sync all hosts in the config tree.
     AllHosts,
+    /// Only sync hosts whose config tree differs from the tracking ref.
+    OnlyChanged,
 }
 
 /// Pick hosts to sync from `dir` and look up each one's expected commit.
@@ -55,7 +55,7 @@ pub fn select_hosts_to_sync(
         let host_ref = host_refs.get(&host);
         let needs_sync = match mode {
             SyncMode::AllHosts => true,
-            SyncMode::OnlyAffectedHosts => match host_ref {
+            SyncMode::OnlyChanged => match host_ref {
                 Some(hr) => hr.host_tree != host_tree,
                 None => true,
             },
@@ -191,7 +191,7 @@ mod tests {
     use crate::testutil::{TempDir, TestHost, TestRepo, test_connector, test_progress};
 
     /// Run sync end-to-end and return the progress so tests can inspect state.
-    fn sync_affected(
+    fn sync_changed(
         driver: &TestRepo,
         hosts: &[&TestHost],
         config: &Path,
@@ -199,7 +199,7 @@ mod tests {
         let to_sync = select_hosts_to_sync(
             &driver.store,
             config,
-            SyncMode::OnlyAffectedHosts,
+            SyncMode::OnlyChanged,
             &HostFilter::All,
         )?;
         let names: Vec<&str> = to_sync.keys().map(|h| h.0.as_str()).collect();
@@ -231,7 +231,7 @@ mod tests {
         driver.set_host_tracking_ref("web1", c1);
 
         let config = config_with(&[("web1/app/conf", b"v3")]);
-        let progress = sync_affected(&driver, &[&host], config.path())?;
+        let progress = sync_changed(&driver, &[&host], config.path())?;
 
         assert_eq!(
             driver.get_host_tracking_ref("web1"),
@@ -256,11 +256,44 @@ mod tests {
         driver.set_host_tracking_ref("web1", c1);
 
         let config = config_with(&[("web1/app/conf", b"v2")]);
-        let progress = sync_affected(&driver, &[&host], config.path())?;
+        let progress = sync_changed(&driver, &[&host], config.path())?;
 
         assert!(
             matches!(*progress.state("web1"), HostState::UpToDate),
             "host already at tracking ref commit reaches UpToDate state",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn only_changed_excludes_hosts_whose_config_matches_tracking_ref() -> Result<()> {
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        driver.set_host_tracking_ref("web1", c1);
+        // Config matches what the tracking ref already records.
+        let config = config_with(&[("web1/app/conf", b"v1")]);
+
+        let all = select_hosts_to_sync(
+            &driver.store,
+            config.path(),
+            SyncMode::AllHosts,
+            &HostFilter::All,
+        )?;
+        let changed = select_hosts_to_sync(
+            &driver.store,
+            config.path(),
+            SyncMode::OnlyChanged,
+            &HostFilter::All,
+        )?;
+
+        let web1 = Hostname::from("web1");
+        assert!(
+            all.contains_key(&web1),
+            "AllHosts includes a host even when its config matches the tracking ref",
+        );
+        assert!(
+            !changed.contains_key(&web1),
+            "OnlyChanged excludes a host whose config matches the tracking ref",
         );
         Ok(())
     }
@@ -294,7 +327,7 @@ mod tests {
         let host = TestHost::new("web1"); // No current commit on the host.
 
         let config = config_with(&[("web1/app/conf", b"v2")]);
-        let progress = sync_affected(&driver, &[&host], config.path())?;
+        let progress = sync_changed(&driver, &[&host], config.path())?;
 
         assert_eq!(
             driver.get_host_tracking_ref("web1"),

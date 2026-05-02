@@ -66,10 +66,10 @@ enum Cmd {
         /// Path to the local store (default: ./.deptool).
         #[bpaf(long("store"), fallback(PathBuf::from(".deptool")))]
         store: PathBuf,
-        /// Sync all hosts in the cluster, not just the ones that appear stale.
+        /// Only sync hosts whose deployed state differs from the config tree.
         #[bpaf(
-            long("all"),
-            flag(sync::SyncMode::AllHosts, sync::SyncMode::OnlyAffectedHosts)
+            long("changed"),
+            flag(sync::SyncMode::OnlyChanged, sync::SyncMode::AllHosts)
         )]
         sync_mode: sync::SyncMode,
         /// Restrict to the listed hosts (comma-separated, repeatable).
@@ -347,9 +347,13 @@ fn run_sync(
     let dir = resolve_dir(&store, dir)?;
     let hosts = sync::select_hosts_to_sync(&store, &dir, sync_mode, filter)?;
     if hosts.is_empty() {
-        eprintln!(
-            "No hosts need syncing based on the current config. Pass --all to sync every host."
-        );
+        let hint = match sync_mode {
+            sync::SyncMode::OnlyChanged => {
+                "No hosts have config changes. Drop --changed to sync every host."
+            }
+            sync::SyncMode::AllHosts => "No hosts to sync.",
+        };
+        eprintln!("{hint}");
         return Ok(());
     }
     let connector = make_connector(connect_mode)?;
