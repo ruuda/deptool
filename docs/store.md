@@ -54,3 +54,13 @@ session. This skips the additional <abbr>SSH</abbr> handshake that would be
 needed for an out-of-band `git push`, and it ensures that Deptool works even
 when Git is not installed on the target host. (Deptool embeds libgit2 in its
 static binary.)
+
+## Security considerations
+
+TODO(ruuda): document that every host carries a copy of the full cluster store,
+including the entire history of every other host's config. Information
+disclosure on a compromised host extends to other hosts' configuration, and
+secrets that were ever committed remain in the store on every host.
+
+TODO(ruuda): consider restricting host-side stores to only the trees reachable
+from that host's own deploys. Trade-off: breaks pack reuse on push.

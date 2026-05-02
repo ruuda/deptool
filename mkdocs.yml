@@ -19,6 +19,7 @@ nav:
   - "User guide":
       - "Tutorial": "tutorial.md"
       - "User management": "user_management.md"
+      - "Rolling back": "rollback.md"
       - "Building": "building.md"
   - "Reference":
       - "Directory layout": "directory_layout.md"
