@@ -24,10 +24,6 @@ The `deptool` executable, see the commands for more details. The commands are:
 
 The following environment variables affect Deptool’s behavior:
 
-### `DEPTOOL_STORE`
-
-TODO(ruuda): document that this overrides the default store path of `.deptool`.
-
 ### `DEPTOOL_BIN_DIR`
 
 For cross-platform deploys, where the target host is a different platform than
@@ -40,6 +36,11 @@ Deptool falls back to:
 
  * `$XDG_CACHE_HOME/deptool`, if `XDG_CACHE_HOME` is set.
  * `$HOME/.cache/deptool`
+
+### `DEPTOOL_STORE`
+
+Path to the [store](../store.md), by default `.deptool` in the current
+directory.
 
 ### `NO_COLOR`
 
