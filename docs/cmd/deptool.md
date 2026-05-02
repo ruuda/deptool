@@ -18,6 +18,9 @@ to get started:
 Additional commands:
 
 <dl>
+ <dt><a href="../deptool_diff/"><strong>diff</strong></a></dt>
+ <dd>Show the full diff that would be applied by the next deploy.</dd>
+
  <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
  <dd>Measure round-trip latency to each host.</dd>
 
@@ -26,9 +29,6 @@ Additional commands:
 
  <dt><a href="../deptool_status/"><strong>status</strong></a></dt>
  <dd>Show per-host deployment status, computed offline.</dd>
-
- <dt><a href="../deptool_diff/"><strong>diff</strong></a></dt>
- <dd>Show the full diff that would be applied by the next deploy.</dd>
 </dl>
 
 ## Environment
