@@ -487,7 +487,7 @@ fn push_and_apply_host(
 
     let store = Store::open(store_path)?;
     store.set_ref(
-        &format!("refs/remotes/{host}/current"),
+        &format!("refs/remotes/{host}"),
         applied_commit,
         RefUpdate::ApplyComplete,
     )?;

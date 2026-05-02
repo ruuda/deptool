@@ -141,7 +141,7 @@ fn fetch_from_stale_host(
     host: &Hostname,
     info: &mut StaleHost,
 ) -> std::result::Result<(), HostError> {
-    let refname = format!("refs/remotes/{host}/current");
+    let refname = format!("refs/remotes/{host}");
 
     let actual_commit = match info.actual_commit {
         Some(c) => c,

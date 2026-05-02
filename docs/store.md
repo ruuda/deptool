@@ -20,7 +20,7 @@ that was ever deployed to the cluster.
 ## Operator-side refs
 
  * `refs/heads/main` points to the last commit that we attempted to deploy.
- * `refs/remotes/<host>/current` points to the commit that is deployed at that
+ * `refs/remotes/<host>` points to the commit that is deployed at that
    host.
 
 On the operator side, Deptool keeps a remote-tracking ref per target host.

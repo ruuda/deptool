@@ -174,11 +174,11 @@ impl TestRepo {
             .tree_id()
     }
 
-    /// Read the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
+    /// Read the driver-side tracking ref for a host (`refs/remotes/{host}`).
     pub fn get_host_tracking_ref(&self, host: &str) -> Option<Oid> {
         self.store
             .repo
-            .find_reference(&format!("refs/remotes/{host}/current"))
+            .find_reference(&format!("refs/remotes/{host}"))
             .ok()
             .map(|r| {
                 r.peel_to_commit()
@@ -187,11 +187,11 @@ impl TestRepo {
             })
     }
 
-    /// Set the driver-side tracking ref for a host (`refs/remotes/{host}/current`).
+    /// Set the driver-side tracking ref for a host (`refs/remotes/{host}`).
     pub fn set_host_tracking_ref(&self, host: &str, commit_oid: Oid) {
         self.store
             .set_ref(
-                &format!("refs/remotes/{host}/current"),
+                &format!("refs/remotes/{host}"),
                 commit_oid,
                 RefUpdate::ApplyComplete,
             )

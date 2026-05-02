@@ -45,7 +45,7 @@ pub struct SystemdConfig {
 
 /// A host's tracking state as known by the driver.
 pub struct HostRef {
-    /// The commit deployed to this host (`refs/remotes/{host}/current`).
+    /// The commit deployed to this host (`refs/remotes/{host}`).
     pub commit: Oid,
     /// The host's own subtree within that commit's tree.
     pub host_tree: Oid,
@@ -161,12 +161,12 @@ impl Store {
 
     /// Look up tracking refs for the given hosts.
     ///
-    /// For each host that has a `refs/remotes/{host}/current` ref, returns
+    /// For each host that has a `refs/remotes/{host}` ref, returns
     /// the deployed commit and the host's own subtree within it.
     pub fn host_tracking_refs(&self, hosts: &[Hostname]) -> Result<BTreeMap<Hostname, HostRef>> {
         let mut result = BTreeMap::new();
         for host in hosts {
-            let refname = format!("refs/remotes/{host}/current");
+            let refname = format!("refs/remotes/{host}");
             let commit = match self.repo.find_reference(&refname) {
                 Ok(r) => r.peel_to_commit()?,
                 Err(_) => continue,

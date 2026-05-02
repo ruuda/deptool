@@ -190,10 +190,10 @@ fn sync_then_deploy_avoids_staleness() {
     // Revert the tracking ref to simulate another operator deploying
     // v2 behind our back while our store still thinks v1 is current.
     let repo = git2::Repository::open(env.store.path()).unwrap();
-    let reflog = repo.reflog("refs/remotes/testhost/current").unwrap();
+    let reflog = repo.reflog("refs/remotes/testhost").unwrap();
     let v1_ref = reflog.get(1).expect("reflog has a previous entry").id_new();
     repo.reference(
-        "refs/remotes/testhost/current",
+        "refs/remotes/testhost",
         v1_ref,
         true,
         "revert for test",
