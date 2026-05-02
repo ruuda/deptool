@@ -26,6 +26,12 @@ view was outdated, then the plan is stale, and the deploy aborts. Deptool
 fetches any missing commits so the next `deptool deploy` run has an up-to-date
 view of the cluster.
 
+Locks are implemented as a file lock held by the agent processes on the target
+host. Deptool spawns the agent process through an <abbr>SSH</abbr> session.
+When `deptool deploy` exits, or when you kill it, the <abbr>SSH</abbr>
+subprocesses terminate, which in turn stops the agent on the target hosts, and
+this releases the locks. You never need to break a lock manually.
+
 ## Apply
 
 When Deptool holds the deploy lock for every affected host, it proceeds to the
