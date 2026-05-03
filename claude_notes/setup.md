@@ -47,6 +47,7 @@ needs to be installed. We do this by starting an SSH session against the target
 host which runs a shell command made up of these parts:
 
  - `sudo mkdir -p /var/lib/deptool/{bin,apps,store}`
+ - `sudo chmod 0700 /var/lib/deptool/store`
  - `sudo dd of=<target-bin-path>`
  - `sudo chmod +x <target-bin-path>`
  - `sudo sha256sum <target-bin-path>`

@@ -66,7 +66,11 @@ impl Store {
         })
     }
 
-    /// Open an existing bare repo, or create one with reflogs enabled.
+    /// Open or init a bare repo with reflogs enabled and owner-only perms.
+    ///
+    /// The store carries the full cluster config and history -- an
+    /// unprivileged user that escaped a sandbox on a host must not be
+    /// able to read it.
     pub fn open_or_init(path: &Path) -> Result<Self> {
         let repo = match Repository::open(path) {
             Ok(r) => r,
@@ -77,6 +81,10 @@ impl Store {
                 repo
             }
         };
+        // Tightens 0o755 dirs from older installs.
+        // TODO: Move inside the init branch once every host has run
+        // this binary at least once.
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
         Ok(Store { repo })
     }
 
@@ -882,5 +890,23 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn open_or_init_locks_store_dir_to_owner() {
+        let parent = crate::testutil::TempDir::new("store_perms");
+        let store_path = parent.path().join("store");
+
+        // Init creates the dir; widening between two opens checks
+        // that the chmod runs on the reopen path too, not just init.
+        let _ = Store::open_or_init(&store_path).expect("init succeeds");
+        fs::set_permissions(&store_path, fs::Permissions::from_mode(0o755))
+            .expect("widen succeeds");
+        let _ = Store::open_or_init(&store_path).expect("reopen succeeds");
+        let mode = fs::metadata(&store_path)
+            .expect("dir exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "dir is owner-only after reopen");
     }
 }

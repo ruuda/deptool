@@ -122,6 +122,9 @@ pub fn install_binary(
         // -sm prints kernel-name and machine, e.g. "Linux x86_64".
         "uname -sm",
         "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
+        // The store may carry the full cluster config history; keep
+        // it out of reach of unprivileged users on the host.
+        "sudo chmod 0700 /var/lib/deptool/store",
         &format!("sudo dd status=none of={remote_bin_path}"),
         &format!("sudo chmod +x {remote_bin_path}"),
         &format!("sudo sha256sum {remote_bin_path}"),
