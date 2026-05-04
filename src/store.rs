@@ -576,7 +576,12 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Option<Oid>> {
             ft if ft.is_file() => {
                 let contents = fs::read(entry.path())?;
                 let oid = repo.blob(&contents)?;
-                tb.insert(name, oid, 0o100644)?;
+                // Git only tracks the user-executable bit.
+                let mode = match entry.metadata()?.permissions().mode() & 0o100 {
+                    0 => 0o100644,
+                    _ => 0o100755,
+                };
+                tb.insert(name, oid, mode)?;
             }
             _ => panic!("Unsupported directory entry: {name}"),
         }
@@ -768,6 +773,30 @@ mod tests {
         ]);
 
         t.store.validate(t.get_commit_tree_oid(oid))
+    }
+
+    #[test]
+    fn build_tree_preserves_executable_bit() -> Result<()> {
+        let dir = crate::testutil::TempDir::new("config");
+        let host_dir = dir.path().join("host");
+        fs::create_dir_all(&host_dir)?;
+        fs::write(host_dir.join("hook.sh"), b"#!/bin/sh\n")?;
+        fs::write(host_dir.join("plain.conf"), b"key=value\n")?;
+        fs::set_permissions(host_dir.join("hook.sh"), fs::Permissions::from_mode(0o755))?;
+
+        let t = TestRepo::new();
+        let root = t.store.repo.find_tree(t.store.build_tree(dir.path())?)?;
+        assert_eq!(
+            root.get_path(Path::new("host/hook.sh"))?.filemode(),
+            0o100755,
+            "executable input file gets executable git mode",
+        );
+        assert_eq!(
+            root.get_path(Path::new("host/plain.conf"))?.filemode(),
+            0o100644,
+            "non-executable input file gets regular git mode",
+        );
+        Ok(())
     }
 
     #[test]
