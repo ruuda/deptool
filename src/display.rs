@@ -160,6 +160,20 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
     Ok(())
 }
 
+pub fn print_success_summary(
+    out: &mut impl Write,
+    n_hosts: usize,
+    elapsed: Duration,
+) -> Result<()> {
+    let noun = if n_hosts == 1 { "host" } else { "hosts" };
+    writeln!(
+        out,
+        "\nChanges deployed successfully to {n_hosts} {noun} in {:.2}s.",
+        elapsed.as_secs_f64(),
+    )?;
+    Ok(())
+}
+
 /// Format a Git commit time as `YYYY-MM-DD HH:MM:SS ±HHMM` in its original zone.
 ///
 /// Matches `git log`'s `%ci` (committer date, ISO 8601 with offset) format.

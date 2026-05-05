@@ -12,6 +12,7 @@ use deptool::*;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use bpaf::{Bpaf, long};
 
@@ -325,7 +326,9 @@ fn run_deploy(
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts, Box::new(observer));
 
+    let start = Instant::now();
     let result = deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress);
+    let elapsed = start.elapsed();
 
     // Per-host status lines have room for one phrase. Print explanation
     // blocks at the end for failure classes that need more space.
@@ -337,6 +340,10 @@ fn run_deploy(
             eprintln!("{item}");
         }
         eprintln!();
+    }
+
+    if result.is_ok() {
+        display::print_success_summary(&mut std::io::stdout(), plan.hosts.len(), elapsed)?;
     }
 
     result
