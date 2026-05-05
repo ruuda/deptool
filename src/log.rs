@@ -81,8 +81,7 @@ mod tests {
         // that the post-open chmod runs on existing files too, not
         // just on creation.
         let _ = FileLog::open(&path).expect("fresh log opens");
-        fs::set_permissions(&path, Permissions::from_mode(0o644))
-            .expect("widen succeeds");
+        fs::set_permissions(&path, Permissions::from_mode(0o644)).expect("widen succeeds");
         let _ = FileLog::open(&path).expect("reopen succeeds");
         let mode = fs::metadata(&path)
             .expect("file exists")

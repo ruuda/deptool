@@ -105,10 +105,7 @@ enum Cmd {
     #[bpaf(command)]
     Diff {
         /// Show a per-file diffstat instead of the full diff.
-        #[bpaf(
-            long("stat"),
-            flag(display::DiffMode::Stat, display::DiffMode::Full)
-        )]
+        #[bpaf(long("stat"), flag(display::DiffMode::Stat, display::DiffMode::Full))]
         mode: display::DiffMode,
         /// Restrict to the listed hosts (comma-separated, repeatable).
         #[bpaf(long("limit"), argument("HOSTS"), many)]
@@ -296,7 +293,10 @@ fn run_deploy(
     let plan = match plan::make_plan(&repo, tree_oid, filter)? {
         Some(draft) => draft.finalize(&repo)?,
         None => {
-            eprintln!("All hosts in cluster '{}' are up to date.", cluster_name(&dir));
+            eprintln!(
+                "All hosts in cluster '{}' are up to date.",
+                cluster_name(&dir)
+            );
             return Ok(());
         }
     };
@@ -428,7 +428,10 @@ fn run_diff(
             let plan = draft.finalize(&store)?;
             display::print_diff(&store, &plan, mode, display::UseColor::from_env())?;
         }
-        None => eprintln!("All hosts in cluster '{}' are up to date.", cluster_name(&dir)),
+        None => eprintln!(
+            "All hosts in cluster '{}' are up to date.",
+            cluster_name(&dir)
+        ),
     }
     Ok(())
 }
@@ -475,9 +478,7 @@ fn run() -> Result<()> {
             connect_mode,
             dir,
         } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
-        Cmd::Status { limit, dir } => {
-            run_status(store, dir, &HostFilter::from_limit(&limit))?
-        }
+        Cmd::Status { limit, dir } => run_status(store, dir, &HostFilter::from_limit(&limit))?,
         Cmd::Diff { mode, limit, dir } => {
             run_diff(store, dir, mode, &HostFilter::from_limit(&limit))?
         }

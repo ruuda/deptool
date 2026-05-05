@@ -177,10 +177,7 @@ mod tests {
         driver.set_host_tracking_ref("a", c_a);
 
         // host-b: nginx differs, caddy matches -> has changes (nginx only).
-        let c_b = driver.commit(&[
-            ("b/nginx/conf", b"v1"),
-            ("b/caddy/conf", b"v1"),
-        ]);
+        let c_b = driver.commit(&[("b/nginx/conf", b"v1"), ("b/caddy/conf", b"v1")]);
         driver.set_host_tracking_ref("b", c_b);
 
         // host-c: no tracking ref -> new host.
@@ -193,7 +190,10 @@ mod tests {
         ]);
 
         let states = compute_status(&driver.store, config.path(), &HostFilter::All)?;
-        assert!(matches!(host_state(&states, "a"), HostState::UpToDate { .. }));
+        assert!(matches!(
+            host_state(&states, "a"),
+            HostState::UpToDate { .. }
+        ));
         assert!(matches!(host_state(&states, "c"), HostState::NewHost));
         match host_state(&states, "b") {
             HostState::HasChanges { apps, .. } => {
