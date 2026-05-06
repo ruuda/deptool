@@ -21,6 +21,7 @@ nav:
       - "User management": "user_management.md"
       - "Rolling back": "rollback.md"
       - "Building": "building.md"
+      - "Changelog": "changelog.md"
   - "Reference":
       - "Directory layout": "directory_layout.md"
       - "Manifests": "manifests.md"
