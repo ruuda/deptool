@@ -87,6 +87,8 @@ bad, this should all happen within a second:
 
       webserver: done
 
+    Changes deployed successfully to 1 host in 0.78s.
+
 This created a directory `/var/lib/deptool` on the target host:
 
     root@webserver ~ $ tree /var/lib/deptool
@@ -141,6 +143,8 @@ to diff the contents of Caddyfile, `y` to deploy.
     Apply to 1 host in cluster 'prod'? [y/N/d] y
     
       webserver: done
+
+    Changes deployed successfully to 1 host in 0.67s.
 
 On the target host, the `caddy` directory has changed:
 
@@ -252,6 +256,8 @@ dive into the details of rollback later. Press `y` to accept.
 
       webserver: done
 
+    Changes deployed successfully to 1 host in 0.68s.
+
 When an app contains enabled systemd units, Deptool prints the status of the
 unit, so you can see that it activated correctly — or when it didn’t, to help
 you diagnose why it failed.
@@ -299,6 +305,8 @@ pick up the previous known-good configuration. This ensures that we don’t leav
     Apr 18 21:17:48 webserver caddy[1174]: ...
 
       webserver: done
+
+    Changes deployed successfully to 1 host in 0.72s.
 
 [^5]: While many applications can reload configuration, Deptool opts to keep
       things simple, so it always restarts all affected systemd units.

@@ -45,6 +45,32 @@ configure scripts.
 [nix]: https://nixos.org/
 [rcl]: https://rcl-lang.org/
 
+## Example
+
+This is what a typical Deptool run looks like, in this case when updating
+<abbr>DNS</abbr> records on a cluster running <abbr>NSD</abbr>:
+
+```
+$ deptool deploy
+s4.ruuda.nl
+    update nsd
+        ~ zones/ruuda.nl.zone
+        restart unit nsd.service
+
+s5.ruuda.nl
+    update nsd
+        ~ zones/ruuda.nl.zone
+        restart unit nsd.service
+
+Auto-rollback if deploy fails.
+Apply to 2 hosts in cluster 'prod'? [y/N/d] y
+
+  s4.ruuda.nl: done
+  s5.ruuda.nl: done
+
+Changes deployed successfully to 2 hosts in 0.99s.
+```
+
 ## Workflow
 
 Deptool expects configuration for your entire cluster materialized in a

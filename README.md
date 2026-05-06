@@ -6,6 +6,29 @@ small clusters (1–50 hosts) managed by a small group of operators (1–5 peopl
 It is extremely fast for this use case: it can show a deployment plan in
 milliseconds, and execute it sub-second.
 
+For example, this is Deptool updating DNS records on a cluster running NSD:
+
+```
+$ deptool deploy
+s4.ruuda.nl
+    update nsd
+        ~ zones/ruuda.nl.zone
+        restart unit nsd.service
+
+s5.ruuda.nl
+    update nsd
+        ~ zones/ruuda.nl.zone
+        restart unit nsd.service
+
+Auto-rollback if deploy fails.
+Apply to 2 hosts in cluster 'prod'? [y/N/d] y
+
+  s4.ruuda.nl: done
+  s5.ruuda.nl: done
+
+Changes deployed successfully to 2 hosts in 0.99s.
+```
+
 To get started, these are the most useful chapters from the manual:
 
 <!-- The links below are the rendered versions of what's in the docs directory
