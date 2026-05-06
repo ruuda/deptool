@@ -51,7 +51,7 @@ before committing to the repository. I want this to be a high quality codebase,
 not vibecoded AI slop. The user-facing documentation and this readme are written
 by hand, because even though LLMs could get the content right, you can tell an
 LLM was involved, and that has [negative][cantrill-fly] [consequences][ruuda-llm].
-I don’t want to force humans to read LLM-generated to be able to use a tool
+I don’t want to force humans to read LLM-generated text to be able to use a tool
 intended for humans.
 
 [cantrill-fly]: https://bcantrill.dtrace.org/2025/12/05/your-intellectual-fly-is-open/
