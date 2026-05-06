@@ -57,10 +57,10 @@ static binary.)
 
 ## Security considerations
 
-TODO(ruuda): document that every host carries a copy of the full cluster store,
-including the entire history of every other host's config. Information
-disclosure on a compromised host extends to other hosts' configuration, and
-secrets that were ever committed remain in the store on every host.
-
-TODO(ruuda): consider restricting host-side stores to only the trees reachable
-from that host's own deploys. Trade-off: breaks pack reuse on push.
+The store holds the configuration for the entire cluster, and its full history.
+Currently every managed host contains a copy of the store. This means that every
+host stores not just its own current configuration, but also configuration for
+other hosts. Although you should never store secrets in your configuration, and
+your cluster should be secure even when its configuration is public, this still
+presents an information disclosure risk. To mitigate this somewhat, the store on
+managed hosts is accessible only to the `root` user.
