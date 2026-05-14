@@ -438,22 +438,23 @@ impl Store {
     fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
         let apps = self.get_host_apps(config_tree, host)?;
 
-        // Track unit files, sysuser configs, quadlets, and symlink targets
-        // across apps to detect conflicts.
-        let mut unit_owners: BTreeMap<String, String> = BTreeMap::new();
-        let mut sysuser_owners: BTreeMap<String, String> = BTreeMap::new();
+        // Track quadlet, sysuser, unit, and symlink-target conflicts across
+        // apps. Subdir-based dedup checks run first (canonical order:
+        // quadlets, sysusers, units), then the manifest-symlink loop.
         let mut quadlet_owners: BTreeMap<String, String> = BTreeMap::new();
         let mut symlink_owners: BTreeMap<String, String> = BTreeMap::new();
+        let mut sysuser_owners: BTreeMap<String, String> = BTreeMap::new();
+        let mut unit_owners: BTreeMap<String, String> = BTreeMap::new();
 
         for (app, app_tree_oid) in &apps {
             let manifest = self.read_manifest(*app_tree_oid)?;
             let app_tree = self.repo.find_tree(*app_tree_oid)?;
 
-            // Check for duplicate unit files across apps.
-            for name in self.app_units(*app_tree_oid)? {
-                if let Some(other) = unit_owners.insert(name.clone(), app.clone()) {
+            // Check for duplicate quadlet files across apps.
+            for name in self.app_quadlets(*app_tree_oid)? {
+                if let Some(other) = quadlet_owners.insert(name.clone(), app.clone()) {
                     return Err(StoreError::InvalidConfig(format!(
-                        "unit {name} provided by both {other} and {app}",
+                        "quadlet {name} provided by both {other} and {app}",
                     )));
                 }
             }
@@ -467,11 +468,11 @@ impl Store {
                 }
             }
 
-            // Check for duplicate quadlet files across apps.
-            for name in self.app_quadlets(*app_tree_oid)? {
-                if let Some(other) = quadlet_owners.insert(name.clone(), app.clone()) {
+            // Check for duplicate unit files across apps.
+            for name in self.app_units(*app_tree_oid)? {
+                if let Some(other) = unit_owners.insert(name.clone(), app.clone()) {
                     return Err(StoreError::InvalidConfig(format!(
-                        "quadlet {name} provided by both {other} and {app}",
+                        "unit {name} provided by both {other} and {app}",
                     )));
                 }
             }
@@ -488,15 +489,15 @@ impl Store {
                 // that isn't in its desired set -- it can't distinguish
                 // manifest symlinks from managed ones.
                 for managed_dir in [
-                    "/etc/systemd/system",
-                    "/etc/sysusers.d",
                     "/etc/containers/systemd",
+                    "/etc/sysusers.d",
+                    "/etc/systemd/system",
                 ] {
                     if target.starts_with(&format!("{managed_dir}/")) {
                         return Err(StoreError::InvalidConfig(format!(
                             "app {app} symlink targets {managed_dir}/ which is \
-                             managed automatically; use the systemd/, sysusers/, \
-                             or quadlets/ app directory instead",
+                             managed automatically; use the quadlets/, sysusers/, \
+                             or systemd/ app directory instead",
                         )));
                     }
                 }

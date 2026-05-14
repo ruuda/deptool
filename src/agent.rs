@@ -32,9 +32,9 @@ use crate::store::{RefUpdate, Store};
 pub struct AgentConfig {
     pub hostname: String,
     pub apps_dir: PathBuf,
-    pub unit_dir: PathBuf,
-    pub sysusers_dir: PathBuf,
     pub quadlets_dir: PathBuf,
+    pub sysusers_dir: PathBuf,
+    pub units_dir: PathBuf,
 }
 
 impl AgentConfig {
@@ -43,12 +43,12 @@ impl AgentConfig {
         AgentConfig {
             hostname: test_override("DEPTOOL_HOSTNAME", &read_hostname()),
             apps_dir: PathBuf::from(test_override("DEPTOOL_APPS_DIR", "/var/lib/deptool/apps")),
-            unit_dir: PathBuf::from(test_override("DEPTOOL_UNIT_DIR", "/etc/systemd/system")),
-            sysusers_dir: PathBuf::from(test_override("DEPTOOL_SYSUSERS_DIR", "/etc/sysusers.d")),
             quadlets_dir: PathBuf::from(test_override(
                 "DEPTOOL_QUADLETS_DIR",
                 "/etc/containers/systemd",
             )),
+            sysusers_dir: PathBuf::from(test_override("DEPTOOL_SYSUSERS_DIR", "/etc/sysusers.d")),
+            units_dir: PathBuf::from(test_override("DEPTOOL_UNITS_DIR", "/etc/systemd/system")),
         }
     }
 }
@@ -377,19 +377,19 @@ impl AgentSession {
         )?;
 
         let desired = DesiredState {
-            units: self
-                .store
-                .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?,
-            sysusers: self.store.desired_sysusers(
-                ctx.target_commit,
-                &self.hostname,
-                &self.apps_dir,
-            )?,
             quadlets: self.store.desired_quadlets(
                 ctx.target_commit,
                 &self.hostname,
                 &self.apps_dir,
             )?,
+            sysusers: self.store.desired_sysusers(
+                ctx.target_commit,
+                &self.hostname,
+                &self.apps_dir,
+            )?,
+            units: self
+                .store
+                .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?,
         };
 
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
@@ -482,15 +482,15 @@ impl AgentSession {
 
         let desired = match ctx.current_commit {
             Some(oid) => DesiredState {
-                units: self
-                    .store
-                    .desired_units(oid, &self.hostname, &self.apps_dir)?,
-                sysusers: self
-                    .store
-                    .desired_sysusers(oid, &self.hostname, &self.apps_dir)?,
                 quadlets: self
                     .store
                     .desired_quadlets(oid, &self.hostname, &self.apps_dir)?,
+                sysusers: self
+                    .store
+                    .desired_sysusers(oid, &self.hostname, &self.apps_dir)?,
+                units: self
+                    .store
+                    .desired_units(oid, &self.hostname, &self.apps_dir)?,
             },
             None => DesiredState::default(),
         };

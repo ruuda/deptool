@@ -40,14 +40,14 @@ pub enum AppDiff {
 /// Per-app instances can be combined via `merge` into a host-level aggregate.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemDiff<T = String> {
-    /// Unit lifecycle actions.
-    pub units: UnitChanges,
+    /// Quadlet file changes.
+    pub quadlets: QuadletChanges,
     /// Manifest symlink changes.
     pub symlinks: SymlinkChanges<T>,
     /// Sysusers config file changes.
-    pub sysusers: SysusersChanges,
-    /// Quadlet file changes.
-    pub quadlets: QuadletChanges,
+    pub sysusers: SysuserChanges,
+    /// Unit lifecycle actions.
+    pub units: UnitChanges,
 }
 
 impl<T> SystemDiff<T> {
@@ -65,11 +65,26 @@ impl<T> SystemDiff<T> {
     /// -- it silently ignores new fields.
     pub fn is_rollback_safe(&self) -> bool {
         let SystemDiff {
-            units,
+            quadlets,
             symlinks,
             sysusers,
-            quadlets,
+            units,
         } = self;
+        let QuadletChanges {
+            link: quadlets_link,
+            unlink: _,
+            content_changed: _,
+        } = quadlets;
+        let SymlinkChanges {
+            create,
+            remove: _,
+            change: _,
+        } = symlinks;
+        let SysuserChanges {
+            link: sysusers_link,
+            unlink: _,
+            content_changed: _,
+        } = sysusers;
         let UnitChanges {
             enable,
             restart: _,
@@ -77,44 +92,29 @@ impl<T> SystemDiff<T> {
             link,
             unlink: _,
         } = units;
-        let SymlinkChanges {
-            create,
-            remove: _,
-            change: _,
-        } = symlinks;
-        let SysusersChanges {
-            link: sysusers_link,
-            unlink: _,
-            content_changed: _,
-        } = sysusers;
-        let QuadletChanges {
-            link: quadlets_link,
-            unlink: _,
-            content_changed: _,
-        } = quadlets;
-        enable.is_empty()
-            && link.is_empty()
+        quadlets_link.is_empty()
             && create.is_empty()
             && sysusers_link.is_empty()
-            && quadlets_link.is_empty()
+            && enable.is_empty()
+            && link.is_empty()
     }
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
     pub fn append(&mut self, other: &mut Self) {
-        self.units.enable.append(&mut other.units.enable);
-        self.units.restart.append(&mut other.units.restart);
-        self.units.disable.append(&mut other.units.disable);
-        self.units.link.append(&mut other.units.link);
-        self.units.unlink.append(&mut other.units.unlink);
+        self.quadlets.link.append(&mut other.quadlets.link);
+        self.quadlets.unlink.append(&mut other.quadlets.unlink);
+        self.quadlets.content_changed |= other.quadlets.content_changed;
         self.symlinks.create.append(&mut other.symlinks.create);
         self.symlinks.remove.append(&mut other.symlinks.remove);
         self.symlinks.change.append(&mut other.symlinks.change);
         self.sysusers.link.append(&mut other.sysusers.link);
         self.sysusers.unlink.append(&mut other.sysusers.unlink);
         self.sysusers.content_changed |= other.sysusers.content_changed;
-        self.quadlets.link.append(&mut other.quadlets.link);
-        self.quadlets.unlink.append(&mut other.quadlets.unlink);
-        self.quadlets.content_changed |= other.quadlets.content_changed;
+        self.units.enable.append(&mut other.units.enable);
+        self.units.restart.append(&mut other.units.restart);
+        self.units.disable.append(&mut other.units.disable);
+        self.units.link.append(&mut other.units.link);
+        self.units.unlink.append(&mut other.units.unlink);
     }
 }
 
@@ -126,10 +126,10 @@ impl SystemDiff {
     pub fn resolve_symlinks(self, app: &str, apps_dir: &Path) -> SystemDiff<PathBuf> {
         let current_dir = apps_dir.join(app).join("current");
         SystemDiff {
-            units: self.units,
+            quadlets: self.quadlets,
             symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
             sysusers: self.sysusers,
-            quadlets: self.quadlets,
+            units: self.units,
         }
     }
 }
@@ -212,7 +212,7 @@ impl UnitChanges {
 /// we don't need enable/disable -- we just need to know whether to run
 /// `systemd-sysusers` to materialize the declared users.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SysusersChanges {
+pub struct SysuserChanges {
     /// Sysuser config files newly provided by this app.
     pub link: Vec<String>,
     /// Sysuser config files no longer provided by this app.
@@ -224,7 +224,7 @@ pub struct SysusersChanges {
     pub content_changed: bool,
 }
 
-impl SysusersChanges {
+impl SysuserChanges {
     pub fn is_empty(&self) -> bool {
         self.link.is_empty() && self.unlink.is_empty() && !self.content_changed
     }
@@ -257,12 +257,12 @@ pub struct QuadletChanges {
 /// directory (systemd units, sysusers configs, and quadlets).
 #[derive(Default)]
 pub struct DesiredState {
-    /// Unit files to symlink in the unit directory.
-    pub units: BTreeMap<String, PathBuf>,
-    /// Sysuser config files to symlink in the sysusers directory.
-    pub sysusers: BTreeMap<String, PathBuf>,
     /// Quadlet files to symlink in the quadlets directory.
     pub quadlets: BTreeMap<String, PathBuf>,
+    /// Sysuser config files to symlink in the sysusers directory.
+    pub sysusers: BTreeMap<String, PathBuf>,
+    /// Unit files to symlink in the unit directory.
+    pub units: BTreeMap<String, PathBuf>,
 }
 
 /// Compute unit lifecycle actions by comparing two enabled unit sets.
@@ -403,7 +403,7 @@ pub fn compute_system_diff(
             let manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
             let new_sysusers = store.app_sysusers(*new_tree)?;
-            let sysusers = SysusersChanges {
+            let sysusers = SysuserChanges {
                 content_changed: !new_sysusers.is_empty(),
                 link: new_sysusers.into_iter().collect(),
                 unlink: Vec::new(),
@@ -415,10 +415,10 @@ pub fn compute_system_diff(
                 unlink: Vec::new(),
             };
             SystemDiff {
-                units,
+                quadlets,
                 symlinks,
                 sysusers,
-                quadlets,
+                units,
             }
         }
         AppDiff::Remove { old_tree } => {
@@ -428,7 +428,7 @@ pub fn compute_system_diff(
             let manifest = store.read_manifest(*old_tree)?;
             let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
             let old_sysusers = store.app_sysusers(*old_tree)?;
-            let sysusers = SysusersChanges {
+            let sysusers = SysuserChanges {
                 content_changed: !old_sysusers.is_empty(),
                 link: Vec::new(),
                 unlink: old_sysusers.into_iter().collect(),
@@ -440,10 +440,10 @@ pub fn compute_system_diff(
                 unlink: old_quadlets.into_iter().collect(),
             };
             SystemDiff {
-                units,
+                quadlets,
                 symlinks,
                 sysusers,
-                quadlets,
+                units,
             }
         }
         AppDiff::Update { old_tree, new_tree } => {
@@ -459,7 +459,7 @@ pub fn compute_system_diff(
             let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
             let old_sysusers_all = store.app_sysusers(*old_tree)?;
             let new_sysusers_all = store.app_sysusers(*new_tree)?;
-            let sysusers = SysusersChanges {
+            let sysusers = SysuserChanges {
                 content_changed: store.sysusers_tree_oid(*old_tree)?
                     != store.sysusers_tree_oid(*new_tree)?,
                 link: new_sysusers_all
@@ -486,10 +486,10 @@ pub fn compute_system_diff(
                     .collect(),
             };
             SystemDiff {
-                units,
+                quadlets,
                 symlinks,
                 sysusers,
-                quadlets,
+                units,
             }
         }
     };

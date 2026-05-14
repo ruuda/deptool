@@ -510,9 +510,9 @@ fn activate(
     emit: &mut dyn FnMut(protocol::Message),
     log: &mut dyn FnMut(&str),
     apps_dir: &Path,
-    unit_dir: &Path,
-    sysusers_dir: &Path,
     quadlets_dir: &Path,
+    sysusers_dir: &Path,
+    units_dir: &Path,
 ) -> std::result::Result<(), ApplyError> {
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
@@ -568,7 +568,7 @@ fn activate(
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
     let unit_symlink_changes =
-        checkout::reconcile_managed_symlinks(&desired.units, apps_dir, unit_dir)?;
+        checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
 
     // Reconcile quadlet symlinks before reload, so the quadlet generator
     // run by `daemon-reload` sees the current set of quadlet files.
@@ -644,9 +644,9 @@ fn systemctl_ok(args: &[&str]) -> bool {
 
 fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
     let apps_dir = config.apps_dir.clone();
-    let unit_dir = config.unit_dir.clone();
-    let sysusers_dir = config.sysusers_dir.clone();
     let quadlets_dir = config.quadlets_dir.clone();
+    let sysusers_dir = config.sysusers_dir.clone();
+    let units_dir = config.units_dir.clone();
     let log_dir = config
         .apps_dir
         .parent()
@@ -663,9 +663,9 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
                 emit,
                 log,
                 &apps_dir,
-                &unit_dir,
-                &sysusers_dir,
                 &quadlets_dir,
+                &sysusers_dir,
+                &units_dir,
             )
         }),
         Some(log_path),

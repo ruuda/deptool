@@ -16,7 +16,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, QuadletChanges, SymlinkChanges, SysusersChanges, UnitChanges};
+use crate::plan::{AppDiff, Plan, QuadletChanges, SymlinkChanges, SysuserChanges, UnitChanges};
 use crate::prim::{Hostname, gmtime};
 use crate::store::Store;
 
@@ -152,7 +152,7 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                 }
             }
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
-            write_sysusers_actions(out, &app_plan.system.sysusers, color)?;
+            write_sysuser_actions(out, &app_plan.system.sysusers, color)?;
             write_unit_change_actions(out, &app_plan.system.units, color)?;
             write_quadlet_actions(out, &app_plan.system.quadlets, color)?;
             write_unit_start_actions(out, &app_plan.system.units, color)?;
@@ -358,9 +358,9 @@ fn write_unit_start_actions(
 }
 
 /// Print sysusers symlink actions: unlink then link.
-fn write_sysusers_actions(
+fn write_sysuser_actions(
     out: &mut impl Write,
-    sysusers: &SysusersChanges,
+    sysusers: &SysuserChanges,
     color: UseColor,
 ) -> Result<()> {
     for name in &sysusers.unlink {

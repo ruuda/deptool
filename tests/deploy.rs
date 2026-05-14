@@ -72,7 +72,7 @@ impl LocalEnv {
             .env("DEPTOOL_STORE", self.store.path())
             .env("DEPTOOL_HOSTNAME", self.hostname)
             .env("DEPTOOL_APPS_DIR", self.apps.path())
-            .env("DEPTOOL_UNIT_DIR", self.units.path())
+            .env("DEPTOOL_UNITS_DIR", self.units.path())
             .env("DEPTOOL_REMOTE_STORE", self.remote_store.path())
             .output()
             .expect("deptool runs")
