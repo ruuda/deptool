@@ -512,6 +512,7 @@ fn activate(
     apps_dir: &Path,
     unit_dir: &Path,
     sysusers_dir: &Path,
+    quadlets_dir: &Path,
 ) -> std::result::Result<(), ApplyError> {
     // Reconcile manifest symlinks (e.g. config files in /etc) *before*
     // any systemd lifecycle operations, because units may depend on paths
@@ -566,10 +567,21 @@ fn activate(
     // "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    let symlink_changes = checkout::reconcile_managed_symlinks(&desired.units, apps_dir, unit_dir)?;
+    let unit_symlink_changes =
+        checkout::reconcile_managed_symlinks(&desired.units, apps_dir, unit_dir)?;
 
-    // Only poke systemd when something actually changed on disk.
-    let needs_reload = !symlink_changes.is_empty() || !changes.units.is_empty();
+    // Reconcile quadlet symlinks before reload, so the quadlet generator
+    // run by `daemon-reload` sees the current set of quadlet files.
+    let quadlet_symlink_changes =
+        checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
+
+    // Only poke systemd when something actually changed on disk. A quadlet
+    // content change with no symlink change still needs a reload so the
+    // generator re-emits the unit.
+    let needs_reload = !unit_symlink_changes.is_empty()
+        || !quadlet_symlink_changes.is_empty()
+        || !changes.units.is_empty()
+        || changes.quadlets.content_changed;
     if needs_reload {
         log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
@@ -634,6 +646,7 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
     let apps_dir = config.apps_dir.clone();
     let unit_dir = config.unit_dir.clone();
     let sysusers_dir = config.sysusers_dir.clone();
+    let quadlets_dir = config.quadlets_dir.clone();
     let log_dir = config
         .apps_dir
         .parent()
@@ -652,6 +665,7 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
                 &apps_dir,
                 &unit_dir,
                 &sysusers_dir,
+                &quadlets_dir,
             )
         }),
         Some(log_path),

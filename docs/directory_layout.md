@@ -81,5 +81,10 @@ reference users defined by sysusers included in the app, see also
 [deployment phases](deployment_phases.md#update-sysusers). See the [user
 management guide](user_management.md) for alternative ways to manage users.
 
+### quadlets/
+
+<!-- TODO(ruuda): document the quadlets/ special directory, mirroring the
+     systemd/ and sysusers/ sections above. -->
+
 [sysusers.d]:  https://www.freedesktop.org/software/systemd/man/latest/sysusers.d.html
 [sd-sysusers]: https://www.freedesktop.org/software/systemd/man/latest/systemd-sysusers.html#

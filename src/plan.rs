@@ -46,6 +46,8 @@ pub struct SystemDiff<T = String> {
     pub symlinks: SymlinkChanges<T>,
     /// Sysusers config file changes.
     pub sysusers: SysusersChanges,
+    /// Quadlet file changes.
+    pub quadlets: QuadletChanges,
 }
 
 impl<T> SystemDiff<T> {
@@ -66,6 +68,7 @@ impl<T> SystemDiff<T> {
             units,
             symlinks,
             sysusers,
+            quadlets,
         } = self;
         let UnitChanges {
             enable,
@@ -84,7 +87,16 @@ impl<T> SystemDiff<T> {
             unlink: _,
             content_changed: _,
         } = sysusers;
-        enable.is_empty() && link.is_empty() && create.is_empty() && sysusers_link.is_empty()
+        let QuadletChanges {
+            link: quadlets_link,
+            unlink: _,
+            content_changed: _,
+        } = quadlets;
+        enable.is_empty()
+            && link.is_empty()
+            && create.is_empty()
+            && sysusers_link.is_empty()
+            && quadlets_link.is_empty()
     }
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
@@ -100,6 +112,9 @@ impl<T> SystemDiff<T> {
         self.sysusers.link.append(&mut other.sysusers.link);
         self.sysusers.unlink.append(&mut other.sysusers.unlink);
         self.sysusers.content_changed |= other.sysusers.content_changed;
+        self.quadlets.link.append(&mut other.quadlets.link);
+        self.quadlets.unlink.append(&mut other.quadlets.unlink);
+        self.quadlets.content_changed |= other.quadlets.content_changed;
     }
 }
 
@@ -114,6 +129,7 @@ impl SystemDiff {
             units: self.units,
             symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
             sysusers: self.sysusers,
+            quadlets: self.quadlets,
         }
     }
 }
@@ -214,16 +230,39 @@ impl SysusersChanges {
     }
 }
 
+/// Quadlet file changes, derived from Git trees only.
+///
+/// Quadlet files live in `quadlets/` and get symlinked to
+/// `/etc/containers/systemd/`, where Podman's quadlet generator turns them
+/// into systemd units at `daemon-reload` time. Content changes need a
+/// reload to regenerate; the generated service's restart is driven by
+/// `systemd.units_enabled` listing its name.
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuadletChanges {
+    /// Quadlet files newly provided by this app.
+    pub link: Vec<String>,
+    /// Quadlet files no longer provided by this app.
+    pub unlink: Vec<String>,
+    /// True iff the `quadlets/` subtree differs between old and new tree.
+    ///
+    /// True for any kind of change: a new file, a removed file, or a
+    /// modification to an existing file. This is the trigger for
+    /// `daemon-reload`, which re-runs the quadlet generator.
+    pub content_changed: bool,
+}
+
 /// Desired managed-symlink state for a host deploy.
 ///
 /// Maps filenames to absolute symlink target paths for each managed
-/// directory (systemd units and sysusers configs).
+/// directory (systemd units, sysusers configs, and quadlets).
 #[derive(Default)]
 pub struct DesiredState {
     /// Unit files to symlink in the unit directory.
     pub units: BTreeMap<String, PathBuf>,
     /// Sysuser config files to symlink in the sysusers directory.
     pub sysusers: BTreeMap<String, PathBuf>,
+    /// Quadlet files to symlink in the quadlets directory.
+    pub quadlets: BTreeMap<String, PathBuf>,
 }
 
 /// Compute unit lifecycle actions by comparing two enabled unit sets.
@@ -369,10 +408,17 @@ pub fn compute_system_diff(
                 link: new_sysusers.into_iter().collect(),
                 unlink: Vec::new(),
             };
+            let new_quadlets = store.app_quadlets(*new_tree)?;
+            let quadlets = QuadletChanges {
+                content_changed: !new_quadlets.is_empty(),
+                link: new_quadlets.into_iter().collect(),
+                unlink: Vec::new(),
+            };
             SystemDiff {
                 units,
                 symlinks,
                 sysusers,
+                quadlets,
             }
         }
         AppDiff::Remove { old_tree } => {
@@ -387,10 +433,17 @@ pub fn compute_system_diff(
                 link: Vec::new(),
                 unlink: old_sysusers.into_iter().collect(),
             };
+            let old_quadlets = store.app_quadlets(*old_tree)?;
+            let quadlets = QuadletChanges {
+                content_changed: !old_quadlets.is_empty(),
+                link: Vec::new(),
+                unlink: old_quadlets.into_iter().collect(),
+            };
             SystemDiff {
                 units,
                 symlinks,
                 sysusers,
+                quadlets,
             }
         }
         AppDiff::Update { old_tree, new_tree } => {
@@ -418,10 +471,25 @@ pub fn compute_system_diff(
                     .cloned()
                     .collect(),
             };
+            let old_quadlets_all = store.app_quadlets(*old_tree)?;
+            let new_quadlets_all = store.app_quadlets(*new_tree)?;
+            let quadlets = QuadletChanges {
+                content_changed: store.quadlets_tree_oid(*old_tree)?
+                    != store.quadlets_tree_oid(*new_tree)?,
+                link: new_quadlets_all
+                    .difference(&old_quadlets_all)
+                    .cloned()
+                    .collect(),
+                unlink: old_quadlets_all
+                    .difference(&new_quadlets_all)
+                    .cloned()
+                    .collect(),
+            };
             SystemDiff {
                 units,
                 symlinks,
                 sysusers,
+                quadlets,
             }
         }
     };
@@ -892,6 +960,51 @@ mod tests {
                 ),
             ],
             &[("web1/nginx/nginx.conf", b"v2")],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unsafe_when_quadlet_files_added() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                ("web1/nginx/quadlets/nginx.container", b"[Container]"),
+            ],
+        )?;
+        assert!(!d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_safe_when_quadlet_files_removed() -> Result<()> {
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/quadlets/nginx.container", b"[Container]"),
+            ],
+            &[("web1/nginx/nginx.conf", b"v2")],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    /// Content-only quadlet changes are rollback-safe: re-applying the
+    /// previous commit restores the old quadlet file, which `daemon-reload`
+    /// then re-renders to the prior generated unit.
+    #[test]
+    fn rollback_safe_when_quadlet_content_changes_without_add() -> Result<()> {
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/quadlets/nginx.container", b"Image=v1"),
+            ],
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/quadlets/nginx.container", b"Image=v2"),
+            ],
         )?;
         assert!(d.is_rollback_safe());
         Ok(())
