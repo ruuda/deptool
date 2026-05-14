@@ -45,7 +45,7 @@ impl FileLog {
         // At ~15 calls per deploy a fresh buffer is negligible.
         let mut buf = Vec::with_capacity(4096);
         write_timestamp(&mut buf);
-        let _ = write!(buf, " {msg}\n");
+        let _ = writeln!(buf, " {msg}");
         let _ = (&self.file).write_all(&buf);
     }
 }

@@ -223,10 +223,10 @@ impl AgentSession {
             });
         } else {
             // Open the log file now that we hold the lock exclusively.
-            if let LogState::Pending(path) = &self.log {
-                if let Ok(file_log) = FileLog::open(path) {
-                    self.log = LogState::Active(file_log);
-                }
+            if let LogState::Pending(path) = &self.log
+                && let Ok(file_log) = FileLog::open(path)
+            {
+                self.log = LogState::Active(file_log);
             }
             self.log(format_args!("lock acquired by {operator}"));
             self.state = SessionState::Locked {
@@ -568,7 +568,7 @@ mod tests {
                 actual_commit,
             } => {
                 assert_eq!(*expected_commit, None);
-                assert_eq!(*actual_commit, Some(oid.into()));
+                assert_eq!(*actual_commit, Some(oid));
             }
             other => panic!("Expected LockStale, got {other:?}"),
         }

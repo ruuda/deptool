@@ -639,7 +639,7 @@ mod tests {
                         Hostname::from(*name),
                         HostPlan {
                             apps: BTreeMap::new(),
-                            expected_current: expected_current.clone(),
+                            expected_current: *expected_current,
                             is_rollback_safe: true,
                         },
                     )

@@ -52,9 +52,7 @@ impl std::fmt::Display for HostState {
 /// command this collapses to the identity sort and the result is the same
 /// alphabetical iteration we'd get from the map directly. Cheap enough to
 /// run on every render unconditionally rather than branch on command.
-fn sort_for_display<'a>(
-    states: &'a BTreeMap<Hostname, HostState>,
-) -> Vec<(&'a Hostname, &'a HostState)> {
+fn sort_for_display(states: &BTreeMap<Hostname, HostState>) -> Vec<(&Hostname, &HostState)> {
     let mut entries: Vec<_> = states.iter().collect();
     entries.sort_by_key(|(_, state)| match state {
         HostState::Pinged { stats } => (
