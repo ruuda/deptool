@@ -883,8 +883,16 @@ mod tests {
             ("web1/myapp/config.toml", b"v1"),
         ]);
 
-        assert!(!t.apply(only_sibling_changed, Some(base))?.quadlets.content_changed);
-        assert!(t.apply(quadlet_changed, Some(base))?.quadlets.content_changed);
+        assert!(
+            !t.apply(only_sibling_changed, Some(base))?
+                .quadlets
+                .content_changed
+        );
+        assert!(
+            t.apply(quadlet_changed, Some(base))?
+                .quadlets
+                .content_changed
+        );
         Ok(())
     }
 
