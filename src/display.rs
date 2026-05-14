@@ -151,11 +151,10 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
+            write_quadlet_actions(out, &app_plan.system.quadlets, color)?;
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
             write_sysuser_actions(out, &app_plan.system.sysusers, color)?;
-            write_unit_change_actions(out, &app_plan.system.units, color)?;
-            write_quadlet_actions(out, &app_plan.system.quadlets, color)?;
-            write_unit_start_actions(out, &app_plan.system.units, color)?;
+            write_unit_actions(out, &app_plan.system.units, color)?;
             writeln!(out)?;
         }
     }
@@ -321,15 +320,8 @@ fn empty_tree_oid() -> Oid {
     Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
-/// Print pre-reload unit actions: disable, unlink, link.
-///
-/// Split from the post-reload actions so quadlet reconcile (which happens
-/// between the two on the host) renders between them in the plan.
-fn write_unit_change_actions(
-    out: &mut impl Write,
-    units: &UnitChanges,
-    color: UseColor,
-) -> Result<()> {
+/// Print unit actions in execution order: disable, unlink, link, enable, restart.
+fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
     for unit in &units.disable {
         writeln!(out, "        {} {unit}", color.red("disable unit"))?;
     }
@@ -339,15 +331,6 @@ fn write_unit_change_actions(
     for unit in &units.link {
         writeln!(out, "        {} {unit}", color.green("link unit"))?;
     }
-    Ok(())
-}
-
-/// Print post-reload unit actions: enable, restart.
-fn write_unit_start_actions(
-    out: &mut impl Write,
-    units: &UnitChanges,
-    color: UseColor,
-) -> Result<()> {
     for unit in &units.enable {
         writeln!(out, "        {} {unit}", color.green("enable unit"))?;
     }

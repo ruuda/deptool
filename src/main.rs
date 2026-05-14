@@ -514,15 +514,30 @@ fn activate(
     sysusers_dir: &Path,
     units_dir: &Path,
 ) -> std::result::Result<(), ApplyError> {
-    // Reconcile manifest symlinks (e.g. config files in /etc) *before*
-    // any systemd lifecycle operations, because units may depend on paths
-    // that these symlinks provide.
+    // The activation phases below run in alphabetical order by subject
+    // (quadlets, symlinks, sysusers, units). The only constraints are:
+    //   * manifest symlinks must run before unit start (units may depend
+    //     on paths the symlinks provide);
+    //   * sysusers must be materialized before unit start (units may run
+    //     as those users);
+    //   * unit disable must run before unit reconcile (systemd treats our
+    //     symlinks as "linked units" and `disable` removes them);
+    //   * quadlet + unit reconciles must run before `daemon-reload` (so the
+    //     generator and systemd pick up the new files);
+    //   * `daemon-reload` must run before unit enable/restart.
+    // All other orderings are free.
+
+    // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
+    // the quadlet generator over them.
+    let quadlet_symlink_changes =
+        checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
+
+    // Reconcile manifest symlinks (e.g. config files in /etc).
     // TODO: log individual symlink changes.
     checkout::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
 
-    // Reconcile sysusers symlinks and materialize users before starting
-    // units, because units may run as those users. On app removal this
-    // wastefully runs sysusers after unlinking the config, but it's
+    // Reconcile sysusers symlinks and materialize users. On app removal
+    // this wastefully runs sysusers after unlinking the config, but it's
     // idempotent and not worth special-casing.
     checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)?;
     if changes.sysusers.content_changed {
@@ -562,26 +577,20 @@ fn activate(
         systemctl_ok(&["disable", "--now", unit]);
     }
 
-    // Reconcile unit symlinks, then reload so systemd picks them up.
-    // This runs after disable because systemd treats our symlinks as
-    // "linked units" and `systemctl disable` removes the link itself,
+    // Reconcile unit symlinks after disable: systemd treats our symlinks
+    // as "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
     let unit_symlink_changes =
         checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
 
-    // Reconcile quadlet symlinks before reload, so the quadlet generator
-    // run by `daemon-reload` sees the current set of quadlet files.
-    let quadlet_symlink_changes =
-        checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
-
     // Only poke systemd when something actually changed on disk. A quadlet
     // content change with no symlink change still needs a reload so the
     // generator re-emits the unit.
-    let needs_reload = !unit_symlink_changes.is_empty()
-        || !quadlet_symlink_changes.is_empty()
-        || !changes.units.is_empty()
-        || changes.quadlets.content_changed;
+    let needs_reload = !quadlet_symlink_changes.is_empty()
+        || changes.quadlets.content_changed
+        || !unit_symlink_changes.is_empty()
+        || !changes.units.is_empty();
     if needs_reload {
         log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
