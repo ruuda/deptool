@@ -65,12 +65,18 @@ This directory contains [Podman quadlets][quadlet]. For every file in in this
 directory, Deptool will create a symlink in `/etc/containers/systemd` that
 points to it. The symlink points through the app’s `current` symlink. On systemd
 daemon-reload, Podman’s generator generates systemd units from the quadlet
-files. You can enable these generated units with [`units_enabled`][enabled] in
-the manifest. If a deploy changes anything in the `quadlets` directory, Deptool
+files. If a deploy changes anything in the `quadlets` directory, Deptool
 runs `systemctl daemon-reload` to trigger Podman’s generator.
+
+> **Note**<br>
+> Beware that quadlet-derived units cannot be enabled with [`units_enabled`][enabled]
+> because they are transient to systemd. The `[Install]` section of quadlets
+> behaves differently from regular systemd units to compensate, see
+> [the upstream documentation][quadlet-install].
 
 [quadlet]: https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html
 [enabled]: manifests.md#systemdunits_enabled
+[quadlet-install]: https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html#enabling-unit-files
 
 ### systemd/
 
