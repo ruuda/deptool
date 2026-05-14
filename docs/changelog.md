@@ -14,6 +14,12 @@ compatibility impact will be clearly marked as such in the changelog.
 
 [semver]: https://semver.org/
 
+## Next
+
+Unreleased.
+
+ * Add support for [Podman quadlets](directory_layout.md#quadlets).
+
 ## 1.0.0
 
 Released 2026-05-06.

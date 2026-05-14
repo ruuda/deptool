@@ -864,6 +864,30 @@ mod tests {
         Ok(())
     }
 
+    /// `content_changed` follows the `quadlets/` subtree, not the whole app
+    /// tree: a change to a sibling file (e.g. `config.toml`) must not flip
+    /// the signal, while a change to the quadlet itself must.
+    #[test]
+    fn quadlet_content_changed_tracks_quadlets_subtree() -> Result<()> {
+        let t = ApplyTest::new();
+        let base = t.repo.commit(&[
+            ("web1/myapp/quadlets/myapp.container", b"Image=v1"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+        let only_sibling_changed = t.repo.commit(&[
+            ("web1/myapp/quadlets/myapp.container", b"Image=v1"),
+            ("web1/myapp/config.toml", b"v2"),
+        ]);
+        let quadlet_changed = t.repo.commit(&[
+            ("web1/myapp/quadlets/myapp.container", b"Image=v2"),
+            ("web1/myapp/config.toml", b"v1"),
+        ]);
+
+        assert!(!t.apply(only_sibling_changed, Some(base))?.quadlets.content_changed);
+        assert!(t.apply(quadlet_changed, Some(base))?.quadlets.content_changed);
+        Ok(())
+    }
+
     #[test]
     fn manifest_symlinks_creates_and_adopts_matching_file() -> Result<()> {
         let dir = TempDir::new("symlinks");

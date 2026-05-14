@@ -10,8 +10,8 @@ directory structure that defines the hosts, and apps per host. You materialize
 this config tree on your filesystem, and `deptool deploy` commits it to its
 store and applies it to the cluster.
 
-The example config tree below defines two hosts, `dns01` and `web01`, and each
-host contains one app — `nsd` and `nginx` respectively.
+The example config tree below defines three hosts, `dns01`, `web01`, and `db01`,
+and each host contains one app — `nsd`, `nginx`, and `postgres` respectively.
 
     dns01
     └── nsd
@@ -29,6 +29,14 @@ host contains one app — `nsd` and `nginx` respectively.
         │   └── nginx.service
         └── sysusers
             └── nginx.conf
+    db01
+    └── postgres
+        ├── postgresql.conf
+        ├── manifest.json
+        ├── quadlets
+        │   └── postgresql.container
+        └── sysusers
+            └── postgres.conf
 
 ## Hosts
 
@@ -51,14 +59,26 @@ Besides putting files on hosts, Deptool can manage daemon and runtime state,
 like enabling and starting systemd units. This is specified in an optional
 _manifest_. See the [manifests reference](manifests.md) for the full format.
 
+### quadlets/
+
+This directory contains [Podman quadlets][quadlet]. For every file in in this
+directory, Deptool will create a symlink in `/etc/containers/systemd` that
+points to it. The symlink points through the app’s `current` symlink. On systemd
+daemon-reload, Podman’s generator generates systemd units from the quadlet
+files. You can enable these generated units with [`units_enabled`][enabled] in
+the manifest. If a deploy changes anything in the `quadlets` directory, Deptool
+runs `systemctl daemon-reload` to trigger Podman’s generator.
+
+[quadlet]: https://docs.podman.io/en/latest/markdown/podman-systemd.unit.5.html
+[enabled]: manifests.md#systemdunits_enabled
+
 ### systemd/
 
 This directory contains _available_ systemd units. For every file in this
 directory, Deptool will create a symlink in `/etc/systemd/system` that points to
 it. The symlink points through the app’s `current` symlink. While placing units
 in this directory makes them available to systemd, they need to be
-activated/enabled separately, see
-[`units_enabled`](manifests.md#systemdunits_enabled) in the manifest.
+activated/enabled separately, see [`units_enabled`][enabled] in the manifest.
 
 ### sysusers/
 

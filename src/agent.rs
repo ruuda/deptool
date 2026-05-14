@@ -34,6 +34,7 @@ pub struct AgentConfig {
     pub apps_dir: PathBuf,
     pub unit_dir: PathBuf,
     pub sysusers_dir: PathBuf,
+    pub quadlets_dir: PathBuf,
 }
 
 impl AgentConfig {
@@ -44,6 +45,10 @@ impl AgentConfig {
             apps_dir: PathBuf::from(test_override("DEPTOOL_APPS_DIR", "/var/lib/deptool/apps")),
             unit_dir: PathBuf::from(test_override("DEPTOOL_UNIT_DIR", "/etc/systemd/system")),
             sysusers_dir: PathBuf::from(test_override("DEPTOOL_SYSUSERS_DIR", "/etc/sysusers.d")),
+            quadlets_dir: PathBuf::from(test_override(
+                "DEPTOOL_QUADLETS_DIR",
+                "/etc/containers/systemd",
+            )),
         }
     }
 }
@@ -380,6 +385,11 @@ impl AgentSession {
                 &self.hostname,
                 &self.apps_dir,
             )?,
+            quadlets: self.store.desired_quadlets(
+                ctx.target_commit,
+                &self.hostname,
+                &self.apps_dir,
+            )?,
         };
 
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
@@ -478,6 +488,9 @@ impl AgentSession {
                 sysusers: self
                     .store
                     .desired_sysusers(oid, &self.hostname, &self.apps_dir)?,
+                quadlets: self
+                    .store
+                    .desired_quadlets(oid, &self.hostname, &self.apps_dir)?,
             },
             None => DesiredState::default(),
         };

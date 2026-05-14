@@ -16,7 +16,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, SymlinkChanges, SysusersChanges, UnitChanges};
+use crate::plan::{AppDiff, Plan, QuadletChanges, SymlinkChanges, SysusersChanges, UnitChanges};
 use crate::prim::{Hostname, gmtime};
 use crate::store::Store;
 
@@ -153,7 +153,9 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
             }
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
             write_sysusers_actions(out, &app_plan.system.sysusers, color)?;
-            write_unit_actions(out, &app_plan.system.units, color)?;
+            write_unit_change_actions(out, &app_plan.system.units, color)?;
+            write_quadlet_actions(out, &app_plan.system.quadlets, color)?;
+            write_unit_start_actions(out, &app_plan.system.units, color)?;
             writeln!(out)?;
         }
     }
@@ -319,8 +321,15 @@ fn empty_tree_oid() -> Oid {
     Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
-/// Print unit actions in execution order: disable, unlink, link, enable, restart.
-fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
+/// Print pre-reload unit actions: disable, unlink, link.
+///
+/// Split from the post-reload actions so quadlet reconcile (which happens
+/// between the two on the host) renders between them in the plan.
+fn write_unit_change_actions(
+    out: &mut impl Write,
+    units: &UnitChanges,
+    color: UseColor,
+) -> Result<()> {
     for unit in &units.disable {
         writeln!(out, "        {} {unit}", color.red("disable unit"))?;
     }
@@ -330,6 +339,15 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
     for unit in &units.link {
         writeln!(out, "        {} {unit}", color.green("link unit"))?;
     }
+    Ok(())
+}
+
+/// Print post-reload unit actions: enable, restart.
+fn write_unit_start_actions(
+    out: &mut impl Write,
+    units: &UnitChanges,
+    color: UseColor,
+) -> Result<()> {
     for unit in &units.enable {
         writeln!(out, "        {} {unit}", color.green("enable unit"))?;
     }
@@ -350,6 +368,21 @@ fn write_sysusers_actions(
     }
     for name in &sysusers.link {
         writeln!(out, "        {} {name}", color.green("link sysuser"))?;
+    }
+    Ok(())
+}
+
+/// Print quadlet symlink actions: unlink then link.
+fn write_quadlet_actions(
+    out: &mut impl Write,
+    quadlets: &QuadletChanges,
+    color: UseColor,
+) -> Result<()> {
+    for name in &quadlets.unlink {
+        writeln!(out, "        {} {name}", color.red("unlink quadlet"))?;
+    }
+    for name in &quadlets.link {
+        writeln!(out, "        {} {name}", color.green("link quadlet"))?;
     }
     Ok(())
 }
@@ -905,6 +938,29 @@ web1
     remove myapp
         - sysusers/myapp.conf
         unlink sysuser myapp.conf
+
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_with_quadlets_shows_link_quadlet() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/myapp/quadlets/myapp.container", b"[Container]"),
+            ("web1/myapp/config.toml", b"key = true"),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
+        let plan = t.plan_for(c1, "myapp", AppDiff::Add { new_tree })?;
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1 (rollback unavailable)
+    add myapp
+        + config.toml
+        + quadlets/myapp.container
+        link quadlet myapp.container
 
 ",
         );
