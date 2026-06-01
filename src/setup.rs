@@ -121,7 +121,10 @@ pub fn install_binary(
     let install_command = [
         // -sm prints kernel-name and machine, e.g. "Linux x86_64".
         "uname -sm",
-        "sudo mkdir -p /var/lib/deptool/{bin,apps,store}",
+        // List the directories explicitly rather than as a `{bin,apps,store}`
+        // brace expansion: the remote login shell may be a POSIX sh that
+        // leaves the braces literal, creating one oddly-named directory.
+        "sudo mkdir -p /var/lib/deptool/bin /var/lib/deptool/apps /var/lib/deptool/store",
         // The store may carry the full cluster config history; keep
         // it out of reach of unprivileged users on the host.
         "sudo chmod 0700 /var/lib/deptool/store",

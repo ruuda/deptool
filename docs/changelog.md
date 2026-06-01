@@ -20,6 +20,8 @@ Unreleased.
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
  * Print stderr when agent installation fails.
+ * Do not depend on shell brace expansion when installing the agent,
+   for wider compatibility.
 
 ## 1.0.0
 
