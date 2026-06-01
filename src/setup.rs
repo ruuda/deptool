@@ -134,6 +134,10 @@ pub fn install_binary(
         .args([&host.0, &install_command])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
+        // Capture stderr rather than letting it inherit the terminal: the
+        // remote command's errors are the only clue when the install fails,
+        // and inheriting would interleave them with the live status block.
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(HostError::connection_failed)?;
 
@@ -222,9 +226,18 @@ fn run_install_session(
     stdout
         .read_line(&mut sha_line)
         .map_err(HostError::connection_failed)?;
-    let actual_hash = sha_line.split_whitespace().next().ok_or_else(|| {
-        HostError::SetupProtocolError("missing sha256sum output after install".into())
-    })?;
+    let actual_hash = match sha_line.split_whitespace().next() {
+        Some(hash) => hash,
+        None => {
+            let mut stderr = String::new();
+            if let Some(mut err) = child.stderr.take() {
+                let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
+            }
+            return Err(HostError::SetupNoChecksum {
+                stderr: stderr.trim().to_string(),
+            });
+        }
+    };
 
     if actual_hash != expected_hash {
         return Err(HostError::SetupChecksumMismatch {

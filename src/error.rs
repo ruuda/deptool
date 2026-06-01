@@ -142,8 +142,11 @@ pub enum HostError {
     /// Distinct from `SetupMissingBinary`, which is the expected
     /// "no such file" case with its own remediation hint.
     SetupReadError { path: PathBuf, cause: String },
-    /// Unexpected response during binary installation handshake.
-    SetupProtocolError(String),
+    /// The install command finished without reporting the uploaded binary's
+    /// checksum, so the transfer could not be verified. Usually the remote
+    /// command chain failed before `sha256sum` ran (sudo denied, disk full,
+    /// connection dropped). Carries the remote stderr for diagnosis.
+    SetupNoChecksum { stderr: String },
     /// Unexpected or malformed message from the agent session.
     ProtocolError(String),
     /// A store operation failed.
@@ -193,6 +196,17 @@ impl HostError {
                              the host's directory in the config tree to match."
                     .to_string(),
                 item: format!("  {host}: /etc/hostname contains {actual:?}"),
+            }),
+            HostError::SetupNoChecksum { stderr } => Some(Explanation {
+                description: "The install command finished without reporting the uploaded binary's\n\
+                             checksum, so the transfer could not be verified. Usually the remote\n\
+                             command failed before it got that far. The host's stderr was:"
+                    .to_string(),
+                item: if stderr.is_empty() {
+                    format!("  {host}: (the host produced no stderr)")
+                } else {
+                    format!("  {host}:\n    {}", stderr.replace('\n', "\n    "))
+                },
             }),
             HostError::SetupChecksumMismatch {
                 expected_hash,
@@ -262,7 +276,9 @@ impl fmt::Display for HostError {
             HostError::SetupReadError { path, cause } => {
                 write!(f, "failed to read '{}': {cause}", path.display(),)
             }
-            HostError::SetupProtocolError(msg) => write!(f, "setup protocol error: {msg}"),
+            HostError::SetupNoChecksum { .. } => {
+                f.write_str("install incomplete: no checksum from host")
+            }
             HostError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             HostError::Store(msg) => write!(f, "{msg}"),
             HostError::PreApply(err) => write!(f, "{err}"),

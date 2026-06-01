@@ -19,6 +19,10 @@ compatibility impact will be clearly marked as such in the changelog.
 Unreleased.
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+<!-- TODO(ruuda): A failed agent install now reports the remote command's
+     error output in the failure detail block, instead of a bare "missing
+     sha256sum" message. -->
+
 
 ## 1.0.0
 
