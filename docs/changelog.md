@@ -20,13 +20,11 @@ Unreleased.
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
  * Print stderr when agent installation fails.
-<!-- TODO(ruuda): Name the specific units in the activation-failure error,
-     instead of "one or more units failed to become active". Also fixes a
-     bug where a partial failure (some units up, one down) was reported as
-     success, because `systemctl is-active` exits 0 if any unit is active. -->
-
  * Do not depend on shell brace expansion when installing the agent,
    for wider compatibility.
+ * List which specific systemd units failed to become active, if any.
+ * Fix a bug where an inactive unit could be masked by an active one when
+   multiple systemd units were affected in the same deployment.
 
 ## 1.0.0
 
