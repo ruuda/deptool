@@ -618,9 +618,29 @@ fn activate(
     // fully start and then fail on a potato cloud VM, let's give it 300ms.
     std::thread::sleep(std::time::Duration::from_millis(300));
 
-    let mut is_active_cmd = vec!["is-active"];
-    is_active_cmd.extend(&touched);
-    let all_active = systemctl_ok(&is_active_cmd);
+    // `is-active` prints one status word per unit, in argument order. Read
+    // the words, not the exit code: with several units it exits 0 if *any*
+    // one is active, which would hide a partial failure.
+    let report = std::process::Command::new("systemctl")
+        .arg("is-active")
+        .args(&touched)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
+    // A different count means we can't map status words to units, which is a
+    // distinct failure from a unit not starting.
+    if report.lines().count() != touched.len() {
+        return Err(ApplyError::SystemdStatusUnreadable { output: report });
+    }
+
+    let mut statuses = report.lines();
+    let mut inactive: Vec<String> = Vec::new();
+    for &unit in &touched {
+        if statuses.next() != Some("active") {
+            inactive.push(unit.to_string());
+        }
+    }
 
     // Force color: systemctl won't color because stdout is a pipe,
     // but the output is forwarded to the operator's terminal.
@@ -635,10 +655,10 @@ fn activate(
     };
     emit(protocol::Message::SystemdUnitStatus { output });
 
-    if all_active {
+    if inactive.is_empty() {
         Ok(())
     } else {
-        Err(ApplyError::SystemdActivationFailed)
+        Err(ApplyError::SystemdActivationFailed { units: inactive })
     }
 }
 

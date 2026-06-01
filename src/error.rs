@@ -72,7 +72,11 @@ pub enum ApplyError {
     /// Failed to create, remove, or verify a symlink.
     SymlinkFailed { link: String, cause: String },
     /// One or more systemd units failed to become active after apply.
-    SystemdActivationFailed,
+    SystemdActivationFailed { units: Vec<String> },
+    /// `systemctl is-active` returned a different number of status words than
+    /// units queried, so the status of each unit could not be determined.
+    /// Distinct from `SystemdActivationFailed`: we don't know what's active.
+    SystemdStatusUnreadable { output: String },
     /// systemd-sysusers failed to materialize declared system users.
     SysusersActivationFailed,
     /// A store operation failed during the apply phase.
@@ -99,8 +103,11 @@ impl fmt::Display for ApplyError {
             ApplyError::SymlinkFailed { link, cause } => {
                 write!(f, "cannot create symlink at {link}: {cause}")
             }
-            ApplyError::SystemdActivationFailed => {
-                write!(f, "one or more units failed to become active")
+            ApplyError::SystemdActivationFailed { units } => {
+                write!(f, "units failed to become active: {}", units.join(", "))
+            }
+            ApplyError::SystemdStatusUnreadable { output } => {
+                write!(f, "unexpected systemctl is-active output: {output:?}")
             }
             ApplyError::SysusersActivationFailed => {
                 write!(f, "systemd-sysusers failed to create system users")

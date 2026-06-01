@@ -602,6 +602,13 @@ mod tests {
         drop(lock_holder);
     }
 
+    /// A representative activation failure for tests that only need a sentinel.
+    fn activation_failed() -> ApplyError {
+        ApplyError::SystemdActivationFailed {
+            units: vec!["nginx.service".into()],
+        }
+    }
+
     /// Build an OnActivate that returns results from a list, one per call.
     fn activate_sequence(results: Vec<std::result::Result<(), ApplyError>>) -> super::OnActivate {
         use std::sync::Arc;
@@ -676,7 +683,7 @@ mod tests {
 
     #[test]
     fn rollback_on_activate_failure() {
-        let on_activate = activate_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
+        let on_activate = activate_sequence(vec![Err(activation_failed()), Ok(())]);
 
         // Two commits: c1 is the good state, c2 is the broken deploy.
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
@@ -719,7 +726,7 @@ mod tests {
     #[test]
     fn no_rollback_when_not_rollback_safe() {
         let on_activate: super::OnActivate =
-            Box::new(|_, _, _, _| Err(ApplyError::SystemdActivationFailed));
+            Box::new(|_, _, _, _| Err(activation_failed()));
 
         // Data with a newly enabled unit -- not rollback-safe.
         let (mut host, c1) = test_host(
@@ -745,7 +752,7 @@ mod tests {
 
     #[test]
     fn rollback_to_empty_on_first_deploy_failure() {
-        let on_activate = activate_sequence(vec![Err(ApplyError::SystemdActivationFailed), Ok(())]);
+        let on_activate = activate_sequence(vec![Err(activation_failed()), Ok(())]);
 
         // First deploy: no current_commit.
         let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
@@ -774,7 +781,7 @@ mod tests {
     #[test]
     fn failed_rollback_reports_rollback_error_and_logs_original() {
         let on_activate = activate_sequence(vec![
-            Err(ApplyError::SystemdActivationFailed),
+            Err(activation_failed()),
             Err(ApplyError::Store("rollback IO error".into())),
         ]);
 
@@ -802,7 +809,7 @@ mod tests {
             [
                 Message::RollingBack,
                 Message::RollbackFailed {
-                    apply_error: ApplyError::SystemdActivationFailed,
+                    apply_error: ApplyError::SystemdActivationFailed { .. },
                     rollback_error: ApplyError::Store(_),
                 },
             ],
