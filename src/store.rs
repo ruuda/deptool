@@ -599,6 +599,18 @@ pub enum RefUpdate<'a> {
     SetMain,
 }
 
+/// Git's well-known empty tree oid.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// The empty tree oid, which `find_tree` resolves to a tree with no entries.
+///
+/// Used to stand in for the absent side of a diff: looking up units, sysusers,
+/// manifests, etc. against it yields nothing, so an added or removed app needs
+/// no special-casing.
+pub fn empty_tree_oid() -> Oid {
+    Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
+}
+
 /// Get the subtree entries (name -> oid) one level deep.
 ///
 /// Only includes entries that are trees, not blobs. The config tree is

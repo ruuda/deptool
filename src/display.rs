@@ -18,7 +18,7 @@ use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, QuadletChanges, SymlinkChanges, SysuserChanges, UnitChanges};
 use crate::prim::{Hostname, gmtime};
-use crate::store::Store;
+use crate::store::{Store, empty_tree_oid};
 
 impl std::fmt::Display for HostState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -116,9 +116,6 @@ impl UseColor {
         }
     }
 }
-
-/// The Git empty tree object, used as the base for diffs against new hosts.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Write the deployment plan as a diffstat.
 pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseColor) -> Result<()> {
@@ -312,10 +309,6 @@ fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result
             }
         }
     }
-}
-
-fn empty_tree_oid() -> Oid {
-    Oid::from_str(EMPTY_TREE).expect("empty tree oid is a hardcoded valid hex string")
 }
 
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.

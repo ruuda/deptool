@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, StoreError};
 use crate::prim::Hostname;
-use crate::store::{Store, tree_entries};
+use crate::store::{Store, empty_tree_oid, tree_entries};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppDiff {
@@ -33,6 +33,26 @@ pub enum AppDiff {
         #[serde(with = "crate::prim::ser::oid")]
         new_tree: Oid,
     },
+}
+
+impl AppDiff {
+    /// The app's tree before this change, the empty tree when the app is
+    /// being added, so lookups against it return nothing.
+    fn old_tree(&self) -> Oid {
+        match self {
+            AppDiff::Add { .. } => empty_tree_oid(),
+            AppDiff::Remove { old_tree } | AppDiff::Update { old_tree, .. } => *old_tree,
+        }
+    }
+
+    /// The app's tree after this change, the empty tree when the app is
+    /// being removed.
+    fn new_tree(&self) -> Oid {
+        match self {
+            AppDiff::Remove { .. } => empty_tree_oid(),
+            AppDiff::Add { new_tree } | AppDiff::Update { new_tree, .. } => *new_tree,
+        }
+    }
 }
 
 /// Side effects to apply to the host system for a set of app changes.
@@ -401,113 +421,54 @@ pub fn diff_apps(
 }
 
 /// Compute the system-level side effects of a single app change.
+///
+/// The add, remove, and update cases are one path: the absent side of an add
+/// or remove is the empty tree, so a set difference gives "all new" on add and
+/// "all old" on remove without special-casing.
 pub fn compute_system_diff(
     store: &Store,
     diff: &AppDiff,
 ) -> std::result::Result<SystemDiff, StoreError> {
-    let result = match diff {
-        AppDiff::Add { new_tree } => {
-            let enabled = store.enabled_units(*new_tree)?;
-            let mut units = diff_enabled(&BTreeSet::new(), &enabled);
-            units.link = store.app_units(*new_tree)?.into_iter().collect();
-            units.content_changed = !units.link.is_empty();
-            let manifest = store.read_manifest(*new_tree)?;
-            let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
-            let new_sysusers = store.app_sysusers(*new_tree)?;
-            let sysusers = SysuserChanges {
-                content_changed: !new_sysusers.is_empty(),
-                link: new_sysusers.into_iter().collect(),
-                unlink: Vec::new(),
-            };
-            let new_quadlets = store.app_quadlets(*new_tree)?;
-            let quadlets = QuadletChanges {
-                content_changed: !new_quadlets.is_empty(),
-                link: new_quadlets.into_iter().collect(),
-                unlink: Vec::new(),
-            };
-            SystemDiff {
-                quadlets,
-                symlinks,
-                sysusers,
-                units,
-            }
-        }
-        AppDiff::Remove { old_tree } => {
-            let enabled = store.enabled_units(*old_tree)?;
-            let mut units = diff_enabled(&enabled, &BTreeSet::new());
-            units.unlink = store.app_units(*old_tree)?.into_iter().collect();
-            units.content_changed = !units.unlink.is_empty();
-            let manifest = store.read_manifest(*old_tree)?;
-            let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
-            let old_sysusers = store.app_sysusers(*old_tree)?;
-            let sysusers = SysuserChanges {
-                content_changed: !old_sysusers.is_empty(),
-                link: Vec::new(),
-                unlink: old_sysusers.into_iter().collect(),
-            };
-            let old_quadlets = store.app_quadlets(*old_tree)?;
-            let quadlets = QuadletChanges {
-                content_changed: !old_quadlets.is_empty(),
-                link: Vec::new(),
-                unlink: old_quadlets.into_iter().collect(),
-            };
-            SystemDiff {
-                quadlets,
-                symlinks,
-                sysusers,
-                units,
-            }
-        }
-        AppDiff::Update { old_tree, new_tree } => {
-            let old_all = store.app_units(*old_tree)?;
-            let new_all = store.app_units(*new_tree)?;
-            let old_enabled = store.enabled_units(*old_tree)?;
-            let new_enabled = store.enabled_units(*new_tree)?;
-            let mut units = diff_enabled(&old_enabled, &new_enabled);
-            units.link = new_all.difference(&old_all).cloned().collect();
-            units.unlink = old_all.difference(&new_all).cloned().collect();
-            units.content_changed = store.subtree_oid(*old_tree, "systemd")?
-                != store.subtree_oid(*new_tree, "systemd")?;
-            let old_manifest = store.read_manifest(*old_tree)?;
-            let new_manifest = store.read_manifest(*new_tree)?;
-            let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
-            let old_sysusers_all = store.app_sysusers(*old_tree)?;
-            let new_sysusers_all = store.app_sysusers(*new_tree)?;
-            let sysusers = SysuserChanges {
-                content_changed: store.subtree_oid(*old_tree, "sysusers")?
-                    != store.subtree_oid(*new_tree, "sysusers")?,
-                link: new_sysusers_all
-                    .difference(&old_sysusers_all)
-                    .cloned()
-                    .collect(),
-                unlink: old_sysusers_all
-                    .difference(&new_sysusers_all)
-                    .cloned()
-                    .collect(),
-            };
-            let old_quadlets_all = store.app_quadlets(*old_tree)?;
-            let new_quadlets_all = store.app_quadlets(*new_tree)?;
-            let quadlets = QuadletChanges {
-                content_changed: store.subtree_oid(*old_tree, "quadlets")?
-                    != store.subtree_oid(*new_tree, "quadlets")?,
-                link: new_quadlets_all
-                    .difference(&old_quadlets_all)
-                    .cloned()
-                    .collect(),
-                unlink: old_quadlets_all
-                    .difference(&new_quadlets_all)
-                    .cloned()
-                    .collect(),
-            };
-            SystemDiff {
-                quadlets,
-                symlinks,
-                sysusers,
-                units,
-            }
-        }
+    let old = diff.old_tree();
+    let new = diff.new_tree();
+
+    let mut units = diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?);
+    let old_units = store.app_units(old)?;
+    let new_units = store.app_units(new)?;
+    units.link = new_units.difference(&old_units).cloned().collect();
+    units.unlink = old_units.difference(&new_units).cloned().collect();
+    units.content_changed =
+        store.subtree_oid(old, "systemd")? != store.subtree_oid(new, "systemd")?;
+
+    let symlinks = diff_symlinks(
+        &store.read_manifest(old)?.symlinks,
+        &store.read_manifest(new)?.symlinks,
+    );
+
+    let old_sysusers = store.app_sysusers(old)?;
+    let new_sysusers = store.app_sysusers(new)?;
+    let sysusers = SysuserChanges {
+        link: new_sysusers.difference(&old_sysusers).cloned().collect(),
+        unlink: old_sysusers.difference(&new_sysusers).cloned().collect(),
+        content_changed: store.subtree_oid(old, "sysusers")?
+            != store.subtree_oid(new, "sysusers")?,
     };
-    Ok(result)
+
+    let old_quadlets = store.app_quadlets(old)?;
+    let new_quadlets = store.app_quadlets(new)?;
+    let quadlets = QuadletChanges {
+        link: new_quadlets.difference(&old_quadlets).cloned().collect(),
+        unlink: old_quadlets.difference(&new_quadlets).cloned().collect(),
+        content_changed: store.subtree_oid(old, "quadlets")?
+            != store.subtree_oid(new, "quadlets")?,
+    };
+
+    Ok(SystemDiff {
+        quadlets,
+        symlinks,
+        sysusers,
+        units,
+    })
 }
 
 /// Compute per-app diff and system actions for the plan.
