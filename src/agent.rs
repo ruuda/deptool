@@ -725,8 +725,7 @@ mod tests {
 
     #[test]
     fn no_rollback_when_not_rollback_safe() {
-        let on_activate: super::OnActivate =
-            Box::new(|_, _, _, _| Err(activation_failed()));
+        let on_activate: super::OnActivate = Box::new(|_, _, _, _| Err(activation_failed()));
 
         // Data with a newly enabled unit -- not rollback-safe.
         let (mut host, c1) = test_host(
