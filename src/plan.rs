@@ -76,7 +76,7 @@ impl<T> SystemDiff<T> {
             content_changed: _,
         } = quadlets;
         let SymlinkChanges {
-            create,
+            create: symlinks_create,
             remove: _,
             change: _,
         } = symlinks;
@@ -86,18 +86,18 @@ impl<T> SystemDiff<T> {
             content_changed: _,
         } = sysusers;
         let UnitChanges {
-            enable,
+            enable: units_enable,
             restart: _,
             disable: _,
-            link,
+            link: units_link,
             unlink: _,
             content_changed: _,
         } = units;
         quadlets_link.is_empty()
-            && create.is_empty()
+            && symlinks_create.is_empty()
             && sysusers_link.is_empty()
-            && enable.is_empty()
-            && link.is_empty()
+            && units_enable.is_empty()
+            && units_link.is_empty()
     }
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
