@@ -85,10 +85,13 @@ directory, Deptool will create a symlink in `/etc/systemd/system` that points to
 it. The symlink points through the app’s `current` symlink. While placing units
 in this directory makes them available to systemd, they need to be
 activated/enabled separately, see [`units_enabled`][enabled] in the manifest.
-<!-- TODO(ruuda): Document drop-in directories: a `<unit>.service.d/`
-     subdirectory is mirrored into `/etc/systemd/system/<unit>.service.d/`,
-     symlinking each drop-in file individually so unmanaged drop-ins coexist. -->
 
+The directory may contain subdirectories to create [drop-in units][dropin]. For
+example, for `systemd/nsd.service.d/override.conf` Deptool will place a symlink
+`override.conf` in `/etc/systemd/system/nsd.service.d`. This ensures that
+Deptool-managed drop-ins can coexist alongside unmanaged drop-ins.
+
+[dropin]: https://www.freedesktop.org/software/systemd/man/latest/systemd.unit.html#Description
 
 ### sysusers/
 

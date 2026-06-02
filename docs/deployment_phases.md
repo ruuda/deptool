@@ -79,10 +79,13 @@ for other service managers.
 
 For any systemd units that were not enabled in the previous revision, but which
 are enabled in the one we are deploying, run `systemctl enable --now` on them.
+For units that should be enabled according to the manifest, and which are part
+of a changed app, we also enable them if they weren’t already, to converge the
+system state towards what is specified in the config tree.
 
 ### Restart systemd units
 
-For systemd units that are part of an app that was changed in any way,
+For enabled systemd units that are part of an app that was changed in any way,
 restart those units with `systemctl restart`. This ensures that we never forget
 to pick up new configuration, but it may have false positives: cases where we
 restart the service even when it was not needed. For example, when we created

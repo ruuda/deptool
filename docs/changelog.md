@@ -21,31 +21,27 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
-<!-- TODO(ruuda): Support systemd drop-in directories: files inside a
-     `<unit>.service.d/` directory under `systemd/` are symlinked individually,
-     so unmanaged drop-ins in the same directory are left untouched, and an
-     emptied `.d` directory is pruned. -->
 
 Improvements:
 
- * Do not depend on shell brace expansion when installing the agent,
-   for wider compatibility.
+ * Do not depend on shell brace expansion when installing the agent to improve
+   compatibility, and print stderr when agent installation fails to aid
+   debugging.
  * List which specific systemd units failed to become active, if any.
  * Improve the error message for when symlink reconcile fails to remove an
    existing path.
- * Print stderr when agent installation fails.
+ * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
+   now handled correctly, see the [directory layout
+   chapter](directory_layout.md#systemd).
+ * Restarting a systemd unit now also re-enables the unit when the unit is not
+   enabled and the manifest specifies that it should be.
 
 Bugfixes:
 
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
-<!-- TODO(ruuda): Fix a bug where a content-only change to a unit file or
-     drop-in that is not enabled did not trigger a daemon-reload, so systemd
-     did not pick up the edit. -->
-<!-- TODO(ruuda): Restarting an app now re-enables any of its units that lost
-     their enablement (e.g. the `multi-user.target.wants/` symlink went missing
-     after an interrupted deploy), repairing the drift instead of leaving the
-     unit disabled until the next reboot fails to start it. -->
+ * Trigger `systemctl daemon-reload` after the contents of a unit file change.
+   Previously it was triggered only when units were enabled or disabled.
 
 ## 1.0.0
 
