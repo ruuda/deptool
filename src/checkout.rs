@@ -993,9 +993,9 @@ mod tests {
         assert!(t.units.path().join("nginx.service").is_symlink());
         assert!(t.units.path().join("nginx-reload.timer").is_symlink());
         // Only the enabled one gets an enable action.
-        assert_eq!(changes.units.enable, vec!["nginx.service"]);
-        assert!(changes.units.restart.is_empty());
-        assert!(changes.units.disable.is_empty());
+        assert_eq!(changes.unit_actions.enable, vec!["nginx.service"]);
+        assert!(changes.unit_actions.restart.is_empty());
+        assert!(changes.unit_actions.disable.is_empty());
         Ok(())
     }
 

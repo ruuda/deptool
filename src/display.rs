@@ -16,7 +16,7 @@ use git2::{Delta, Oid, Repository};
 
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
-use crate::plan::{AppDiff, Plan, QuadletChanges, SymlinkChanges, SysuserChanges, UnitChanges};
+use crate::plan::{AppDiff, Plan, SubdirChanges, SymlinkChanges, UnitActions};
 use crate::prim::{Hostname, gmtime};
 use crate::store::{Store, empty_tree_oid};
 
@@ -146,10 +146,15 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
-            write_quadlet_actions(out, &app_plan.system.quadlets, color)?;
+            write_subdir_actions(out, &app_plan.system.quadlets, "quadlet", color)?;
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
-            write_sysuser_actions(out, &app_plan.system.sysusers, color)?;
-            write_unit_actions(out, &app_plan.system.units, color)?;
+            write_subdir_actions(out, &app_plan.system.sysusers, "sysuser", color)?;
+            write_unit_actions(
+                out,
+                &app_plan.system.units,
+                &app_plan.system.unit_actions,
+                color,
+            )?;
             writeln!(out)?;
         }
     }
@@ -312,8 +317,13 @@ fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result
 }
 
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.
-fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor) -> Result<()> {
-    for unit in &units.disable {
+fn write_unit_actions(
+    out: &mut impl Write,
+    units: &SubdirChanges,
+    actions: &UnitActions,
+    color: UseColor,
+) -> Result<()> {
+    for unit in &actions.disable {
         writeln!(out, "        {} {unit}", color.red("disable unit"))?;
     }
     for unit in &units.unlink {
@@ -322,41 +332,30 @@ fn write_unit_actions(out: &mut impl Write, units: &UnitChanges, color: UseColor
     for unit in &units.link {
         writeln!(out, "        {} {unit}", color.green("link unit"))?;
     }
-    for unit in &units.enable {
+    for unit in &actions.enable {
         writeln!(out, "        {} {unit}", color.green("enable unit"))?;
     }
-    for unit in &units.restart {
+    for unit in &actions.restart {
         writeln!(out, "        {} {unit}", color.yellow("restart unit"))?;
     }
     Ok(())
 }
 
-/// Print sysusers symlink actions: unlink then link.
-fn write_sysuser_actions(
+/// Print symlink actions for a managed subdirectory: unlink then link, with
+/// `noun` naming the kind of file (e.g. "sysuser", "quadlet").
+fn write_subdir_actions(
     out: &mut impl Write,
-    sysusers: &SysuserChanges,
+    changes: &SubdirChanges,
+    noun: &str,
     color: UseColor,
 ) -> Result<()> {
-    for name in &sysusers.unlink {
-        writeln!(out, "        {} {name}", color.red("unlink sysuser"))?;
+    let unlink = color.red(&format!("unlink {noun}"));
+    let link = color.green(&format!("link {noun}"));
+    for name in &changes.unlink {
+        writeln!(out, "        {unlink} {name}")?;
     }
-    for name in &sysusers.link {
-        writeln!(out, "        {} {name}", color.green("link sysuser"))?;
-    }
-    Ok(())
-}
-
-/// Print quadlet symlink actions: unlink then link.
-fn write_quadlet_actions(
-    out: &mut impl Write,
-    quadlets: &QuadletChanges,
-    color: UseColor,
-) -> Result<()> {
-    for name in &quadlets.unlink {
-        writeln!(out, "        {} {name}", color.red("unlink quadlet"))?;
-    }
-    for name in &quadlets.link {
-        writeln!(out, "        {} {name}", color.green("link quadlet"))?;
+    for name in &changes.link {
+        writeln!(out, "        {link} {name}")?;
     }
     Ok(())
 }

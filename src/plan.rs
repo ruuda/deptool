@@ -61,13 +61,15 @@ impl AppDiff {
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemDiff<T = String> {
     /// Quadlet file changes.
-    pub quadlets: QuadletChanges,
+    pub quadlets: SubdirChanges,
     /// Manifest symlink changes.
     pub symlinks: SymlinkChanges<T>,
     /// Sysusers config file changes.
-    pub sysusers: SysuserChanges,
-    /// Unit lifecycle actions.
-    pub units: UnitChanges,
+    pub sysusers: SubdirChanges,
+    /// Unit file changes in the `systemd/` directory.
+    pub units: SubdirChanges,
+    /// Unit actions: enable, restart, disable.
+    pub unit_actions: UnitActions,
 }
 
 impl<T> SystemDiff<T> {
@@ -79,64 +81,32 @@ impl<T> SystemDiff<T> {
     /// * Removals and restarts are safe: we created that state, so if we
     ///   already deleted it, we can just recreate it.
     ///
-    /// IMPORTANT: every field of every struct must be destructured here, so
-    /// that adding a field anywhere is a compile error that forces revisiting
-    /// this safety check. Do NOT use field access (e.g. `self.symlinks.create`)
-    /// -- it silently ignores new fields.
+    /// IMPORTANT: every component must be destructured here, so that adding a
+    /// field to `SystemDiff` is a compile error that forces revisiting this
+    /// check. Each component's own `is_rollback_safe` likewise destructures its
+    /// fields, so the exhaustiveness guarantee holds at every level.
     pub fn is_rollback_safe(&self) -> bool {
         let SystemDiff {
             quadlets,
             symlinks,
             sysusers,
             units,
+            unit_actions,
         } = self;
-        let QuadletChanges {
-            link: quadlets_link,
-            unlink: _,
-            content_changed: _,
-        } = quadlets;
-        let SymlinkChanges {
-            create: symlinks_create,
-            remove: _,
-            change: _,
-        } = symlinks;
-        let SysuserChanges {
-            link: sysusers_link,
-            unlink: _,
-            content_changed: _,
-        } = sysusers;
-        let UnitChanges {
-            enable: units_enable,
-            restart: _,
-            disable: _,
-            link: units_link,
-            unlink: _,
-            content_changed: _,
-        } = units;
-        quadlets_link.is_empty()
-            && symlinks_create.is_empty()
-            && sysusers_link.is_empty()
-            && units_enable.is_empty()
-            && units_link.is_empty()
+        quadlets.is_rollback_safe()
+            && symlinks.is_rollback_safe()
+            && sysusers.is_rollback_safe()
+            && units.is_rollback_safe()
+            && unit_actions.is_rollback_safe()
     }
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
     pub fn append(&mut self, other: &mut Self) {
-        self.quadlets.link.append(&mut other.quadlets.link);
-        self.quadlets.unlink.append(&mut other.quadlets.unlink);
-        self.quadlets.content_changed |= other.quadlets.content_changed;
-        self.symlinks.create.append(&mut other.symlinks.create);
-        self.symlinks.remove.append(&mut other.symlinks.remove);
-        self.symlinks.change.append(&mut other.symlinks.change);
-        self.sysusers.link.append(&mut other.sysusers.link);
-        self.sysusers.unlink.append(&mut other.sysusers.unlink);
-        self.sysusers.content_changed |= other.sysusers.content_changed;
-        self.units.enable.append(&mut other.units.enable);
-        self.units.restart.append(&mut other.units.restart);
-        self.units.disable.append(&mut other.units.disable);
-        self.units.link.append(&mut other.units.link);
-        self.units.unlink.append(&mut other.units.unlink);
-        self.units.content_changed |= other.units.content_changed;
+        self.quadlets.append(&mut other.quadlets);
+        self.symlinks.append(&mut other.symlinks);
+        self.sysusers.append(&mut other.sysusers);
+        self.units.append(&mut other.units);
+        self.unit_actions.append(&mut other.unit_actions);
     }
 }
 
@@ -152,6 +122,7 @@ impl SystemDiff {
             symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
             sysusers: self.sysusers,
             units: self.units,
+            unit_actions: self.unit_actions,
         }
     }
 }
@@ -194,91 +165,88 @@ pub struct DraftPlan {
     pub parents: Vec<Oid>,
 }
 
-/// Systemd unit lifecycle actions, derived from Git trees only.
+/// Changes to a managed subdirectory between two commits, derived from Git
+/// trees only.
 ///
-/// We don't query actual system state; actions are based on comparing the
-/// previous and target commits. If the system drifts (e.g. a human disables
-/// a unit manually), the operator will see it in `systemctl status` output
-/// that we report after applying.
-///
-/// The `link`/`unlink` and `enable`/`disable`/`restart` groups can overlap:
-/// a unit file may be both linked and enabled in the same deploy.
+/// The `systemd/`, `sysusers/`, and `quadlets/` directories are each symlinked
+/// into a system location; this captures which files appeared, disappeared,
+/// and whether the directory's content changed at all. We don't query the live
+/// system -- changes come from comparing the previous and target trees.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnitChanges {
+pub struct SubdirChanges {
+    /// Files newly provided by this app.
+    pub link: Vec<String>,
+    /// Files no longer provided by this app.
+    pub unlink: Vec<String>,
+    /// True iff the subtree differs between old and new tree: a file added,
+    /// removed, or edited. Triggers the directory's systemd tool
+    /// (`daemon-reload`, `systemd-sysusers`); subsumes link and unlink, since
+    /// any file added or removed also changes the subtree oid.
+    pub content_changed: bool,
+}
+
+impl SubdirChanges {
+    pub fn is_empty(&self) -> bool {
+        self.link.is_empty() && self.unlink.is_empty() && !self.content_changed
+    }
+
+    /// Re-applying the previous commit restores removed files and edited
+    /// content, but can't un-create a file we added over pre-existing state.
+    fn is_rollback_safe(&self) -> bool {
+        let SubdirChanges {
+            link,
+            unlink: _,
+            content_changed: _,
+        } = self;
+        link.is_empty()
+    }
+
+    fn append(&mut self, other: &mut Self) {
+        self.link.append(&mut other.link);
+        self.unlink.append(&mut other.unlink);
+        self.content_changed |= other.content_changed;
+    }
+}
+
+/// Systemd unit actions (enable, restart, disable), derived from the
+/// manifest's `units_enabled`.
+///
+/// Distinct from the `systemd/` directory's file changes (a `SubdirChanges`):
+/// this says which units to enable, restart, or disable, not which unit files
+/// exist. We don't query live system state; a manual change (e.g. a human
+/// disabling a unit) surfaces in the `systemctl status` output we report after
+/// applying.
+#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnitActions {
     /// Newly enabled units: `systemctl enable --now`.
     pub enable: Vec<String>,
     /// Still enabled, but app content changed: `systemctl restart`.
     pub restart: Vec<String>,
     /// No longer enabled: `systemctl disable --now`.
     pub disable: Vec<String>,
-    /// Unit files newly provided by this app.
-    pub link: Vec<String>,
-    /// Unit files no longer provided by this app.
-    pub unlink: Vec<String>,
-    /// True iff the `systemd/` subtree differs between old and new tree.
-    ///
-    /// Triggers `daemon-reload` so systemd picks up an edited unit file or
-    /// drop-in. Needed for a content-only change to a unit that isn't enabled
-    /// (enabled ones already reload via `restart`); subsumes link and unlink,
-    /// since any file added or removed also changes the subtree oid.
-    pub content_changed: bool,
 }
 
-impl UnitChanges {
+impl UnitActions {
     pub fn is_empty(&self) -> bool {
-        self.enable.is_empty()
-            && self.restart.is_empty()
-            && self.disable.is_empty()
-            && self.link.is_empty()
-            && self.unlink.is_empty()
-            && !self.content_changed
+        self.enable.is_empty() && self.restart.is_empty() && self.disable.is_empty()
     }
-}
 
-/// Sysusers file changes, derived from Git trees only.
-///
-/// Like unit symlinks, sysusers config files live in a special directory
-/// (`sysusers/`) and get symlinked to `/etc/sysusers.d/`. Unlike units,
-/// we don't need enable/disable -- we just need to know whether to run
-/// `systemd-sysusers` to materialize the declared users.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SysuserChanges {
-    /// Sysuser config files newly provided by this app.
-    pub link: Vec<String>,
-    /// Sysuser config files no longer provided by this app.
-    pub unlink: Vec<String>,
-    /// Whether the sysusers subtree content changed between old and new tree.
-    ///
-    /// This is the trigger for running `systemd-sysusers`. Subsumes link and
-    /// unlink changes (any file addition or removal changes the subtree oid).
-    pub content_changed: bool,
-}
-
-impl SysuserChanges {
-    pub fn is_empty(&self) -> bool {
-        self.link.is_empty() && self.unlink.is_empty() && !self.content_changed
+    /// Enabling a unit may start something that wasn't running before, which a
+    /// rollback can't cleanly undo; restart and disable are safe.
+    fn is_rollback_safe(&self) -> bool {
+        let UnitActions {
+            enable,
+            restart: _,
+            disable: _,
+        } = self;
+        enable.is_empty()
     }
-}
 
-/// Quadlet file changes, derived from Git trees only.
-///
-/// Quadlet files live in `quadlets/` and get symlinked to
-/// `/etc/containers/systemd/`, where Podman's quadlet generator turns them
-/// into systemd units at `daemon-reload` time. Content changes need a
-/// reload to regenerate; the generated service's restart is driven by
-/// `systemd.units_enabled` listing its name.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct QuadletChanges {
-    /// Quadlet files newly provided by this app.
-    pub link: Vec<String>,
-    /// Quadlet files no longer provided by this app.
-    pub unlink: Vec<String>,
-    /// True iff the `quadlets/` subtree differs between old and new tree.
-    ///
-    /// True for any kind of change: a new file, a removed file, or a
-    /// modification to an existing file. This is the trigger for
-    /// `daemon-reload`, which re-runs the quadlet generator.
-    pub content_changed: bool,
+    fn append(&mut self, other: &mut Self) {
+        self.enable.append(&mut other.enable);
+        self.restart.append(&mut other.restart);
+        self.disable.append(&mut other.disable);
+    }
 }
 
 /// Desired managed-symlink state for a host deploy.
@@ -295,12 +263,12 @@ pub struct DesiredState {
     pub units: BTreeMap<String, PathBuf>,
 }
 
-/// Compute unit lifecycle actions by comparing two enabled unit sets.
+/// Compute unit actions by comparing two enabled unit sets.
 ///
 /// Both sets are pre-filtered to changed apps only, so a unit appearing
 /// in both means its app changed while it stayed enabled → restart.
-pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitChanges {
-    let mut changes = UnitChanges::default();
+pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitActions {
+    let mut changes = UnitActions::default();
     for name in target {
         if prev.contains(name) {
             changes.restart.push(name.clone());
@@ -330,6 +298,23 @@ pub struct SymlinkChanges<T> {
 impl<T> SymlinkChanges<T> {
     pub fn is_empty(&self) -> bool {
         self.create.is_empty() && self.remove.is_empty() && self.change.is_empty()
+    }
+
+    /// Re-applying the previous commit restores removed and changed symlinks,
+    /// but can't un-create one we added over a pre-existing path.
+    fn is_rollback_safe(&self) -> bool {
+        let SymlinkChanges {
+            create,
+            remove: _,
+            change: _,
+        } = self;
+        create.is_empty()
+    }
+
+    fn append(&mut self, other: &mut Self) {
+        self.create.append(&mut other.create);
+        self.remove.append(&mut other.remove);
+        self.change.append(&mut other.change);
     }
 
     /// Transform link and source paths.
@@ -432,12 +417,13 @@ pub fn compute_system_diff(
     let old = diff.old_tree();
     let new = diff.new_tree();
 
+    let unit_actions = diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?);
+
     let (link, unlink, content_changed) = store.subdir_changes(old, new, "systemd")?;
-    let units = UnitChanges {
+    let units = SubdirChanges {
         link,
         unlink,
         content_changed,
-        ..diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?)
     };
 
     let symlinks = diff_symlinks(
@@ -446,14 +432,14 @@ pub fn compute_system_diff(
     );
 
     let (link, unlink, content_changed) = store.subdir_changes(old, new, "sysusers")?;
-    let sysusers = SysuserChanges {
+    let sysusers = SubdirChanges {
         link,
         unlink,
         content_changed,
     };
 
     let (link, unlink, content_changed) = store.subdir_changes(old, new, "quadlets")?;
-    let quadlets = QuadletChanges {
+    let quadlets = SubdirChanges {
         link,
         unlink,
         content_changed,
@@ -464,6 +450,7 @@ pub fn compute_system_diff(
         symlinks,
         sysusers,
         units,
+        unit_actions,
     })
 }
 

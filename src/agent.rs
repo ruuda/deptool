@@ -418,9 +418,9 @@ impl AgentSession {
         ));
         emit_message(Message::ApplyComplete {
             commit: ctx.target_commit,
-            enabled_units: system_diff.units.enable,
-            restarted_units: system_diff.units.restart,
-            disabled_units: system_diff.units.disable,
+            enabled_units: system_diff.unit_actions.enable,
+            restarted_units: system_diff.unit_actions.restart,
+            disabled_units: system_diff.unit_actions.disable,
         });
         Ok(())
     }

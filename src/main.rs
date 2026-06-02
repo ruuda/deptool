@@ -572,7 +572,7 @@ fn activate(
         }
     }
 
-    for unit in &changes.units.disable {
+    for unit in &changes.unit_actions.disable {
         log(&format!("disabling {unit}"));
         systemctl_ok(&["disable", "--now", unit]);
     }
@@ -590,7 +590,8 @@ fn activate(
     let needs_reload = !quadlet_symlink_changes.is_empty()
         || changes.quadlets.content_changed
         || !unit_symlink_changes.is_empty()
-        || !changes.units.is_empty();
+        || !changes.units.is_empty()
+        || !changes.unit_actions.is_empty();
     if needs_reload {
         log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
@@ -598,12 +599,12 @@ fn activate(
 
     let mut touched: Vec<&str> = Vec::new();
 
-    for unit in &changes.units.enable {
+    for unit in &changes.unit_actions.enable {
         log(&format!("enabling {unit}"));
         touched.push(unit);
         systemctl_ok(&["enable", "--now", unit]);
     }
-    for unit in &changes.units.restart {
+    for unit in &changes.unit_actions.restart {
         log(&format!("restarting {unit}"));
         touched.push(unit);
         systemctl_ok(&["restart", unit]);
