@@ -302,7 +302,7 @@ impl Store {
     /// A nested directory (e.g. a systemd `<unit>.d` drop-in directory)
     /// appears only as a path prefix; the directory itself is never an entry.
     /// Returns an empty set if the subdirectory doesn't exist.
-    fn subdir_entries(&self, app_tree_oid: Oid, subdir: &str) -> Result<BTreeSet<String>> {
+    pub fn subdir_entries(&self, app_tree_oid: Oid, subdir: &str) -> Result<BTreeSet<String>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
         let entry = match tree.get_name(subdir) {
             Some(entry) => entry,
@@ -370,28 +370,10 @@ impl Store {
         Ok(result)
     }
 
-    /// Diff a managed subdirectory (units, sysusers, quadlets) between two app
-    /// trees: the files added, the files removed, and whether its content
-    /// changed at all. Returned as `(added, removed, content_changed)`.
-    pub fn subdir_changes(
-        &self,
-        old_tree: Oid,
-        new_tree: Oid,
-        subdir: &str,
-    ) -> Result<(Vec<String>, Vec<String>, bool)> {
-        let old_files = self.subdir_entries(old_tree, subdir)?;
-        let new_files = self.subdir_entries(new_tree, subdir)?;
-        let added = new_files.difference(&old_files).cloned().collect();
-        let removed = old_files.difference(&new_files).cloned().collect();
-        // The subtree oid differs whenever any file under it was added,
-        // removed, or edited -- a content change without enumerating files.
-        let changed = self.subtree_oid(old_tree, subdir)? != self.subtree_oid(new_tree, subdir)?;
-        Ok((added, removed, changed))
-    }
-
     /// Oid of an app tree's named subtree, or `None` if there is no such
-    /// subdirectory.
-    fn subtree_oid(&self, app_tree_oid: Oid, subdir: &str) -> Result<Option<Oid>> {
+    /// subdirectory. Differs between two trees whenever any file under it was
+    /// added, removed, or edited.
+    pub fn subtree_oid(&self, app_tree_oid: Oid, subdir: &str) -> Result<Option<Oid>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
         Ok(tree.get_name(subdir).map(|e| e.id()))
     }

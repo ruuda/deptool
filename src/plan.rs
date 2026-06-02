@@ -405,6 +405,24 @@ pub fn diff_apps(
     changes
 }
 
+/// Diff a managed subdirectory (units, sysusers, quadlets) between two app
+/// trees into the files added, the files removed, and whether its content
+/// changed at all.
+fn subdir_changes(
+    store: &Store,
+    old: Oid,
+    new: Oid,
+    subdir: &str,
+) -> std::result::Result<SubdirChanges, StoreError> {
+    let old_files = store.subdir_entries(old, subdir)?;
+    let new_files = store.subdir_entries(new, subdir)?;
+    Ok(SubdirChanges {
+        link: new_files.difference(&old_files).cloned().collect(),
+        unlink: old_files.difference(&new_files).cloned().collect(),
+        content_changed: store.subtree_oid(old, subdir)? != store.subtree_oid(new, subdir)?,
+    })
+}
+
 /// Compute the system-level side effects of a single app change.
 ///
 /// The add, remove, and update cases are one path: the absent side of an add
@@ -417,40 +435,15 @@ pub fn compute_system_diff(
     let old = diff.old_tree();
     let new = diff.new_tree();
 
-    let unit_actions = diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?);
-
-    let (link, unlink, content_changed) = store.subdir_changes(old, new, "systemd")?;
-    let units = SubdirChanges {
-        link,
-        unlink,
-        content_changed,
-    };
-
-    let symlinks = diff_symlinks(
-        &store.read_manifest(old)?.symlinks,
-        &store.read_manifest(new)?.symlinks,
-    );
-
-    let (link, unlink, content_changed) = store.subdir_changes(old, new, "sysusers")?;
-    let sysusers = SubdirChanges {
-        link,
-        unlink,
-        content_changed,
-    };
-
-    let (link, unlink, content_changed) = store.subdir_changes(old, new, "quadlets")?;
-    let quadlets = SubdirChanges {
-        link,
-        unlink,
-        content_changed,
-    };
-
     Ok(SystemDiff {
-        quadlets,
-        symlinks,
-        sysusers,
-        units,
-        unit_actions,
+        quadlets: subdir_changes(store, old, new, "quadlets")?,
+        symlinks: diff_symlinks(
+            &store.read_manifest(old)?.symlinks,
+            &store.read_manifest(new)?.symlinks,
+        ),
+        sysusers: subdir_changes(store, old, new, "sysusers")?,
+        units: subdir_changes(store, old, new, "systemd")?,
+        unit_actions: diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?),
     })
 }
 
