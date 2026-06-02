@@ -219,7 +219,8 @@ pub fn reconcile_managed_symlinks(
 
     for name in actual.keys() {
         if !desired.contains_key(name) {
-            fs::remove_file(target_dir.join(name))?;
+            let link_path = target_dir.join(name);
+            fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
         }
     }
 
@@ -238,14 +239,32 @@ pub fn reconcile_managed_symlinks(
         if needs_update {
             let link_path = target_dir.join(name);
             if link_path.exists() || link_path.symlink_metadata().is_ok() {
-                fs::remove_file(&link_path)?;
+                fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
             }
-            unix_fs::symlink(desired_target, &link_path)?;
+            unix_fs::symlink(desired_target, &link_path)
+                .map_err(|e| symlink_failed(&link_path, e))?;
             changed.insert(name.clone());
         }
     }
 
     Ok(changed)
+}
+
+/// Name the path in errors, so a bare io message like "Is a directory"
+/// doesn't reach the operator without context. The two variants keep the
+/// reported operation honest: removing the old entry versus creating the link.
+fn remove_failed(path: &Path, err: std::io::Error) -> ApplyError {
+    ApplyError::RemoveFailed {
+        path: path.display().to_string(),
+        cause: err.to_string(),
+    }
+}
+
+fn symlink_failed(link: &Path, err: std::io::Error) -> ApplyError {
+    ApplyError::SymlinkFailed {
+        link: link.display().to_string(),
+        cause: err.to_string(),
+    }
 }
 
 /// Reconcile manifest symlinks on the host filesystem.
@@ -630,6 +649,28 @@ mod tests {
 
         assert!(changed.is_empty());
         assert!(units.path().join("sshd.service").is_symlink());
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_names_path_when_link_location_is_a_directory() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let name = "postgresql.service.d";
+        let target = apps.path().join("postgres/current/systemd").join(name);
+        let desired = BTreeMap::from([(name.to_string(), target)]);
+
+        // A real drop-in directory already occupies the link location, e.g.
+        // left by `systemctl edit`. We can't `remove_file` a directory.
+        let link_path = units.path().join(name);
+        fs::create_dir(&link_path)?;
+
+        let err = reconcile_managed_symlinks(&desired, apps.path(), units.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot remove") && msg.contains(&link_path.display().to_string()),
+            "error says removal of the path failed, not symlink creation: {err}",
+        );
         Ok(())
     }
 

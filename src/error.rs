@@ -69,8 +69,11 @@ impl fmt::Display for StoreError {
 /// A failure on the agent during a deploy request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyError {
-    /// Failed to create, remove, or verify a symlink.
+    /// Failed to create or verify a symlink.
     SymlinkFailed { link: String, cause: String },
+    /// Failed to remove what was at a managed link location before placing
+    /// our symlink there (e.g. an unmanaged directory occupies the path).
+    RemoveFailed { path: String, cause: String },
     /// One or more systemd units failed to become active after apply.
     SystemdActivationFailed { units: Vec<String> },
     /// `systemctl is-active` returned a different number of status words than
@@ -102,6 +105,9 @@ impl fmt::Display for ApplyError {
         match self {
             ApplyError::SymlinkFailed { link, cause } => {
                 write!(f, "cannot create symlink at {link}: {cause}")
+            }
+            ApplyError::RemoveFailed { path, cause } => {
+                write!(f, "cannot remove {path}: {cause}")
             }
             ApplyError::SystemdActivationFailed { units } => {
                 write!(f, "units failed to become active: {}", units.join(", "))

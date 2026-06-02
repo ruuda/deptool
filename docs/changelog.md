@@ -25,6 +25,9 @@ Unreleased.
  * List which specific systemd units failed to become active, if any.
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
+<!-- TODO(ruuda): Symlink reconcile failures (units, quadlets, sysusers) now
+     name the link path in the error instead of printing a bare OS message
+     like "Is a directory". -->
 
 ## 1.0.0
 
