@@ -39,6 +39,9 @@ Bugfixes:
 
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
+<!-- TODO(ruuda): Fix a bug where a content-only change to a unit file or
+     drop-in that is not enabled did not trigger a daemon-reload, so systemd
+     did not pick up the edit. -->
 
 ## 1.0.0
 

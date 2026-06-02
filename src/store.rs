@@ -370,6 +370,13 @@ impl Store {
         Ok(result)
     }
 
+    /// Oid of an app tree's named subtree, or `None` if there is no such
+    /// subdirectory. Used to detect content changes between two trees.
+    pub fn subtree_oid(&self, app_tree_oid: Oid, subdir: &str) -> Result<Option<Oid>> {
+        let tree = self.repo.find_tree(app_tree_oid)?;
+        Ok(tree.get_name(subdir).map(|e| e.id()))
+    }
+
     /// Collect desired unit symlinks for a host.
     pub fn desired_units(
         &self,
@@ -390,12 +397,6 @@ impl Store {
         self.subdir_entries(app_tree_oid, "sysusers")
     }
 
-    /// Get the tree oid of the `sysusers/` subtree, for content comparison.
-    pub fn sysusers_tree_oid(&self, app_tree_oid: Oid) -> Result<Option<Oid>> {
-        let tree = self.repo.find_tree(app_tree_oid)?;
-        Ok(tree.get_name("sysusers").map(|e| e.id()))
-    }
-
     /// Collect desired sysusers symlinks for a host.
     pub fn desired_sysusers(
         &self,
@@ -409,12 +410,6 @@ impl Store {
     /// List all quadlet files in an app tree's `quadlets/` directory.
     pub fn app_quadlets(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
         self.subdir_entries(app_tree_oid, "quadlets")
-    }
-
-    /// Get the tree oid of the `quadlets/` subtree, for content comparison.
-    pub fn quadlets_tree_oid(&self, app_tree_oid: Oid) -> Result<Option<Oid>> {
-        let tree = self.repo.find_tree(app_tree_oid)?;
-        Ok(tree.get_name("quadlets").map(|e| e.id()))
     }
 
     /// Collect desired quadlet symlinks for a host.

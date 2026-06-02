@@ -91,6 +91,7 @@ impl<T> SystemDiff<T> {
             disable: _,
             link,
             unlink: _,
+            content_changed: _,
         } = units;
         quadlets_link.is_empty()
             && create.is_empty()
@@ -115,6 +116,7 @@ impl<T> SystemDiff<T> {
         self.units.disable.append(&mut other.units.disable);
         self.units.link.append(&mut other.units.link);
         self.units.unlink.append(&mut other.units.unlink);
+        self.units.content_changed |= other.units.content_changed;
     }
 }
 
@@ -193,6 +195,13 @@ pub struct UnitChanges {
     pub link: Vec<String>,
     /// Unit files no longer provided by this app.
     pub unlink: Vec<String>,
+    /// True iff the `systemd/` subtree differs between old and new tree.
+    ///
+    /// Triggers `daemon-reload` so systemd picks up an edited unit file or
+    /// drop-in. Needed for a content-only change to a unit that isn't enabled
+    /// (enabled ones already reload via `restart`); subsumes link and unlink,
+    /// since any file added or removed also changes the subtree oid.
+    pub content_changed: bool,
 }
 
 impl UnitChanges {
@@ -202,6 +211,7 @@ impl UnitChanges {
             && self.disable.is_empty()
             && self.link.is_empty()
             && self.unlink.is_empty()
+            && !self.content_changed
     }
 }
 
@@ -400,6 +410,7 @@ pub fn compute_system_diff(
             let enabled = store.enabled_units(*new_tree)?;
             let mut units = diff_enabled(&BTreeSet::new(), &enabled);
             units.link = store.app_units(*new_tree)?.into_iter().collect();
+            units.content_changed = !units.link.is_empty();
             let manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&BTreeMap::new(), &manifest.symlinks);
             let new_sysusers = store.app_sysusers(*new_tree)?;
@@ -425,6 +436,7 @@ pub fn compute_system_diff(
             let enabled = store.enabled_units(*old_tree)?;
             let mut units = diff_enabled(&enabled, &BTreeSet::new());
             units.unlink = store.app_units(*old_tree)?.into_iter().collect();
+            units.content_changed = !units.unlink.is_empty();
             let manifest = store.read_manifest(*old_tree)?;
             let symlinks = diff_symlinks(&manifest.symlinks, &BTreeMap::new());
             let old_sysusers = store.app_sysusers(*old_tree)?;
@@ -454,14 +466,16 @@ pub fn compute_system_diff(
             let mut units = diff_enabled(&old_enabled, &new_enabled);
             units.link = new_all.difference(&old_all).cloned().collect();
             units.unlink = old_all.difference(&new_all).cloned().collect();
+            units.content_changed = store.subtree_oid(*old_tree, "systemd")?
+                != store.subtree_oid(*new_tree, "systemd")?;
             let old_manifest = store.read_manifest(*old_tree)?;
             let new_manifest = store.read_manifest(*new_tree)?;
             let symlinks = diff_symlinks(&old_manifest.symlinks, &new_manifest.symlinks);
             let old_sysusers_all = store.app_sysusers(*old_tree)?;
             let new_sysusers_all = store.app_sysusers(*new_tree)?;
             let sysusers = SysuserChanges {
-                content_changed: store.sysusers_tree_oid(*old_tree)?
-                    != store.sysusers_tree_oid(*new_tree)?,
+                content_changed: store.subtree_oid(*old_tree, "sysusers")?
+                    != store.subtree_oid(*new_tree, "sysusers")?,
                 link: new_sysusers_all
                     .difference(&old_sysusers_all)
                     .cloned()
@@ -474,8 +488,8 @@ pub fn compute_system_diff(
             let old_quadlets_all = store.app_quadlets(*old_tree)?;
             let new_quadlets_all = store.app_quadlets(*new_tree)?;
             let quadlets = QuadletChanges {
-                content_changed: store.quadlets_tree_oid(*old_tree)?
-                    != store.quadlets_tree_oid(*new_tree)?,
+                content_changed: store.subtree_oid(*old_tree, "quadlets")?
+                    != store.subtree_oid(*new_tree, "quadlets")?,
                 link: new_quadlets_all
                     .difference(&old_quadlets_all)
                     .cloned()
@@ -877,6 +891,19 @@ mod tests {
             &[("web1/nginx/nginx.conf", b"v2")],
         )?;
         assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn unit_content_change_is_flagged_even_when_not_enabled() -> Result<()> {
+        // A unit that is not enabled: editing its content changes nothing in
+        // link/unlink or enable/restart, but the deploy must still flag it so it
+        // issues a daemon-reload for systemd to pick it up.
+        let d = diff_update(
+            &[("web1/nginx/systemd/nginx.service", b"v1")],
+            &[("web1/nginx/systemd/nginx.service", b"v2")],
+        )?;
+        assert!(d.units.content_changed, "content change is flagged");
         Ok(())
     }
 
