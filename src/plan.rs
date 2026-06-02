@@ -437,8 +437,7 @@ pub fn compute_system_diff(
     let new_units = store.app_units(new)?;
     units.link = new_units.difference(&old_units).cloned().collect();
     units.unlink = old_units.difference(&new_units).cloned().collect();
-    units.content_changed =
-        store.subtree_oid(old, "systemd")? != store.subtree_oid(new, "systemd")?;
+    units.content_changed = store.subtree_changed(old, new, "systemd")?;
 
     let symlinks = diff_symlinks(
         &store.read_manifest(old)?.symlinks,
@@ -450,8 +449,7 @@ pub fn compute_system_diff(
     let sysusers = SysuserChanges {
         link: new_sysusers.difference(&old_sysusers).cloned().collect(),
         unlink: old_sysusers.difference(&new_sysusers).cloned().collect(),
-        content_changed: store.subtree_oid(old, "sysusers")?
-            != store.subtree_oid(new, "sysusers")?,
+        content_changed: store.subtree_changed(old, new, "sysusers")?,
     };
 
     let old_quadlets = store.app_quadlets(old)?;
@@ -459,8 +457,7 @@ pub fn compute_system_diff(
     let quadlets = QuadletChanges {
         link: new_quadlets.difference(&old_quadlets).cloned().collect(),
         unlink: old_quadlets.difference(&new_quadlets).cloned().collect(),
-        content_changed: store.subtree_oid(old, "quadlets")?
-            != store.subtree_oid(new, "quadlets")?,
+        content_changed: store.subtree_changed(old, new, "quadlets")?,
     };
 
     Ok(SystemDiff {

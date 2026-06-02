@@ -370,9 +370,18 @@ impl Store {
         Ok(result)
     }
 
+    /// Whether an app tree's named subtree differs between two trees.
+    ///
+    /// Detects a content change in a managed subdirectory (units, sysusers,
+    /// quadlets) without enumerating files: the subtree oid differs whenever
+    /// any file under it is added, removed, or edited.
+    pub fn subtree_changed(&self, old_tree: Oid, new_tree: Oid, subdir: &str) -> Result<bool> {
+        Ok(self.subtree_oid(old_tree, subdir)? != self.subtree_oid(new_tree, subdir)?)
+    }
+
     /// Oid of an app tree's named subtree, or `None` if there is no such
-    /// subdirectory. Used to detect content changes between two trees.
-    pub fn subtree_oid(&self, app_tree_oid: Oid, subdir: &str) -> Result<Option<Oid>> {
+    /// subdirectory.
+    fn subtree_oid(&self, app_tree_oid: Oid, subdir: &str) -> Result<Option<Oid>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
         Ok(tree.get_name(subdir).map(|e| e.id()))
     }
