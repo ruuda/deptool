@@ -21,6 +21,10 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+<!-- TODO(ruuda): Support systemd drop-in directories: files inside a
+     `<unit>.service.d/` directory under `systemd/` are symlinked individually,
+     so unmanaged drop-ins in the same directory are left untouched, and an
+     emptied `.d` directory is pruned. -->
 
 Improvements:
 

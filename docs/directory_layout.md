@@ -85,6 +85,10 @@ directory, Deptool will create a symlink in `/etc/systemd/system` that points to
 it. The symlink points through the app’s `current` symlink. While placing units
 in this directory makes them available to systemd, they need to be
 activated/enabled separately, see [`units_enabled`][enabled] in the manifest.
+<!-- TODO(ruuda): Document drop-in directories: a `<unit>.service.d/`
+     subdirectory is mirrored into `/etc/systemd/system/<unit>.service.d/`,
+     symlinking each drop-in file individually so unmanaged drop-ins coexist. -->
+
 
 ### sysusers/
 

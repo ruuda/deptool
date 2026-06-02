@@ -296,8 +296,11 @@ impl Store {
         self.path().join("deptool.lock")
     }
 
-    /// List filenames in an app tree's named subdirectory.
+    /// Relative paths of all files (blobs) in an app tree's named
+    /// subdirectory, recursively.
     ///
+    /// A nested directory (e.g. a systemd `<unit>.d` drop-in directory)
+    /// appears only as a path prefix; the directory itself is never an entry.
     /// Returns an empty set if the subdirectory doesn't exist.
     fn subdir_entries(&self, app_tree_oid: Oid, subdir: &str) -> Result<BTreeSet<String>> {
         let tree = self.repo.find_tree(app_tree_oid)?;
@@ -307,12 +310,39 @@ impl Store {
         };
         let subtree = self.repo.find_tree(entry.id())?;
         let mut names = BTreeSet::new();
-        for entry in subtree.iter() {
-            if let Some(name) = entry.name() {
-                names.insert(name.to_string());
+        self.collect_blobs(&subtree, &mut String::new(), &mut names)?;
+        Ok(names)
+    }
+
+    /// Collect the path of every blob under `tree`, prefixing each with
+    /// `prefix` (the slash-terminated path from the subdirectory to `tree`).
+    ///
+    /// `prefix` is a reused buffer: each level appends its name and truncates
+    /// back on the way out, so recursion doesn't allocate a string per level.
+    fn collect_blobs(
+        &self,
+        tree: &Tree,
+        prefix: &mut String,
+        names: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        for entry in tree.iter() {
+            let name = entry.name().ok_or(StoreError::NonUtf8FileName)?;
+            match entry.kind() {
+                Some(git2::ObjectType::Tree) => {
+                    let subtree = self.repo.find_tree(entry.id())?;
+                    let len = prefix.len();
+                    prefix.push_str(name);
+                    prefix.push('/');
+                    self.collect_blobs(&subtree, prefix, names)?;
+                    prefix.truncate(len);
+                }
+                Some(git2::ObjectType::Blob) => {
+                    names.insert(format!("{prefix}{name}"));
+                }
+                _ => {}
             }
         }
-        Ok(names)
+        Ok(())
     }
 
     /// Collect desired symlinks for an app subdirectory across all apps.
@@ -331,6 +361,8 @@ impl Store {
         let mut result = BTreeMap::new();
         for (app, app_tree_oid) in &apps {
             for name in self.subdir_entries(*app_tree_oid, subdir)? {
+                // `name` may be a slash-separated relative path (a drop-in file
+                // inside a `<unit>.d` directory); `join` extends the path.
                 let target = apps_dir.join(app).join("current").join(subdir).join(&name);
                 result.insert(name, target);
             }
@@ -750,6 +782,59 @@ mod tests {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("web.container"), "{msg}");
+    }
+
+    #[test]
+    fn app_units_includes_dropin_files_by_relative_path() -> Result<()> {
+        let t = TestRepo::new();
+        let oid = t.commit(&[
+            ("host/postgres/systemd/postgresql.service", b"[Unit]"),
+            (
+                "host/postgres/systemd/postgresql.service.d/override.conf",
+                b"[Service]",
+            ),
+        ]);
+        let tree = t.store.get_commit_tree(oid)?;
+        let apps = t.store.get_host_apps(&tree, &Hostname("host".into()))?;
+
+        let units = t.store.app_units(apps["postgres"])?;
+
+        assert_eq!(
+            units,
+            BTreeSet::from([
+                "postgresql.service".to_string(),
+                "postgresql.service.d/override.conf".to_string(),
+            ]),
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn validate_rejects_same_dropin_file_across_apps() {
+        let t = TestRepo::new();
+        let oid = t.commit(&[
+            ("host/app1/systemd/pg.service.d/override.conf", b"[Service]"),
+            ("host/app2/systemd/pg.service.d/override.conf", b"[Service]"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("pg.service.d/override.conf"), "{msg}");
+    }
+
+    #[test]
+    fn validate_allows_distinct_dropins_in_shared_unit_dir_across_apps() -> Result<()> {
+        let t = TestRepo::new();
+        // Both apps drop files into the same unit's .d directory, but
+        // different files -- they coexist on the host, so this is allowed.
+        let oid = t.commit(&[
+            ("host/app1/systemd/pg.service.d/a.conf", b"[Service]"),
+            ("host/app2/systemd/pg.service.d/b.conf", b"[Service]"),
+        ]);
+
+        t.store.validate(t.get_commit_tree_oid(oid))
     }
 
     #[test]

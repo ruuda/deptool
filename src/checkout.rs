@@ -221,14 +221,11 @@ pub fn reconcile_managed_symlinks(
         if !desired.contains_key(name) {
             let link_path = target_dir.join(name);
             fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
+            // Deptool manages files declaratively, so it shouldn't leave an
+            // empty `<unit>.d` directory behind once our last drop-in is gone.
+            let parent = link_path.parent().expect("a link path has a parent");
+            prune_empty_dirs(target_dir, parent);
         }
-    }
-
-    // The directory may not exist yet (e.g. /etc/sysusers.d on a fresh
-    // system). Create it on first use rather than requiring provisioning.
-    if !desired.is_empty() && !target_dir.exists() {
-        fs::create_dir_all(target_dir)?;
-        fs::set_permissions(target_dir, fs::Permissions::from_mode(0o755))?;
     }
 
     for (name, desired_target) in desired {
@@ -238,6 +235,11 @@ pub fn reconcile_managed_symlinks(
         };
         if needs_update {
             let link_path = target_dir.join(name);
+            // `name` may be a drop-in path like `<unit>.d/override.conf`. Create
+            // its parent as a real directory so unmanaged drop-ins there coexist
+            // with ours.
+            let parent = link_path.parent().expect("a link path has a parent");
+            create_managed_dir(target_dir, parent)?;
             if link_path.exists() || link_path.symlink_metadata().is_ok() {
                 fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
             }
@@ -248,6 +250,53 @@ pub fn reconcile_managed_symlinks(
     }
 
     Ok(changed)
+}
+
+/// Create `dir` and any missing ancestors up to `stop`, giving every level
+/// mode 0o755.
+///
+/// `create_dir_all` leaves new directories at the umask default, but systemd
+/// needs drop-in directories world-readable. So we set the mode on the whole
+/// chain from `dir` up to `stop` -- the managed root we own (e.g.
+/// /etc/sysusers.d on a fresh system) -- normalizing pre-existing levels too,
+/// not just the innermost one `create_dir_all` made.
+fn create_managed_dir(stop: &Path, dir: &Path) -> Result<()> {
+    assert!(
+        dir.starts_with(stop),
+        "managed dir {dir:?} must be under the managed root {stop:?}",
+    );
+    fs::create_dir_all(dir)?;
+    let mut level = dir;
+    loop {
+        fs::set_permissions(level, fs::Permissions::from_mode(0o755))?;
+        if level == stop {
+            break;
+        }
+        level = level.parent().expect("a dir under stop has a parent");
+    }
+    Ok(())
+}
+
+/// Remove `dir` and its ancestors below `stop`, as long as each is empty.
+///
+/// The walk steps up one parent at a time and halts at `stop`, so the managed
+/// root is never removed. Best-effort: failing to prune is not worth failing
+/// the deploy.
+fn prune_empty_dirs(stop: &Path, dir: &Path) {
+    assert!(
+        dir.starts_with(stop),
+        "prune walks only under the managed root {stop:?}, not {dir:?}",
+    );
+    let mut level = dir;
+    loop {
+        // `remove_dir` removes a directory only when it is empty; a non-empty
+        // directory (one still holding unmanaged drop-ins) returns an error,
+        // which ends the walk and leaves it in place.
+        if level == stop || fs::remove_dir(level).is_err() {
+            break;
+        }
+        level = level.parent().expect("a dir under stop has a parent");
+    }
 }
 
 /// Name the path in errors, so a bare io message like "Is a directory"
@@ -380,40 +429,62 @@ fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     }
 }
 
-/// Collect symlinks in `dir` that point into `apps_dir`.
+/// Collect symlinks under `dir` that point into `apps_dir`, keyed by their
+/// path relative to `dir`.
 ///
 /// We create absolute symlinks, so we just check whether the raw symlink
-/// target starts with apps_dir. No canonicalization needed.
-fn collect_managed_symlinks(
+/// target starts with apps_dir. No canonicalization needed. Real
+/// subdirectories (e.g. `<unit>.d` drop-in dirs) are recursed into to find our
+/// drop-in files; unmanaged files and directories alongside them are ignored.
+fn collect_managed_symlinks(apps_dir: &Path, dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let mut managed = BTreeMap::new();
+    collect_managed_symlinks_into(apps_dir, dir, "", &mut managed)?;
+    Ok(managed)
+}
+
+fn collect_managed_symlinks_into(
     apps_dir: &Path,
     dir: &Path,
-) -> Result<BTreeMap<String, std::path::PathBuf>> {
-    let mut units = BTreeMap::new();
-
+    prefix: &str,
+    managed: &mut BTreeMap<String, PathBuf>,
+) -> Result<()> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(units),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e.into()),
     };
 
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_symlink() {
-            continue;
-        }
-        let target = fs::read_link(&path)?;
-        if target.starts_with(apps_dir) {
-            let name = entry.file_name();
-            let name = name.to_str().ok_or_else(|| ApplyError::SymlinkFailed {
-                link: entry.path().display().to_string(),
-                cause: "file name is not valid UTF-8".into(),
-            })?;
-            units.insert(name.to_string(), target);
+        // Check is_symlink before is_dir: a symlink to a directory reports
+        // is_dir() == true, but we must treat it as a single managed leaf, not
+        // recurse through it into apps_dir.
+        if path.is_symlink() {
+            let target = fs::read_link(&path)?;
+            if target.starts_with(apps_dir) {
+                let name = entry.file_name();
+                let name = name.to_str().ok_or_else(|| ApplyError::SymlinkFailed {
+                    link: path.display().to_string(),
+                    cause: "file name is not valid UTF-8".into(),
+                })?;
+                managed.insert(format!("{prefix}{name}"), target);
+            }
+        } else if path.is_dir() {
+            // Our drop-in directories come from git and are always UTF-8; a
+            // non-UTF-8 directory can't hold our symlinks, so skip it.
+            if let Some(name) = entry.file_name().to_str() {
+                collect_managed_symlinks_into(
+                    apps_dir,
+                    &path,
+                    &format!("{prefix}{name}/"),
+                    managed,
+                )?;
+            }
         }
     }
 
-    Ok(units)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -653,15 +724,16 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_managed_symlinks_names_path_when_link_location_is_a_directory() -> Result<()> {
+    fn reconcile_managed_symlinks_names_path_when_a_directory_occupies_a_leaf() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
-        let name = "postgresql.service.d";
-        let target = apps.path().join("postgres/current/systemd").join(name);
+        let name = "nginx.service";
+        let target = apps.path().join("nginx/current/systemd").join(name);
         let desired = BTreeMap::from([(name.to_string(), target)]);
 
-        // A real drop-in directory already occupies the link location, e.g.
-        // left by `systemctl edit`. We can't `remove_file` a directory.
+        // A directory sits where a managed unit symlink should go. We can't
+        // `remove_file` a directory; the error must name the path so the
+        // operator can find and clear the obstruction.
         let link_path = units.path().join(name);
         fs::create_dir(&link_path)?;
 
@@ -670,6 +742,121 @@ mod tests {
         assert!(
             msg.contains("cannot remove") && msg.contains(&link_path.display().to_string()),
             "error says removal of the path failed, not symlink creation: {err}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_creates_dropin_leaf_with_a_real_0755_parent_dir() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        // Start the managed root restrictive to check we normalize it, and every
+        // level we create below, to 0o755 -- which systemd requires.
+        fs::set_permissions(units.path(), fs::Permissions::from_mode(0o700))?;
+        let rel = "postgresql.service.d/override.conf";
+        let target = apps.path().join("postgres/current/systemd").join(rel);
+        let desired = BTreeMap::from([(rel.to_string(), target.clone())]);
+
+        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+
+        let dropin_dir = units.path().join("postgresql.service.d");
+        assert!(
+            dropin_dir.is_dir() && !dropin_dir.is_symlink(),
+            "the .d parent is a real directory, not a symlink",
+        );
+        let leaf = units.path().join(rel);
+        assert!(leaf.is_symlink(), "the drop-in file is a symlink");
+        assert_eq!(fs::read_link(&leaf)?, target);
+        assert_eq!(changed, BTreeSet::from([rel.to_string()]));
+
+        let mode = |p: &Path| fs::metadata(p).expect("dir exists").permissions().mode() & 0o777;
+        assert_eq!(mode(units.path()), 0o755, "managed root is 0o755");
+        assert_eq!(mode(&dropin_dir), 0o755, "created .d dir is 0o755");
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_preserves_unmanaged_sibling_in_dropin_dir() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let rel = "postgresql.service.d/override.conf";
+        let target = apps.path().join("postgres/current/systemd").join(rel);
+        let desired = BTreeMap::from([(rel.to_string(), target)]);
+
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        // A drop-in placed out of band (e.g. `systemctl edit`) in the same dir.
+        let sibling = units.path().join("postgresql.service.d/manual.conf");
+        fs::write(&sibling, b"[Service]")?;
+
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+
+        assert!(
+            sibling.is_file() && !sibling.is_symlink(),
+            "the unmanaged sibling is left untouched",
+        );
+        assert!(units.path().join(rel).is_symlink(), "our drop-in is intact");
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_prunes_empty_dropin_dir_on_removal() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let rel = "postgresql.service.d/override.conf";
+        let target = apps.path().join("postgres/current/systemd").join(rel);
+        let desired = BTreeMap::from([(rel.to_string(), target)]);
+
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+
+        assert!(
+            !units.path().join("postgresql.service.d").exists(),
+            "the now-empty .d directory is pruned",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_keeps_dropin_dir_with_unmanaged_sibling_on_removal() -> Result<()>
+    {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let rel = "postgresql.service.d/override.conf";
+        let target = apps.path().join("postgres/current/systemd").join(rel);
+        let desired = BTreeMap::from([(rel.to_string(), target)]);
+
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        let sibling = units.path().join("postgresql.service.d/manual.conf");
+        fs::write(&sibling, b"[Service]")?;
+        reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+
+        assert!(sibling.is_file(), "the unmanaged sibling survives");
+        assert!(!units.path().join(rel).exists(), "our drop-in was removed");
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_managed_symlinks_removes_a_directory_symlink_without_recursing() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        // Deptool no longer symlinks a whole `.d` directory, but a host last
+        // deployed by the old version still has such a symlink-to-directory.
+        // Collecting must treat it as one managed leaf to remove, not recurse
+        // through it into apps_dir (which could delete real files there).
+        let target = apps.path().join("app/current/systemd/legacy.service.d");
+        fs::create_dir_all(&target)?;
+        fs::write(target.join("override.conf"), b"[Service]")?;
+        unix_fs::symlink(&target, units.path().join("legacy.service.d"))?;
+
+        reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+
+        assert!(
+            !units.path().join("legacy.service.d").exists(),
+            "the directory symlink is removed as one leaf",
+        );
+        assert!(
+            target.join("override.conf").exists(),
+            "nothing was deleted through the symlink",
         );
         Ok(())
     }
