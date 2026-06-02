@@ -432,32 +432,31 @@ pub fn compute_system_diff(
     let old = diff.old_tree();
     let new = diff.new_tree();
 
-    let mut units = diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?);
-    let old_units = store.app_units(old)?;
-    let new_units = store.app_units(new)?;
-    units.link = new_units.difference(&old_units).cloned().collect();
-    units.unlink = old_units.difference(&new_units).cloned().collect();
-    units.content_changed = store.subtree_changed(old, new, "systemd")?;
+    let (link, unlink, content_changed) = store.subdir_changes(old, new, "systemd")?;
+    let units = UnitChanges {
+        link,
+        unlink,
+        content_changed,
+        ..diff_enabled(&store.enabled_units(old)?, &store.enabled_units(new)?)
+    };
 
     let symlinks = diff_symlinks(
         &store.read_manifest(old)?.symlinks,
         &store.read_manifest(new)?.symlinks,
     );
 
-    let old_sysusers = store.app_sysusers(old)?;
-    let new_sysusers = store.app_sysusers(new)?;
+    let (link, unlink, content_changed) = store.subdir_changes(old, new, "sysusers")?;
     let sysusers = SysuserChanges {
-        link: new_sysusers.difference(&old_sysusers).cloned().collect(),
-        unlink: old_sysusers.difference(&new_sysusers).cloned().collect(),
-        content_changed: store.subtree_changed(old, new, "sysusers")?,
+        link,
+        unlink,
+        content_changed,
     };
 
-    let old_quadlets = store.app_quadlets(old)?;
-    let new_quadlets = store.app_quadlets(new)?;
+    let (link, unlink, content_changed) = store.subdir_changes(old, new, "quadlets")?;
     let quadlets = QuadletChanges {
-        link: new_quadlets.difference(&old_quadlets).cloned().collect(),
-        unlink: old_quadlets.difference(&new_quadlets).cloned().collect(),
-        content_changed: store.subtree_changed(old, new, "quadlets")?,
+        link,
+        unlink,
+        content_changed,
     };
 
     Ok(SystemDiff {
