@@ -284,6 +284,35 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitA
     changes
 }
 
+/// Of `units`, those whose `systemctl is-enabled` status means they should be
+/// enabled but currently aren't, so re-enabling repairs them.
+///
+/// `output` is the raw `is-enabled` stdout: one status word per unit, in the
+/// same order. A line-count mismatch means we can't map words to units, so
+/// return nothing rather than risk re-enabling the wrong one.
+pub fn units_to_reenable<'a>(units: &'a [String], output: &str) -> Vec<&'a str> {
+    if output.lines().count() != units.len() {
+        return Vec::new();
+    }
+    let mut result = Vec::new();
+    for (unit, state) in units.iter().zip(output.lines()) {
+        // Match the states where `systemctl enable` repairs a non-enabled unit.
+        // - linked, linked-runtime: symlinked into the unit dir (as Deptool
+        //   installs it) but not wanted by a target, this we can repair.
+        // - enabled-runtime: enabled only in /run, lost on reboot.
+        // - disabled: in the search path with [Install] but no wants symlink.
+        // Other states either can't be enabled ("static"/"generated") or are a
+        // deliberate choice ("masked"/"alias"); an unknown state is left alone.
+        match state {
+            "linked" | "linked-runtime" | "enabled-runtime" | "disabled" => {
+                result.push(unit.as_str())
+            }
+            _ => continue,
+        }
+    }
+    result
+}
+
 /// Manifest symlink actions, derived from comparing two commits' manifests.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymlinkChanges<T> {

@@ -42,6 +42,10 @@ Bugfixes:
 <!-- TODO(ruuda): Fix a bug where a content-only change to a unit file or
      drop-in that is not enabled did not trigger a daemon-reload, so systemd
      did not pick up the edit. -->
+<!-- TODO(ruuda): Restarting an app now re-enables any of its units that lost
+     their enablement (e.g. the `multi-user.target.wants/` symlink went missing
+     after an interrupted deploy), repairing the drift instead of leaving the
+     unit disabled until the next reboot fails to start it. -->
 
 ## 1.0.0
 

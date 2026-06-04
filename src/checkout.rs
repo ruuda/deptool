@@ -490,7 +490,7 @@ fn collect_managed_symlinks_into(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{SystemDiff, diff_enabled, diff_host};
+    use crate::plan::{SystemDiff, diff_enabled, diff_host, units_to_reenable};
     use crate::testutil::{TempDir, TestRepo, assert_dir_contents};
 
     // Tests do both apply calls (-> ApplyError) and raw git operations
@@ -906,6 +906,37 @@ mod tests {
 
         assert!(actions.enable.is_empty());
         assert_eq!(actions.disable, vec!["nginx.service"]);
+    }
+
+    #[test]
+    fn units_to_reenable_repairs_lost_enablement_but_leaves_other_states() {
+        let units = vec![
+            "nginx.service".to_string(),
+            "postgres.service".to_string(),
+            "redis.timer".to_string(),
+            "dbus.socket".to_string(),
+            "logrotate.service".to_string(),
+            "envoy.service".to_string(),
+        ];
+        // One is-enabled word per unit. Only "linked" (deptool's unit symlinked
+        // in but not wanted) and "enabled-runtime" (lost on reboot) are
+        // repairable; "enabled" is healthy and "static"/"masked"/"generated"
+        // must be left alone.
+        let output = "enabled\nlinked\nenabled-runtime\nstatic\nmasked\ngenerated\n";
+
+        let reenable = units_to_reenable(&units, output);
+
+        assert_eq!(reenable, vec!["postgres.service", "redis.timer"]);
+    }
+
+    #[test]
+    fn units_to_reenable_skips_everything_on_count_mismatch() {
+        let units = vec!["nginx.service".to_string(), "postgres.service".to_string()];
+        // Fewer words than units: we can't map a word to its unit, so repairing
+        // any one risks enabling the wrong unit.
+        let output = "disabled\n";
+
+        assert!(units_to_reenable(&units, output).is_empty());
     }
 
     /// Test harness for `diff_host` + `checkout` + `reconcile_managed_symlinks`.
