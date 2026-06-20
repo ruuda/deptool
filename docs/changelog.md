@@ -33,8 +33,10 @@ Improvements:
  * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
    now handled correctly, see the [directory layout
    chapter](directory_layout.md#systemd).
- * Restarting a systemd unit now also re-enables the unit when the unit is not
-   enabled and the manifest specifies that it should be.
+ <!-- TODO(ruuda): Restarting a managed unit now re-enables it unconditionally,
+      so its enablement symlink no longer goes stale when a deploy advances the
+      checkout that `systemctl enable` recorded. Supersedes the is-enabled probe
+      described here previously. -->
 
 Bugfixes:
 

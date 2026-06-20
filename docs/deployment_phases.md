@@ -79,6 +79,11 @@ for other service managers.
 
 For any systemd units that were not enabled in the previous revision, but which
 are enabled in the one we are deploying, run `systemctl enable --now` on them.
+
+<!-- TODO(ruuda): The convergence re-enable described here moved into the restart
+     step and is now unconditional (it repoints the enablement symlink, which
+     `systemctl enable` records against the versioned checkout and which goes
+     stale once a deploy advances `current`). Reword and relocate accordingly. -->
 For units that should be enabled according to the manifest, and which are part
 of a changed app, we also enable them if they weren’t already, to converge the
 system state towards what is specified in the config tree.
