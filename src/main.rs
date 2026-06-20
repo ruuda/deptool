@@ -574,7 +574,9 @@ fn activate(
 
     for unit in &changes.unit_actions.disable {
         log(&format!("disabling {unit}"));
-        systemctl_ok(&["disable", "--now", unit]);
+        // The daemon-reload below picks up the removed symlinks, so --no-reload
+        // skips the reload that disable does by default.
+        systemctl_ok(&["disable", "--no-reload", "--now", unit]);
     }
 
     // Reconcile unit symlinks after disable: systemd treats our symlinks
@@ -602,7 +604,9 @@ fn activate(
     for unit in &changes.unit_actions.enable {
         log(&format!("enabling {unit}"));
         touched.push(unit);
-        systemctl_ok(&["enable", "--now", unit]);
+        // We ran daemon-reload above, so --no-reload skips the reload that
+        // enable does by default. Both enable calls here rely on that reload.
+        systemctl_ok(&["enable", "--no-reload", "--now", unit]);
     }
 
     // `systemctl enable` records the unit's path resolved through `current` to
@@ -615,7 +619,7 @@ fn activate(
     for unit in &changes.unit_actions.restart {
         log(&format!("restarting {unit}"));
         touched.push(unit);
-        systemctl_ok(&["enable", unit]);
+        systemctl_ok(&["enable", "--no-reload", unit]);
         systemctl_ok(&["restart", unit]);
     }
 
