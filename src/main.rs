@@ -574,7 +574,9 @@ fn activate(
 
     for unit in &changes.unit_actions.disable {
         log(&format!("disabling {unit}"));
-        systemctl_ok(&["disable", "--now", unit]);
+        // The daemon-reload below picks up the removed symlinks, so --no-reload
+        // skips the reload that disable does by default.
+        systemctl_ok(&["disable", "--no-reload", "--now", unit]);
     }
 
     // Reconcile unit symlinks after disable: systemd treats our symlinks
@@ -602,33 +604,22 @@ fn activate(
     for unit in &changes.unit_actions.enable {
         log(&format!("enabling {unit}"));
         touched.push(unit);
-        systemctl_ok(&["enable", "--now", unit]);
+        // We ran daemon-reload above, so --no-reload skips the reload that
+        // enable does by default. Both enable calls here rely on that reload.
+        systemctl_ok(&["enable", "--no-reload", "--now", unit]);
     }
 
-    // A deploy diffs the manifest, not the machine, so a unit enabled by an
-    // earlier deploy whose enablement symlink later vanished stays disabled
-    // forever: the manifest still lists it, so no enable action is planned.
-    // Fixing this on every run goes against plan/apply separation, because we
-    // may be touching things not listed in the plan. But units that we are
-    // restarting are listed in the plan, so those we can repair.
-    if !changes.unit_actions.restart.is_empty() {
-        let output = std::process::Command::new("systemctl")
-            .arg("is-enabled")
-            .args(&changes.unit_actions.restart)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-        // `is-enabled` exits 0 if *any* unit is enabled, so read the per-unit
-        // status words rather than the exit code.
-        for unit in plan::units_to_reenable(&changes.unit_actions.restart, &output) {
-            log(&format!("{unit} was not enabled, re-enabling"));
-            systemctl_ok(&["enable", unit]);
-        }
-    }
-
+    // `systemctl enable` records the unit's path resolved through `current` to
+    // the versioned checkout dir. Once this deploy advances `current`, that
+    // recorded enablement symlink points at the old version, which a later
+    // garbage collection removes, so the unit silently stops starting at boot.
+    // Re-enabling repoints it; plain `enable` (no --now) only rewrites the
+    // symlink, the restart activates. Scoped to the restart set (units in the
+    // plan) so we never touch units the plan did not account for.
     for unit in &changes.unit_actions.restart {
         log(&format!("restarting {unit}"));
         touched.push(unit);
+        systemctl_ok(&["enable", "--no-reload", unit]);
         systemctl_ok(&["restart", unit]);
     }
 

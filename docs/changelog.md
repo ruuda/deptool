@@ -33,8 +33,10 @@ Improvements:
  * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
    now handled correctly, see the [directory layout
    chapter](directory_layout.md#systemd).
- * Restarting a systemd unit now also re-enables the unit when the unit is not
-   enabled and the manifest specifies that it should be.
+ <!-- TODO(ruuda): Restarting a managed unit now re-enables it unconditionally,
+      so its enablement symlink no longer goes stale when a deploy advances the
+      checkout that `systemctl enable` recorded. Supersedes the is-enabled probe
+      described here previously. -->
 
 Bugfixes:
 
@@ -42,6 +44,14 @@ Bugfixes:
    multiple systemd units were affected in the same deployment.
  * Trigger `systemctl daemon-reload` after the contents of a unit file change.
    Previously it was triggered only when units were enabled or disabled.
+ * Managed systemd units that are enabled are now re-enabled on every deploy.
+   This fixes a bug where units could fail to start after a reboot. This happens
+   because `systemctl enable` resolves symlinks, in particular it resolves
+   `/var/lib/deptool/apps/<app>/current` to a fixed version. This means the
+   symlink that systemd creates in `.wants` is stale, and may even point to a
+   version that got garbage-collected after a later deploy. Re-enabling after
+   every change ensures that the `.wants` symlinks point to the correct
+   versions.
 
 ## 1.0.0
 
