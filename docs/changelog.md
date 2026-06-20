@@ -44,6 +44,14 @@ Bugfixes:
    multiple systemd units were affected in the same deployment.
  * Trigger `systemctl daemon-reload` after the contents of a unit file change.
    Previously it was triggered only when units were enabled or disabled.
+ * Managed systemd units that are enabled are now re-enabled on every deploy.
+   This fixes a bug where units could fail to start after a reboot. This happens
+   because `systemctl enable` resolves symlinks, in particular it resolves
+   `/var/lib/deptool/apps/<app>/current` to a fixed version. This means the
+   symlink that systemd creates in `.wants` is stale, and may even point to a
+   version that got garbage-collected after a later deploy. Re-enabling after
+   every change ensures that the `.wants` symlinks point to the correct
+   versions.
 
 ## 1.0.0
 

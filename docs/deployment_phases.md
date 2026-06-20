@@ -75,26 +75,18 @@ Note, the systemd steps only execute when an app includes systemd units. Deptool
 works fine on non-systemd systems, though at this time it has no special support
 for other service managers.
 
-### Enable and start systemd units
-
-For any systemd units that were not enabled in the previous revision, but which
-are enabled in the one we are deploying, run `systemctl enable --now` on them.
-
-<!-- TODO(ruuda): The convergence re-enable described here moved into the restart
-     step and is now unconditional (it repoints the enablement symlink, which
-     `systemctl enable` records against the versioned checkout and which goes
-     stale once a deploy advances `current`). Reword and relocate accordingly. -->
-For units that should be enabled according to the manifest, and which are part
-of a changed app, we also enable them if they weren’t already, to converge the
-system state towards what is specified in the config tree.
-
-### Restart systemd units
+### Enable and restart systemd units
 
 For enabled systemd units that are part of an app that was changed in any way,
-restart those units with `systemctl restart`. This ensures that we never forget
+run `systemctl enable` on those untis. Systemd follows symlinks when it enables
+units, so the symlinks in systemd’s `.wants` are stale after deploying a new
+revision. Running `systemctl enable` fixes this.
+
+After enabling, we start or restart the unit with `systemctl restart`. (Restart
+starts units that were not already started.) This ensures that we never forget
 to pick up new configuration, but it may have false positives: cases where we
-restart the service even when it was not needed. For example, when we created
-a new symlink that does not affect the service. Although some services support
+restart the service even when it was not needed. For example, when we created a
+new symlink that does not affect the service. Although some services support
 reloading their configuration, for simplicity we always restart.
 
 ### Check systemd unit status
