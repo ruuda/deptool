@@ -72,6 +72,8 @@ Post-generation checklist (run after writing code, before presenting):
  - For each new test: what specific bug would it catch? If breaking the test would require an implementation change you'd obviously notice without the test, drop it or rework it to test a real property.
  - For each deleted test: where is that behavior tested now?
  - For each deleted or moved piece of code: what invariant or purpose did it serve at its original location? Is that still enforced?
+ - For each removed *use* of a value (a consumed return value, field, or output): grep for other consumers. If none remain in production, the producer is now dead -- shrink its signature/return type and rework tests that asserted only on the orphaned output.
+ - For each removed gate or condition that made a side effect conditional: does the function run in contexts where the gate guarded an unrelated case (e.g. a non-systemd host)? "Make it unconditional" usually means stop gating on the discussed condition, not remove the guard entirely.
  - For each bug fix: does the same bug exist in a shared function that this code calls? Fix it at the root, not the leaf.
  - For each match on a mode/flag: does the test verify *both* branches produce distinct behavior?
  - For each new parameter: is this data already available through another parameter (e.g. a field of a struct already being passed)?
