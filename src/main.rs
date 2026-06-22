@@ -529,8 +529,7 @@ fn activate(
 
     // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
     // the quadlet generator over them.
-    let quadlet_symlink_changes =
-        checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
 
     // Reconcile manifest symlinks (e.g. config files in /etc).
     // TODO: log individual symlink changes.
@@ -583,18 +582,20 @@ fn activate(
     // as "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    let unit_symlink_changes =
-        checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
 
-    // Only poke systemd when something actually changed on disk. A quadlet
-    // content change with no symlink change still needs a reload so the
-    // generator re-emits the unit.
-    let needs_reload = !quadlet_symlink_changes.is_empty()
-        || changes.quadlets.content_changed
-        || !unit_symlink_changes.is_empty()
-        || !changes.units.is_empty()
+    // Reload whenever the host manages systemd units or quadlets, even when no
+    // unit's contents changed: each managed unit resolves through the app's
+    // `current` symlink, which a deploy advances to a fresh versioned checkout,
+    // so systemd sees a new fragment file on disk and warns ("changed on disk,
+    // run daemon-reload") until we reload. The unit_actions check also covers
+    // disabling the last managed unit, when `desired` is already empty. On hosts
+    // with no systemd units this stays false so we never invoke systemctl. The
+    // enable/disable/restart calls below pass --no-reload and rely on this.
+    let manages_systemd = !desired.quadlets.is_empty()
+        || !desired.units.is_empty()
         || !changes.unit_actions.is_empty();
-    if needs_reload {
+    if manages_systemd {
         log("daemon-reload");
         systemctl_ok(&["daemon-reload"]);
     }

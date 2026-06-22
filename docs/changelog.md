@@ -44,6 +44,12 @@ Bugfixes:
    multiple systemd units were affected in the same deployment.
  * Trigger `systemctl daemon-reload` after the contents of a unit file change.
    Previously it was triggered only when units were enabled or disabled.
+   <!-- TODO(ruuda): daemon-reload now runs on every deploy to a host that
+        manages systemd units, not only on unit content/enablement changes. A
+        deploy advances the `current` symlink each unit resolves through, so
+        systemd reports the fragment as changed on disk and warns until reloaded
+        even when the unit contents are identical. -->
+
  * Managed systemd units that are enabled are now re-enabled on every deploy.
    This fixes a bug where units could fail to start after a reboot. This happens
    because `systemctl enable` resolves symlinks, in particular it resolves
