@@ -208,14 +208,12 @@ pub fn checkout(
 ///
 /// Makes `target_dir` contain exactly the symlinks in `desired`, only
 /// touching symlinks that point into `apps_dir` (i.e., ones we created).
-/// Returns the set of names whose symlinks were added or changed.
 pub fn reconcile_managed_symlinks(
     desired: &BTreeMap<String, PathBuf>,
     apps_dir: &Path,
     target_dir: &Path,
-) -> Result<BTreeSet<String>> {
+) -> Result<()> {
     let actual = collect_managed_symlinks(apps_dir, target_dir)?;
-    let mut changed = BTreeSet::new();
 
     for name in actual.keys() {
         if !desired.contains_key(name) {
@@ -245,11 +243,10 @@ pub fn reconcile_managed_symlinks(
             }
             unix_fs::symlink(desired_target, &link_path)
                 .map_err(|e| symlink_failed(&link_path, e))?;
-            changed.insert(name.clone());
         }
     }
 
-    Ok(changed)
+    Ok(())
 }
 
 /// Create `dir` and any missing ancestors up to `stop`, giving every level
@@ -669,9 +666,8 @@ mod tests {
         let target = apps.path().join("nginx/current/systemd/nginx.service");
         let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
 
-        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
 
-        assert_eq!(changed, BTreeSet::from(["nginx.service".to_string()]));
         assert!(units.path().join("nginx.service").is_symlink());
         Ok(())
     }
@@ -698,9 +694,8 @@ mod tests {
         // Create a symlink as if a previous reconcile put it there.
         unix_fs::symlink(&target, units.path().join("nginx.service"))?;
 
-        let changed = reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
-        assert!(changed.is_empty());
         assert!(!units.path().join("nginx.service").exists());
         Ok(())
     }
@@ -716,9 +711,8 @@ mod tests {
             units.path().join("sshd.service"),
         )?;
 
-        let changed = reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
+        reconcile_managed_symlinks(&BTreeMap::new(), apps.path(), units.path())?;
 
-        assert!(changed.is_empty());
         assert!(units.path().join("sshd.service").is_symlink());
         Ok(())
     }
@@ -757,7 +751,7 @@ mod tests {
         let target = apps.path().join("postgres/current/systemd").join(rel);
         let desired = BTreeMap::from([(rel.to_string(), target.clone())]);
 
-        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
 
         let dropin_dir = units.path().join("postgresql.service.d");
         assert!(
@@ -767,7 +761,6 @@ mod tests {
         let leaf = units.path().join(rel);
         assert!(leaf.is_symlink(), "the drop-in file is a symlink");
         assert_eq!(fs::read_link(&leaf)?, target);
-        assert_eq!(changed, BTreeSet::from([rel.to_string()]));
 
         let mode = |p: &Path| fs::metadata(p).expect("dir exists").permissions().mode() & 0o777;
         assert_eq!(mode(units.path()), 0o755, "managed root is 0o755");
@@ -862,16 +855,18 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_managed_symlinks_produces_no_changes_when_already_in_sync() -> Result<()> {
+    fn reconcile_managed_symlinks_leaves_an_already_synced_symlink_intact() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let target = apps.path().join("nginx/current/systemd/nginx.service");
-        let desired = BTreeMap::from([("nginx.service".to_string(), target)]);
+        let desired = BTreeMap::from([("nginx.service".to_string(), target.clone())]);
 
         reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
-        let changed = reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
 
-        assert!(changed.is_empty());
+        // A second reconcile over an already-synced dir neither breaks nor
+        // repoints the symlink.
+        assert_eq!(fs::read_link(units.path().join("nginx.service"))?, target);
         Ok(())
     }
 
