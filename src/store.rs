@@ -202,9 +202,13 @@ impl Store {
         let unique: BTreeSet<Oid> = commits.iter().copied().collect();
         let mut frontier = Vec::new();
         for &oid in &unique {
-            let dominated = unique.iter().any(|&other| {
-                other != oid && self.repo.graph_descendant_of(other, oid).unwrap_or(false)
-            });
+            let mut dominated = false;
+            for &other in &unique {
+                if other != oid && self.repo.graph_descendant_of(other, oid)? {
+                    dominated = true;
+                    break;
+                }
+            }
             if !dominated {
                 frontier.push(oid);
             }
@@ -1085,6 +1089,19 @@ mod tests {
         // Base is dominated by both, should be removed.
         assert_eq!(t.store.frontier(&[base, c_a, c_b])?, expected);
 
+        Ok(())
+    }
+
+    #[test]
+    fn frontier_reports_unknown_commits_as_error() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("h/app/f", b"v1")]);
+        let bogus = Oid::from_str("badc0dedeadbeefbadc0dedeadbeefbadc0dedea")?;
+
+        assert!(
+            t.store.frontier(&[c1, bogus]).is_err(),
+            "an ancestry check against a commit missing from the store is an error",
+        );
         Ok(())
     }
 
