@@ -33,6 +33,9 @@ Improvements:
  * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
    now handled correctly, see the [directory layout
    chapter](directory_layout.md#systemd).
+ * It is now possible to remove all apps from a host by leaving the host’s
+   directory empty in the config tree. Previously this required creating a
+   placeholder file in the directory as a workaround.
 
 Bugfixes:
 
@@ -41,15 +44,6 @@ Bugfixes:
  * Files in the config tree that are outside app directories (e.g. a readme per
    host) are no longer committed to the store, and no longer cause empty plans
    for a host when only such files changed.
- <!-- TODO(ruuda): An empty host directory now stays in the config tree and
-   plans the removal of all apps deployed to that host, instead of being
-   ignored. Removing a host's last app no longer needs a placeholder file. A
-   never-deployed empty host dir deploys once to record its tracking ref.
-   Compat impact: a previously ignored empty host dir now plans removals (or
-   an initial empty deploy) on the next deploy. Also: a deploy commit with no
-   app changes now gets the subject "Deploy <hosts>" instead of the
-   double-space "Update  on N hosts". -->
-
  * Managed systemd units that are enabled are now re-enabled on every deploy.
    This fixes a bug where units could fail to start after a reboot. This happens
    because `systemctl enable` resolves symlinks, in particular it resolves
