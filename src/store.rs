@@ -132,7 +132,8 @@ impl Store {
     pub fn build_tree(&self, dir: &Path) -> Result<Oid> {
         // An entirely empty config directory is valid (no hosts configured),
         // so fall back to writing an empty tree.
-        match build_tree_recursive(&self.repo, dir)? {
+        let depth_root = 0;
+        match build_tree_recursive(&self.repo, dir, depth_root)? {
             Some(oid) => Ok(oid),
             None => Ok(self.repo.treebuilder(None)?.write()?),
         }
@@ -633,7 +634,13 @@ pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
 /// Build a git tree from a directory. Returns `None` when the subtree
 /// contains no files (only empty directories), because empty trees have
 /// no meaning in git and would suppress Remove diffs in deptool.
-fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Option<Oid>> {
+///
+/// `depth` counts directory levels below the config tree root: hosts live
+/// at depth 0, apps at depth 1. Only files inside apps get deployed;
+/// anything else at those two levels (a stray readme) is excluded, because
+/// committing it would change a host's subtree without changing any app,
+/// making the host show up in every plan with nothing to do.
+fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Option<Oid>> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
@@ -645,10 +652,12 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Option<Oid>> {
 
         match entry.file_type()? {
             ft if ft.is_dir() => {
-                if let Some(oid) = build_tree_recursive(repo, &entry.path())? {
+                if let Some(oid) = build_tree_recursive(repo, &entry.path(), depth + 1)? {
                     tb.insert(name, oid, 0o040000)?;
                 }
             }
+            // Skip non-directories at the host and app levels, see above.
+            _ if depth < 2 => {}
             ft if ft.is_file() => {
                 let contents = fs::read(entry.path())?;
                 let oid = repo.blob(&contents)?;
@@ -676,7 +685,7 @@ fn build_tree_recursive(repo: &Repository, dir: &Path) -> Result<Option<Oid>> {
 mod tests {
     use super::*;
     use crate::error::StoreError;
-    use crate::testutil::TestRepo;
+    use crate::testutil::{TestRepo, config_with};
 
     #[test]
     fn commit_appends_to_main_branch() -> Result<()> {
@@ -939,21 +948,21 @@ mod tests {
     #[test]
     fn build_tree_preserves_executable_bit() -> Result<()> {
         let dir = crate::testutil::TempDir::new("config");
-        let host_dir = dir.path().join("host");
-        fs::create_dir_all(&host_dir)?;
-        fs::write(host_dir.join("hook.sh"), b"#!/bin/sh\n")?;
-        fs::write(host_dir.join("plain.conf"), b"key=value\n")?;
-        fs::set_permissions(host_dir.join("hook.sh"), fs::Permissions::from_mode(0o755))?;
+        let app_dir = dir.path().join("host/app");
+        fs::create_dir_all(&app_dir)?;
+        fs::write(app_dir.join("hook.sh"), b"#!/bin/sh\n")?;
+        fs::write(app_dir.join("plain.conf"), b"key=value\n")?;
+        fs::set_permissions(app_dir.join("hook.sh"), fs::Permissions::from_mode(0o755))?;
 
         let t = TestRepo::new();
         let root = t.store.repo.find_tree(t.store.build_tree(dir.path())?)?;
         assert_eq!(
-            root.get_path(Path::new("host/hook.sh"))?.filemode(),
+            root.get_path(Path::new("host/app/hook.sh"))?.filemode(),
             0o100755,
             "executable input file gets executable git mode",
         );
         assert_eq!(
-            root.get_path(Path::new("host/plain.conf"))?.filemode(),
+            root.get_path(Path::new("host/app/plain.conf"))?.filemode(),
             0o100644,
             "non-executable input file gets regular git mode",
         );
@@ -969,7 +978,8 @@ mod tests {
         // should be pruned, not just the leaf directories.
         fs::create_dir_all(host_dir.join("nsd/systemd"))?;
         fs::create_dir_all(host_dir.join("nsd/zones"))?;
-        fs::write(host_dir.join("kept.conf"), b"data")?;
+        fs::create_dir_all(host_dir.join("app"))?;
+        fs::write(host_dir.join("app/kept.conf"), b"data")?;
 
         let t = TestRepo::new();
         let oid = t.store.build_tree(dir.path())?;
@@ -984,8 +994,28 @@ mod tests {
             "directory with only empty subdirectories should be pruned",
         );
         assert!(
-            host_tree.get_name("kept.conf").is_some(),
+            host_tree.get_name("app").is_some(),
             "non-empty entries should be kept",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_tree_excludes_files_outside_app_dirs() -> Result<()> {
+        let t = TestRepo::new();
+        let clean = config_with(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let clean_oid = t.store.build_tree(clean.path())?;
+
+        let stray = config_with(&[
+            ("web1/nginx/nginx.conf", b"server {}"),
+            ("readme.md", b"file next to the host dirs"),
+            ("web1/foo.txt", b"file next to the app dirs"),
+        ]);
+        let stray_oid = t.store.build_tree(stray.path())?;
+
+        assert_eq!(
+            stray_oid, clean_oid,
+            "files outside app dirs do not affect the tree",
         );
         Ok(())
     }
