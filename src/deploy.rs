@@ -610,8 +610,10 @@ fn filter_systemd_status(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::HostPlan;
-    use crate::testutil::{TestHost, TestRepo, test_connector, test_progress};
+    use crate::plan::{HostFilter, HostPlan};
+    use crate::testutil::{
+        TempDir, TestHost, TestRepo, assert_dir_contents, test_connector, test_progress,
+    };
 
     /// Run a deploy through run_deploy using in-memory connections.
     fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
@@ -658,6 +660,29 @@ mod tests {
         let plan = make_plan(commit_oid, &[("web1", None)]);
         deploy_to(&driver, &[&target], &plan)?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_of_emptied_host_removes_app_from_host() -> Result<()> {
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let target = TestHost::new("web1");
+        deploy_to(&driver, &[&target], &make_plan(c1, &[("web1", None)]))?;
+
+        // The host dir still exists but its last app was deleted. The plan
+        // commit contains an empty subtree for web1, which the pack transfer
+        // and the agent must cope with.
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web1"))?;
+        let tree_oid = driver.store.build_tree(config.path())?;
+        let plan = crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)?
+            .expect("plan has changes")
+            .finalize(&driver.store)?;
+        deploy_to(&driver, &[&target], &plan)?;
+
+        assert_eq!(driver.get_host_tracking_ref("web1"), Some(plan.commit));
+        assert_dir_contents(target.apps_path(), &[]);
         Ok(())
     }
 
