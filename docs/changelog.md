@@ -38,10 +38,9 @@ Bugfixes:
 
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
- <!-- TODO(ruuda): Files outside app directories in the config tree (e.g. a
-   stray readme next to the host dirs) are now excluded when building trees,
-   instead of causing an empty-looking plan and deploy for every host. -->
-
+ * Files in the config tree that are outside app directories (e.g. a readme per
+   host) are no longer committed to the store, and no longer cause empty plans
+   for a host when only such files changed.
  * Managed systemd units that are enabled are now re-enabled on every deploy.
    This fixes a bug where units could fail to start after a reboot. This happens
    because `systemctl enable` resolves symlinks, in particular it resolves
