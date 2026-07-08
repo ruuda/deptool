@@ -646,14 +646,27 @@ impl DraftPlan {
             }
         }
 
-        [
-            format!("{verb} {full_apps} on {full_hosts}"),
-            format!("{verb} {full_apps} on {count_hosts}"),
-            format!("{verb} {count_apps} on {count_hosts}"),
-        ]
-        .into_iter()
-        .find(|s| s.len() <= SUBJECT_BUDGET)
-        .expect("count-only candidate always fits the budget")
+        // A plan can have no app changes at all: a fresh host with no apps
+        // yet, or a tracking ref that recorded stray files from before
+        // Deptool excluded them from the tree. Name only the hosts then,
+        // rather than render an empty app list.
+        let candidates = if app_names.is_empty() {
+            vec![
+                format!("Deploy {full_hosts}"),
+                format!("Deploy {count_hosts}"),
+            ]
+        } else {
+            vec![
+                format!("{verb} {full_apps} on {full_hosts}"),
+                format!("{verb} {full_apps} on {count_hosts}"),
+                format!("{verb} {count_apps} on {count_hosts}"),
+            ]
+        };
+
+        candidates
+            .into_iter()
+            .find(|s| s.len() <= SUBJECT_BUDGET)
+            .expect("count-only candidate always fits the budget")
     }
 
     /// The full commit message for the deploy commit this draft will produce.
@@ -700,7 +713,7 @@ mod tests {
     use super::*;
     use crate::error::Result;
     use crate::store::RefUpdate;
-    use crate::testutil::TestRepo;
+    use crate::testutil::{TempDir, TestRepo};
 
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
@@ -743,6 +756,32 @@ mod tests {
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["rofld"].diff, AppDiff::Remove { .. }));
+        Ok(())
+    }
+
+    #[test]
+    fn plan_removes_apps_of_emptied_host_and_initializes_fresh_empty_host() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", c1);
+
+        // web1 was deployed to and its last app deleted; web2 is an empty
+        // host dir that was never deployed to.
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web1"))?;
+        std::fs::create_dir_all(config.path().join("web2"))?;
+        let tree_oid = t.store.build_tree(config.path())?;
+
+        let plan = make_plan(&t.store, tree_oid, &HostFilter::All)?.expect("plan has changes");
+        let apps = &plan.hosts[&"web1".into()].apps;
+        assert_eq!(apps.len(), 1);
+        assert!(matches!(apps["nginx"].diff, AppDiff::Remove { .. }));
+
+        // The fresh host deploys with nothing on it, which records its
+        // tracking ref, so status, sync, and deploy agree afterwards.
+        let web2 = &plan.hosts[&"web2".into()];
+        assert!(web2.apps.is_empty());
+        assert!(web2.expected_current.is_none());
         Ok(())
     }
 
@@ -1136,6 +1175,21 @@ mod tests {
         ]);
         let message = draft(&t, c).commit_message();
         assert_eq!(subject_of(&message), "Deploy 4 apps on 1 host");
+    }
+
+    #[test]
+    fn commit_subject_names_hosts_when_plan_has_no_app_changes() -> Result<()> {
+        let t = TestRepo::new();
+        // A fresh empty host dir plans a deploy with no app changes at all.
+        let config = TempDir::new("config");
+        std::fs::create_dir_all(config.path().join("web2"))?;
+        let tree_oid = t.store.build_tree(config.path())?;
+
+        let message = make_plan(&t.store, tree_oid, &HostFilter::All)?
+            .expect("plan has changes")
+            .commit_message();
+        assert_eq!(subject_of(&message), "Deploy web2");
+        Ok(())
     }
 
     #[test]

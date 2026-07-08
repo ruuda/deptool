@@ -403,6 +403,10 @@ it will only remove symlinks that point into `/var/lib/deptool`.
 
 ## Removing the app
 
+<!-- TODO(ruuda): The intentionally-left-blank workaround below is obsolete:
+an empty host directory now stays in the tree and plans the removal of all
+its apps, so `rm -fr prod/webserver/caddy` alone suffices. Rewrite this
+section and drop the `touch` from the example transcript. -->
 To remove an app, simply remove it from the configuration, and Deptool will
 remove it from the host. In our somewhat artificial tutorial, this would leave
 the host empty, which will make Deptool ignore it: just like Git, Deptool

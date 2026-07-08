@@ -129,14 +129,12 @@ impl Store {
     }
 
     /// Recursively build a Git tree from a directory on disk.
+    ///
+    /// An entirely empty config directory is valid (no hosts configured)
+    /// and yields the empty tree.
     pub fn build_tree(&self, dir: &Path) -> Result<Oid> {
-        // An entirely empty config directory is valid (no hosts configured),
-        // so fall back to writing an empty tree.
         let depth_root = 0;
-        match build_tree_recursive(&self.repo, dir, depth_root)? {
-            Some(oid) => Ok(oid),
-            None => Ok(self.repo.treebuilder(None)?.write()?),
-        }
+        build_tree_recursive(&self.repo, dir, depth_root)
     }
 
     /// Create a commit with the given tree, parent commits, and message.
@@ -635,16 +633,14 @@ pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
     entries
 }
 
-/// Build a git tree from a directory. Returns `None` when the subtree
-/// contains no files (only empty directories), because empty trees have
-/// no meaning in git and would suppress Remove diffs in deptool.
+/// Build a git tree from a directory.
 ///
 /// `depth` counts directory levels below the config tree root: hosts live
 /// at depth 0, apps at depth 1. Only files inside apps get deployed;
 /// anything else at those two levels (a stray readme) is excluded, because
 /// committing it would change a host's subtree without changing any app,
 /// making the host show up in every plan with nothing to do.
-fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Option<Oid>> {
+fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
@@ -656,7 +652,14 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Opt
 
         match entry.file_type()? {
             ft if ft.is_dir() => {
-                if let Some(oid) = build_tree_recursive(repo, &entry.path(), depth + 1)? {
+                let oid = build_tree_recursive(repo, &entry.path(), depth + 1)?;
+                // Prune subtrees with no files below the host level:
+                // committing an empty app tree would make removing the
+                // app's files diff as an update to nothing instead of a
+                // removal. An empty *host* tree stays: the dir declares
+                // the host managed, with zero apps, so deleting a host's
+                // last app deploys that removal.
+                if depth == 0 || !repo.find_tree(oid)?.is_empty() {
                     tb.insert(name, oid, 0o040000)?;
                 }
             }
@@ -676,13 +679,7 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Opt
         }
     }
 
-    let oid = tb.write()?;
-    let tree = repo.find_tree(oid)?;
-    if tree.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(oid))
-    }
+    Ok(tb.write()?)
 }
 
 #[cfg(test)]
@@ -1000,6 +997,23 @@ mod tests {
         assert!(
             host_tree.get_name("app").is_some(),
             "non-empty entries should be kept",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_tree_keeps_empty_host_dirs() -> Result<()> {
+        let dir = crate::testutil::TempDir::new("config");
+        fs::create_dir_all(dir.path().join("web1"))?;
+
+        let t = TestRepo::new();
+        let tree = t.store.repo.find_tree(t.store.build_tree(dir.path())?)?;
+        let host = tree
+            .get_name("web1")
+            .expect("an empty host dir stays in the tree");
+        assert!(
+            t.store.repo.find_tree(host.id())?.is_empty(),
+            "the kept host subtree is empty",
         );
         Ok(())
     }
