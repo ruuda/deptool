@@ -65,33 +65,34 @@ systemd units can reference the users we just created.
 For any systemd units that were enabled in the previous revision, but not in the
 one we are deploying, run `systemctl disable --now` on them.
 
-### Update systemd units
-
-Reconcile Deptool symlinks in `/etc/systemd/system` to match the current
-[systemd units](directory_layout.md#systemd) defined across the host’s apps.
-Then run `systemctl daemon-reload` to pick up changes to units.
-
-<!-- TODO(ruuda): Apply order changed: `systemctl enable` now runs before
-`daemon-reload`, and only the restart runs after it. Resplit this section and
-the next one accordingly. -->
-
 Note, the systemd steps only execute when an app includes systemd units. Deptool
 works fine on non-systemd systems, though at this time it has no special support
 for other service managers.
 
-### Enable and restart systemd units
+### Update systemd units
+
+Reconcile Deptool symlinks in `/etc/systemd/system` to match the current
+[systemd units](directory_layout.md#systemd) defined across the host’s apps.
+
+For all units that are enabled in the current revision, run `systemctl enable
+--no-reload` on them. The enable is needed even for units that were already
+enabled in the previous revision, because systemd resolves the
+`/var/lib/deptool/apps/<app>/current` symlink to an absolute path upon enable.
+Without the re-enable, systemd would keep references to app directories for
+revisions that have since been garbage collected.
+
+Next, issue a `systemctl daemon-reload` to pick up changes to units, including
+changes to `.wants` symlinks created by enabling units.
+
+### Restart systemd units
 
 For enabled systemd units that are part of an app that was changed in any way,
-run `systemctl enable` on those untis. Systemd follows symlinks when it enables
-units, so the symlinks in systemd’s `.wants` are stale after deploying a new
-revision. Running `systemctl enable` fixes this.
-
-After enabling, we start or restart the unit with `systemctl restart`. (Restart
-starts units that were not already started.) This ensures that we never forget
-to pick up new configuration, but it may have false positives: cases where we
-restart the service even when it was not needed. For example, when we created a
-new symlink that does not affect the service. Although some services support
-reloading their configuration, for simplicity we always restart.
+start or restart those units with `systemctl restart`. (Restart starts units
+that were not already started.) This ensures that we never forget to pick up new
+configuration, but it may have false positives: cases where we restart the
+service even when it was not needed. For example, when we created a new symlink
+that does not affect the service. Although some services support reloading their
+configuration, for simplicity we always restart.
 
 ### Check systemd unit status
 
