@@ -71,6 +71,10 @@ Reconcile Deptool symlinks in `/etc/systemd/system` to match the current
 [systemd units](directory_layout.md#systemd) defined across the host’s apps.
 Then run `systemctl daemon-reload` to pick up changes to units.
 
+<!-- TODO(ruuda): Apply order changed: `systemctl enable` now runs before
+`daemon-reload`, and only the restart runs after it. Resplit this section and
+the next one accordingly. -->
+
 Note, the systemd steps only execute when an app includes systemd units. Deptool
 works fine on non-systemd systems, though at this time it has no special support
 for other service managers.

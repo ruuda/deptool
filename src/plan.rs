@@ -218,7 +218,7 @@ impl SubdirChanges {
 /// applying.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnitActions {
-    /// Newly enabled units: `systemctl enable --now`.
+    /// Newly enabled units: `systemctl enable`, then `systemctl restart`.
     pub enable: Vec<String>,
     /// Still enabled, but app content changed: `systemctl restart`.
     pub restart: Vec<String>,

@@ -55,6 +55,9 @@ Bugfixes:
  * Trigger `systemctl daemon-reload` after an app with systemd unit changes.
    Previously it was triggered only when units were enabled or disabled.
 
+<!-- TODO(ruuda): `systemctl enable` now runs before `daemon-reload` instead of
+after it, so a deploy no longer leaves the "changed on disk" warning behind. -->
+
 ## 1.0.0
 
 Released 2026-05-06.

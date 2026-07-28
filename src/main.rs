@@ -524,7 +524,8 @@ fn activate(
     //     symlinks as "linked units" and `disable` removes them);
     //   * quadlet + unit reconciles must run before `daemon-reload` (so the
     //     generator and systemd pick up the new files);
-    //   * `daemon-reload` must run before unit enable/restart.
+    //   * unit enable and disable must run before `daemon-reload`, which must
+    //     run before unit restart.
     // All other orderings are free.
 
     // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
@@ -584,14 +585,38 @@ fn activate(
     // and also picks up any new units from the deploy.
     checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
 
-    // Reload whenever the host manages systemd units or quadlets, even when no
-    // unit's contents changed: each managed unit resolves through the app's
-    // `current` symlink, which a deploy advances to a fresh versioned checkout,
-    // so systemd sees a new fragment file on disk and warns ("changed on disk,
-    // run daemon-reload") until we reload. The unit_actions check also covers
-    // disabling the last managed unit, when `desired` is already empty. On hosts
-    // with no systemd units this stays false so we never invoke systemctl. The
-    // enable/disable/restart calls below pass --no-reload and rely on this.
+    // Enable every unit the plan touches, newly enabled or merely restarted.
+    // `systemctl enable` records the unit's path resolved through `current` to
+    // the versioned checkout dir. Once this deploy advances `current`, that
+    // recorded enablement symlink points at the old version, which a later
+    // garbage collection removes, so the unit silently stops starting at boot.
+    // Re-enabling repoints it; the restart further down activates. Scoped to
+    // units in the plan so we never touch units the plan did not account for.
+    //
+    // One call per unit, even though `systemctl enable` accepts a list: a list
+    // is all or nothing, so one bad unit name would skip the repointing for
+    // every other unit too.
+    let mut touched: Vec<&String> = Vec::new();
+    touched.extend(&changes.unit_actions.enable);
+    touched.extend(&changes.unit_actions.restart);
+    for unit in &touched {
+        log(&format!("enabling {unit}"));
+        systemctl_ok(&["enable", "--no-reload", unit]);
+    }
+
+    // Reload after everything above, whenever we manage systemd units or
+    // quadlets on this host. Two things make systemd consider units "changed on
+    // disk", and it keeps telling the operator to run daemon-reload until we do:
+    //
+    //   * A deploy advances the app's `current` symlink, so every unit
+    //     resolves to a fresh file.
+    //   * `enable` and `disable` write into the `.wants` directories, which
+    //     marks *every* unit on the host, not just the ones we touched.
+    //
+    // Hence the reload runs last, and those calls pass --no-reload. The
+    // unit_actions check also covers disabling the last managed unit, when
+    // `desired` is already empty. On hosts where we manage no systemd units
+    // this stays false so we never invoke systemctl.
     let manages_systemd = !desired.quadlets.is_empty()
         || !desired.units.is_empty()
         || !changes.unit_actions.is_empty();
@@ -600,27 +625,10 @@ fn activate(
         systemctl_ok(&["daemon-reload"]);
     }
 
-    let mut touched: Vec<&str> = Vec::new();
-
-    for unit in &changes.unit_actions.enable {
-        log(&format!("enabling {unit}"));
-        touched.push(unit);
-        // We ran daemon-reload above, so --no-reload skips the reload that
-        // enable does by default. Both enable calls here rely on that reload.
-        systemctl_ok(&["enable", "--no-reload", "--now", unit]);
-    }
-
-    // `systemctl enable` records the unit's path resolved through `current` to
-    // the versioned checkout dir. Once this deploy advances `current`, that
-    // recorded enablement symlink points at the old version, which a later
-    // garbage collection removes, so the unit silently stops starting at boot.
-    // Re-enabling repoints it; plain `enable` (no --now) only rewrites the
-    // symlink, the restart activates. Scoped to the restart set (units in the
-    // plan) so we never touch units the plan did not account for.
-    for unit in &changes.unit_actions.restart {
+    // `restart` also starts a unit that was not running, so the newly enabled
+    // ones need no separate start.
+    for unit in &touched {
         log(&format!("restarting {unit}"));
-        touched.push(unit);
-        systemctl_ok(&["enable", "--no-reload", unit]);
         systemctl_ok(&["restart", unit]);
     }
 
