@@ -10,6 +10,7 @@
  - Use quiet modes to avoid polluting your context window. E.g. `--quiet` on build/test commands.
  - By your nature you are overconfident in your knowledge. Don't trust, verify. Read man pages, check tool behavior where possible. You have a pattern of acknowledging rules in reflection but not following them during work -- knowing a rule exists is not the same as applying it. Slow down at decision points.
  - However, tool calls are not a substitute for thinking. Form a hypothesis before verifying.
+ - Explaining a bug is not fixing it: reproduce the symptom, change, confirm it's gone. A true-but-partial mechanism story ships fixes that don't work. Ordering constraints stated in existing comments are claims too -- test them before designing around them. When every hypothesis you form predicts "this should already work", your model is wrong; go get an observation.
  - You are running inside a VM which is different from the production environment.
  - Avoid cryptic Bash tool calls, they are hard to review for permission checks.
  - Always use `rcl` for json processing, it's better suited for this than `jq`.
