@@ -44,7 +44,8 @@ The name of a host in the config tree must be a hostname that is reachable
 through `ssh <host>`. Either because it has a <abbr>DNS</abbr> name, or because
 the host is defined in your `~/.ssh/config`. As an additional safeguard,
 Deptool verifies that the contents of `/etc/hostname` on the target host match
-the hostname used to initiate the connection.
+the hostname used to initiate the connection. Deploying against the wrong host
+can be disastrous, so this is one layer of defence against misconfigurations.
 
 ## Apps
 
