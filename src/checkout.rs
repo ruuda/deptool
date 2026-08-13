@@ -718,6 +718,30 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_managed_symlinks_leaves_systemctl_enablement_links_intact() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let units = TempDir::new("units");
+        let desired = BTreeMap::from([(
+            "nginx.service".to_string(),
+            apps.path().join("nginx/current/systemd/nginx.service"),
+        )]);
+
+        // `systemctl enable` creates enablement symlinks in `.wants` dirs.
+        // It resolves `current`, so the link points into apps_dir at the
+        // version-pinned path. The link is systemd's, not ours; removing it
+        // would disable the unit at boot.
+        let wants_dir = units.path().join("multi-user.target.wants");
+        fs::create_dir(&wants_dir)?;
+        let pinned = apps.path().join("nginx/0123456789/systemd/nginx.service");
+        unix_fs::symlink(&pinned, wants_dir.join("nginx.service"))?;
+
+        reconcile_managed_symlinks(&desired, apps.path(), units.path())?;
+
+        assert!(wants_dir.join("nginx.service").is_symlink());
+        Ok(())
+    }
+
+    #[test]
     fn reconcile_managed_symlinks_names_path_when_a_directory_occupies_a_leaf() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
