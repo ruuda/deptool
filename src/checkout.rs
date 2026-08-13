@@ -8,6 +8,7 @@
 //! Host filesystem operations: app checkout, symlink reconciliation, and cleanup.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::fs;
 use std::os::unix::fs::{self as unix_fs, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -207,7 +208,8 @@ pub fn checkout(
 /// Reconcile managed symlinks in a directory.
 ///
 /// Makes `target_dir` contain exactly the symlinks in `desired`, only
-/// touching symlinks that point into `apps_dir` (i.e., ones we created).
+/// touching symlinks that point through an app's `current` symlink (i.e.,
+/// ones we created).
 pub fn reconcile_managed_symlinks(
     desired: &BTreeMap<String, PathBuf>,
     apps_dir: &Path,
@@ -426,13 +428,33 @@ fn verify_managed(link: &Path, apps_dir: &Path) -> Result<()> {
     }
 }
 
-/// Collect symlinks under `dir` that point into `apps_dir`, keyed by their
-/// path relative to `dir`.
+/// Whether a symlink target points through an app's `current` symlink.
 ///
-/// We create absolute symlinks, so we just check whether the raw symlink
-/// target starts with apps_dir. No canonicalization needed. Real
-/// subdirectories (e.g. `<unit>.d` drop-in dirs) are recursed into to find our
-/// drop-in files; unmanaged files and directories alongside them are ignored.
+/// This distinguishes our symlinks from the ones `systemctl enable` creates:
+/// every symlink Deptool creates targets `apps_dir/<app>/current/...`, while
+/// systemctl resolves our unit symlink, so its enablement links (in `.wants`
+/// and `.requires` directories, and aliases) target the version-pinned
+/// checkout directory. Those links are systemd's to manage; treating them as
+/// ours would delete them on every reconcile, disabling the unit at the next
+/// boot. If Deptool ever creates managed symlinks that don't go through
+/// `current`, this check must learn about them.
+fn points_through_current(apps_dir: &Path, target: &Path) -> bool {
+    let rel = match target.strip_prefix(apps_dir) {
+        Ok(rel) => rel,
+        Err(_) => return false,
+    };
+    let mut components = rel.iter();
+    let _app = components.next();
+    components.next() == Some(OsStr::new("current"))
+}
+
+/// Collect symlinks under `dir` that point through an app's `current`
+/// symlink, keyed by their path relative to `dir`.
+///
+/// We create absolute symlinks, so we just check the raw symlink target; no
+/// canonicalization needed. Real subdirectories (e.g. `<unit>.d` drop-in
+/// dirs) are recursed into to find our drop-in files; unmanaged files and
+/// directories alongside them are ignored.
 fn collect_managed_symlinks(apps_dir: &Path, dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
     let mut managed = BTreeMap::new();
     collect_managed_symlinks_into(apps_dir, dir, "", &mut managed)?;
@@ -455,11 +477,11 @@ fn collect_managed_symlinks_into(
         let entry = entry?;
         let path = entry.path();
         // Check is_symlink before is_dir: a symlink to a directory reports
-        // is_dir() == true, but we must treat it as a single managed leaf, not
+        // is_dir() == true, but we must treat it as a single leaf, not
         // recurse through it into apps_dir.
         if path.is_symlink() {
             let target = fs::read_link(&path)?;
-            if target.starts_with(apps_dir) {
+            if points_through_current(apps_dir, &target) {
                 let name = entry.file_name();
                 let name = name.to_str().ok_or_else(|| ApplyError::SymlinkFailed {
                     link: path.display().to_string(),

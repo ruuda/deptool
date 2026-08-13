@@ -39,6 +39,12 @@ Improvements:
 
 Bugfixes:
 
+<!-- TODO(ruuda): Describe the fix for symlink reconciliation deleting the
+enablement symlinks that `systemctl enable` creates in `.wants` directories
+(their targets point into the apps directory, so they were mistaken for
+Deptool-managed). Every deploy disabled all units not touched by that deploy;
+the units kept running, so this only surfaced after a reboot. Reconciliation
+now only touches symlinks that point through an app's `current` symlink. -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per
