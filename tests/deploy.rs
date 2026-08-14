@@ -5,7 +5,7 @@
 // you may not use this file except in compliance with the License.
 // A copy of the License has been included in the root of the repository.
 
-//! Integration tests for deploy and sync.
+//! Integration tests for deploy, sync, and reapply.
 //!
 //! Exercises the full binary end-to-end: CLI parsing, plan construction,
 //! process spawning, the agent's JSON protocol, and file checkout — without
@@ -206,6 +206,28 @@ fn sync_then_deploy_avoids_staleness() {
     assert!(
         output.status.success(),
         "deploy after sync failed: {stderr}"
+    );
+}
+
+// Drift repair itself is covered by the unit tests in reapply.rs; this
+// exercises the CLI wiring end to end through the real binary.
+#[test]
+fn reapply_locally() {
+    let env = LocalEnv::new("testhost");
+    env.write_config("nginx/nginx.conf", b"server {}");
+    let out = env.run(&["deploy", "--no-confirm", env.config_dir()]);
+    assert!(out.status.success(), "initial deploy succeeds");
+
+    let out = env.run(&["reapply", "--no-confirm", env.config_dir()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "reapply failed:\nstdout: {stdout}\nstderr: {stderr}",
+    );
+    assert!(
+        stdout.contains("Reapplied successfully to 1 host"),
+        "summary shows the reapply, got: {stdout}",
     );
 }
 

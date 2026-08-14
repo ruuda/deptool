@@ -58,6 +58,25 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
+    /// Re-apply the deployed configuration on each host to repair drift.
+    #[bpaf(command)]
+    Reapply {
+        /// Apply without prompting for confirmation.
+        #[bpaf(
+            long("no-confirm"),
+            flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
+        )]
+        confirm_mode: ConfirmMode,
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
+        #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
+        connect_mode: ConnectMode,
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
     /// Refresh tracking refs by connecting to hosts.
     #[bpaf(command)]
     Sync {
@@ -312,26 +331,44 @@ fn run_deploy(
         ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
         ConfirmMode::Prompt => display::confirm(&repo, &plan, cluster_name(&dir), color)?,
     };
-    if let display::Decision::Abort = decision {
+    if decision == display::Decision::Abort {
         return Ok(());
     }
 
     let connector = make_connector(mode)?;
-
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    let hostname = prim::read_hostname();
-    let operator = format!("{user}@{hostname}");
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts, Box::new(observer));
 
     let start = Instant::now();
-    let result = deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress);
+    let result = deploy::run_deploy(&repo, &plan, &operator_id(), &*connector, &progress);
     let elapsed = start.elapsed();
 
-    // Per-host status lines have room for one phrase. Print explanation
-    // blocks at the end for failure classes that need more space.
+    print_error_explanations(&progress);
+
+    if result.is_ok() {
+        display::print_success_summary(
+            &mut std::io::stdout(),
+            "Changes deployed",
+            plan.hosts.len(),
+            elapsed,
+        )?;
+    }
+
+    result
+}
+
+/// Identity of the operator running this command, e.g. "deckard@spinner".
+fn operator_id() -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let hostname = prim::read_hostname();
+    format!("{user}@{hostname}")
+}
+
+/// Per-host status lines have room for one phrase. Print explanation
+/// blocks at the end for failure classes that need more space.
+fn print_error_explanations(progress: &deploy::DeployProgress) {
     for (description, items) in progress.explain_errors() {
         eprintln!();
         eprintln!("{description}");
@@ -341,9 +378,46 @@ fn run_deploy(
         }
         eprintln!();
     }
+}
+
+fn run_reapply(
+    store: PathBuf,
+    dir: Option<PathBuf>,
+    confirm_mode: ConfirmMode,
+    connect_mode: ConnectMode,
+    filter: &HostFilter,
+) -> Result<()> {
+    let repo = Store::open(&store)?;
+    let dir = resolve_dir(&repo, dir)?;
+    let hosts = reapply::select_hosts_to_reapply(&repo, &dir, filter)?;
+    if hosts.is_empty() {
+        eprintln!("No hosts to reapply in cluster '{}'.", cluster_name(&dir));
+        return Ok(());
+    }
+
+    let color = display::UseColor::from_env();
+    display::print_reapply_plan(&mut std::io::stdout(), &hosts, color)?;
+
+    let decision = match confirm_mode {
+        ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
+        ConfirmMode::Prompt => display::confirm_reapply(hosts.len(), cluster_name(&dir))?,
+    };
+    if decision == display::Decision::Abort {
+        return Ok(());
+    }
+
+    let connector = make_connector(connect_mode)?;
+    let observer = display::StatusPrinter::new(color);
+    let progress = deploy::DeployProgress::new(hosts.keys().cloned().collect(), Box::new(observer));
+
+    let start = Instant::now();
+    let result = reapply::run_reapply(&repo, &hosts, &operator_id(), &*connector, &progress);
+    let elapsed = start.elapsed();
+
+    print_error_explanations(&progress);
 
     if result.is_ok() {
-        display::print_success_summary(&mut std::io::stdout(), plan.hosts.len(), elapsed)?;
+        display::print_success_summary(&mut std::io::stdout(), "Reapplied", hosts.len(), elapsed)?;
     }
 
     result
@@ -461,6 +535,18 @@ fn run() -> Result<()> {
             mode,
             &HostFilter::from_limit(&limit),
         )?,
+        Cmd::Reapply {
+            confirm_mode,
+            limit,
+            connect_mode,
+            dir,
+        } => run_reapply(
+            store,
+            dir,
+            confirm_mode,
+            connect_mode,
+            &HostFilter::from_limit(&limit),
+        )?,
         Cmd::Sync {
             sync_mode,
             limit,
@@ -502,7 +588,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-use agent::AgentConfig;
+use agent::{Activate, AgentConfig};
 
 /// Handler for `map_err` that wraps a reconcile failure with its subject,
 /// e.g. "unit symlinks".
@@ -513,187 +599,202 @@ fn reconcile_failed(subject: &'static str) -> impl FnOnce(ApplyError) -> ApplyEr
     }
 }
 
-fn activate(
-    desired: &plan::DesiredState,
-    changes: &plan::SystemDiff<PathBuf>,
-    emit: &mut dyn FnMut(protocol::Message),
-    log: &mut dyn FnMut(&str),
-    apps_dir: &Path,
-    quadlets_dir: &Path,
-    sysusers_dir: &Path,
-    units_dir: &Path,
-) -> std::result::Result<(), ApplyError> {
-    // The activation phases below run in alphabetical order by subject
-    // (quadlets, symlinks, sysusers, units). The only constraints are:
-    //   * manifest symlinks must run before unit start (units may depend
-    //     on paths the symlinks provide);
-    //   * sysusers must be materialized before unit start (units may run
-    //     as those users);
-    //   * unit disable must run before unit reconcile (systemd treats our
-    //     symlinks as "linked units" and `disable` removes them);
-    //   * quadlet + unit reconciles must run before `daemon-reload` (so the
-    //     generator and systemd pick up the new files);
-    //   * unit enable and disable must run before `daemon-reload`, which must
-    //     run before unit restart.
-    // All other orderings are free.
+/// `Activate` implementation for a real host: reconciles symlinks and
+/// invokes systemctl.
+struct SystemdActivator {
+    apps_dir: PathBuf,
+    quadlets_dir: PathBuf,
+    sysusers_dir: PathBuf,
+    units_dir: PathBuf,
+}
 
-    // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
-    // the quadlet generator over them.
-    checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)
-        .map_err(reconcile_failed("quadlet symlinks"))?;
+impl Activate for SystemdActivator {
+    fn activate(
+        &self,
+        mode: protocol::ApplyMode,
+        desired: &plan::DesiredState,
+        changes: &plan::SystemDiff<PathBuf>,
+        emit: &mut dyn FnMut(protocol::Message),
+        log: &mut dyn FnMut(&str),
+    ) -> std::result::Result<(), ApplyError> {
+        // The activation phases below run in alphabetical order by subject
+        // (quadlets, symlinks, sysusers, units). The only constraints are:
+        //   * manifest symlinks must run before unit start (units may depend
+        //     on paths the symlinks provide);
+        //   * sysusers must be materialized before unit start (units may run
+        //     as those users);
+        //   * unit disable must run before unit reconcile (systemd treats our
+        //     symlinks as "linked units" and `disable` removes them);
+        //   * quadlet + unit reconciles must run before `daemon-reload` (so the
+        //     generator and systemd pick up the new files);
+        //   * unit enable and disable must run before `daemon-reload`, which must
+        //     run before unit restart.
+        // All other orderings are free.
 
-    // Reconcile manifest symlinks (e.g. config files in /etc).
-    // TODO: log individual symlink changes.
-    checkout::reconcile_config_symlinks(apps_dir, &changes.symlinks)?;
+        // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
+        // the quadlet generator over them.
+        checkout::reconcile_managed_symlinks(&desired.quadlets, &self.apps_dir, &self.quadlets_dir)
+            .map_err(reconcile_failed("quadlet symlinks"))?;
 
-    // Reconcile sysusers symlinks and materialize users. On app removal
-    // this wastefully runs sysusers after unlinking the config, but it's
-    // idempotent and not worth special-casing.
-    checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)
-        .map_err(reconcile_failed("sysuser symlinks"))?;
-    if changes.sysusers.content_changed {
-        // Invoke the binary directly -- the systemd-sysusers.service
-        // unit has ConditionNeedsUpdate=/etc which skips execution
-        // outside of early boot.
-        log("running systemd-sysusers");
-        let result = std::process::Command::new("systemd-sysusers")
-            // Default console log level suppresses user creation messages.
-            .env("SYSTEMD_LOG_LEVEL", "info")
-            .output();
-        match result {
-            Ok(output) => {
-                // Systemd tools log to stderr, not stdout.
-                let text = String::from_utf8_lossy(&output.stderr);
-                let trimmed = text.trim_end();
-                if !trimmed.is_empty() {
-                    emit(protocol::Message::SysusersOutput {
-                        output: format!("systemd-sysusers:\n{trimmed}"),
-                    });
+        // Reconcile manifest symlinks (e.g. config files in /etc).
+        // TODO: log individual symlink changes.
+        checkout::reconcile_config_symlinks(&self.apps_dir, &changes.symlinks)?;
+
+        // Reconcile sysusers symlinks and materialize users. On app removal
+        // this wastefully runs sysusers after unlinking the config, but it's
+        // idempotent and not worth special-casing.
+        checkout::reconcile_managed_symlinks(&desired.sysusers, &self.apps_dir, &self.sysusers_dir)
+            .map_err(reconcile_failed("sysuser symlinks"))?;
+        if changes.sysusers.content_changed {
+            // Invoke the binary directly -- the systemd-sysusers.service
+            // unit has ConditionNeedsUpdate=/etc which skips execution
+            // outside of early boot.
+            log("running systemd-sysusers");
+            let result = std::process::Command::new("systemd-sysusers")
+                // Default console log level suppresses user creation messages.
+                .env("SYSTEMD_LOG_LEVEL", "info")
+                .output();
+            match result {
+                Ok(output) => {
+                    // Systemd tools log to stderr, not stdout.
+                    let text = String::from_utf8_lossy(&output.stderr);
+                    let trimmed = text.trim_end();
+                    if !trimmed.is_empty() {
+                        emit(protocol::Message::SysusersOutput {
+                            output: format!("systemd-sysusers:\n{trimmed}"),
+                        });
+                    }
+                    if !output.status.success() {
+                        return Err(ApplyError::SysusersActivationFailed);
+                    }
                 }
-                if !output.status.success() {
+                Err(err) => {
+                    emit(protocol::Message::SysusersOutput {
+                        output: format!("systemd-sysusers: {err}"),
+                    });
                     return Err(ApplyError::SysusersActivationFailed);
                 }
             }
-            Err(err) => {
-                emit(protocol::Message::SysusersOutput {
-                    output: format!("systemd-sysusers: {err}"),
-                });
-                return Err(ApplyError::SysusersActivationFailed);
+        }
+
+        for unit in &changes.unit_actions.disable {
+            log(&format!("disabling {unit}"));
+            // The daemon-reload below picks up the removed symlinks, so --no-reload
+            // skips the reload that disable does by default.
+            systemctl_ok(&["disable", "--no-reload", "--now", unit]);
+        }
+
+        // Reconcile unit symlinks after disable: systemd treats our symlinks
+        // as "linked units" and `systemctl disable` removes the link itself,
+        // not just the enablement symlinks. Reconciling here restores them
+        // and also picks up any new units from the deploy.
+        checkout::reconcile_managed_symlinks(&desired.units, &self.apps_dir, &self.units_dir)
+            .map_err(reconcile_failed("unit symlinks"))?;
+
+        // Enable every unit the plan touches, newly enabled or merely restarted.
+        // `systemctl enable` records the unit's path resolved through `current` to
+        // the versioned checkout dir. Once this deploy advances `current`, that
+        // recorded enablement symlink points at the old version, which a later
+        // garbage collection removes, so the unit silently stops starting at boot.
+        // Re-enabling repoints it; the restart further down activates. Scoped to
+        // units in the plan so we never touch units the plan did not account for.
+        //
+        // One call per unit, even though `systemctl enable` accepts a list: a list
+        // is all or nothing, so one bad unit name would skip the repointing for
+        // every other unit too.
+        let mut touched: Vec<&String> = Vec::new();
+        touched.extend(&changes.unit_actions.enable);
+        touched.extend(&changes.unit_actions.restart);
+        for unit in &touched {
+            log(&format!("enabling {unit}"));
+            systemctl_ok(&["enable", "--no-reload", unit]);
+        }
+
+        // Reload after everything above, whenever we manage systemd units or
+        // quadlets on this host. Two things make systemd consider units "changed on
+        // disk", and it keeps telling the operator to run daemon-reload until we do:
+        //
+        //   * A deploy advances the app's `current` symlink, so every unit
+        //     resolves to a fresh file.
+        //   * `enable` and `disable` write into the `.wants` directories, which
+        //     marks *every* unit on the host, not just the ones we touched.
+        //
+        // Hence the reload runs last, and those calls pass --no-reload. The
+        // unit_actions check also covers disabling the last managed unit, when
+        // `desired` is already empty. On hosts where we manage no systemd units
+        // this stays false so we never invoke systemctl.
+        let manages_systemd = !desired.quadlets.is_empty()
+            || !desired.units.is_empty()
+            || !changes.unit_actions.is_empty();
+        if manages_systemd {
+            log("daemon-reload");
+            systemctl_ok(&["daemon-reload"]);
+        }
+
+        // `restart` also starts a unit that was not running, so the newly enabled
+        // ones need no separate start. Reapply uses `start` instead: it must not
+        // disrupt units that are already running, and `start` is a no-op for
+        // those while still bringing up stopped ones.
+        let (verb, verb_ing) = match mode {
+            protocol::ApplyMode::Deploy { .. } => ("restart", "restarting"),
+            protocol::ApplyMode::Reapply => ("start", "starting"),
+        };
+        for unit in &touched {
+            log(&format!("{verb_ing} {unit}"));
+            systemctl_ok(&[verb, unit]);
+        }
+
+        if touched.is_empty() {
+            return Ok(());
+        }
+
+        // Let services initialize before checking state. Previously we usd 100ms,
+        // but that was not enough for a binary inside a verity-protected EROFS to
+        // fully start and then fail on a potato cloud VM, let's give it 300ms.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        // `is-active` prints one status word per unit, in argument order. Read
+        // the words, not the exit code: with several units it exits 0 if *any*
+        // one is active, which would hide a partial failure.
+        let report = std::process::Command::new("systemctl")
+            .arg("is-active")
+            .args(&touched)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+
+        // A different count means we can't map status words to units, which is a
+        // distinct failure from a unit not starting.
+        if report.lines().count() != touched.len() {
+            return Err(ApplyError::SystemdStatusUnreadable { output: report });
+        }
+
+        let mut statuses = report.lines();
+        let mut inactive: Vec<String> = Vec::new();
+        for &unit in &touched {
+            if statuses.next() != Some("active") {
+                inactive.push(unit.to_string());
             }
         }
-    }
 
-    for unit in &changes.unit_actions.disable {
-        log(&format!("disabling {unit}"));
-        // The daemon-reload below picks up the removed symlinks, so --no-reload
-        // skips the reload that disable does by default.
-        systemctl_ok(&["disable", "--no-reload", "--now", unit]);
-    }
+        // Force color: systemctl won't color because stdout is a pipe,
+        // but the output is forwarded to the operator's terminal.
+        let output = match std::process::Command::new("systemctl")
+            .args(["status", "--lines=5"])
+            .args(&touched)
+            .env("SYSTEMD_COLORS", "true")
+            .output()
+        {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            Err(err) => format!("failed to run systemctl status: {err}"),
+        };
+        emit(protocol::Message::SystemdUnitStatus { output });
 
-    // Reconcile unit symlinks after disable: systemd treats our symlinks
-    // as "linked units" and `systemctl disable` removes the link itself,
-    // not just the enablement symlinks. Reconciling here restores them
-    // and also picks up any new units from the deploy.
-    checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)
-        .map_err(reconcile_failed("unit symlinks"))?;
-
-    // Enable every unit the plan touches, newly enabled or merely restarted.
-    // `systemctl enable` records the unit's path resolved through `current` to
-    // the versioned checkout dir. Once this deploy advances `current`, that
-    // recorded enablement symlink points at the old version, which a later
-    // garbage collection removes, so the unit silently stops starting at boot.
-    // Re-enabling repoints it; the restart further down activates. Scoped to
-    // units in the plan so we never touch units the plan did not account for.
-    //
-    // One call per unit, even though `systemctl enable` accepts a list: a list
-    // is all or nothing, so one bad unit name would skip the repointing for
-    // every other unit too.
-    let mut touched: Vec<&String> = Vec::new();
-    touched.extend(&changes.unit_actions.enable);
-    touched.extend(&changes.unit_actions.restart);
-    for unit in &touched {
-        log(&format!("enabling {unit}"));
-        systemctl_ok(&["enable", "--no-reload", unit]);
-    }
-
-    // Reload after everything above, whenever we manage systemd units or
-    // quadlets on this host. Two things make systemd consider units "changed on
-    // disk", and it keeps telling the operator to run daemon-reload until we do:
-    //
-    //   * A deploy advances the app's `current` symlink, so every unit
-    //     resolves to a fresh file.
-    //   * `enable` and `disable` write into the `.wants` directories, which
-    //     marks *every* unit on the host, not just the ones we touched.
-    //
-    // Hence the reload runs last, and those calls pass --no-reload. The
-    // unit_actions check also covers disabling the last managed unit, when
-    // `desired` is already empty. On hosts where we manage no systemd units
-    // this stays false so we never invoke systemctl.
-    let manages_systemd = !desired.quadlets.is_empty()
-        || !desired.units.is_empty()
-        || !changes.unit_actions.is_empty();
-    if manages_systemd {
-        log("daemon-reload");
-        systemctl_ok(&["daemon-reload"]);
-    }
-
-    // `restart` also starts a unit that was not running, so the newly enabled
-    // ones need no separate start.
-    for unit in &touched {
-        log(&format!("restarting {unit}"));
-        systemctl_ok(&["restart", unit]);
-    }
-
-    if touched.is_empty() {
-        return Ok(());
-    }
-
-    // Let services initialize before checking state. Previously we usd 100ms,
-    // but that was not enough for a binary inside a verity-protected EROFS to
-    // fully start and then fail on a potato cloud VM, let's give it 300ms.
-    std::thread::sleep(std::time::Duration::from_millis(300));
-
-    // `is-active` prints one status word per unit, in argument order. Read
-    // the words, not the exit code: with several units it exits 0 if *any*
-    // one is active, which would hide a partial failure.
-    let report = std::process::Command::new("systemctl")
-        .arg("is-active")
-        .args(&touched)
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-        .unwrap_or_default();
-
-    // A different count means we can't map status words to units, which is a
-    // distinct failure from a unit not starting.
-    if report.lines().count() != touched.len() {
-        return Err(ApplyError::SystemdStatusUnreadable { output: report });
-    }
-
-    let mut statuses = report.lines();
-    let mut inactive: Vec<String> = Vec::new();
-    for &unit in &touched {
-        if statuses.next() != Some("active") {
-            inactive.push(unit.to_string());
+        if inactive.is_empty() {
+            Ok(())
+        } else {
+            Err(ApplyError::SystemdActivationFailed { units: inactive })
         }
-    }
-
-    // Force color: systemctl won't color because stdout is a pipe,
-    // but the output is forwarded to the operator's terminal.
-    let output = match std::process::Command::new("systemctl")
-        .args(["status", "--lines=5"])
-        .args(&touched)
-        .env("SYSTEMD_COLORS", "true")
-        .output()
-    {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Err(err) => format!("failed to run systemctl status: {err}"),
-    };
-    emit(protocol::Message::SystemdUnitStatus { output });
-
-    if inactive.is_empty() {
-        Ok(())
-    } else {
-        Err(ApplyError::SystemdActivationFailed { units: inactive })
     }
 }
 
@@ -707,10 +808,12 @@ fn systemctl_ok(args: &[&str]) -> bool {
 }
 
 fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
-    let apps_dir = config.apps_dir.clone();
-    let quadlets_dir = config.quadlets_dir.clone();
-    let sysusers_dir = config.sysusers_dir.clone();
-    let units_dir = config.units_dir.clone();
+    let activator = SystemdActivator {
+        apps_dir: config.apps_dir.clone(),
+        quadlets_dir: config.quadlets_dir.clone(),
+        sysusers_dir: config.sysusers_dir.clone(),
+        units_dir: config.units_dir.clone(),
+    };
     let log_dir = config
         .apps_dir
         .parent()
@@ -719,19 +822,8 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
     agent::AgentSession::new(
         store,
         prim::Hostname(config.hostname.clone()),
+        Box::new(activator),
         config.apps_dir.clone(),
-        Box::new(move |desired, changes, emit, log: &mut dyn FnMut(&str)| {
-            activate(
-                desired,
-                changes,
-                emit,
-                log,
-                &apps_dir,
-                &quadlets_dir,
-                &sysusers_dir,
-                &units_dir,
-            )
-        }),
         Some(log_path),
     )
 }
@@ -750,12 +842,12 @@ fn run_agent(store: PathBuf) -> Result<()> {
 
     let store = Store::open_or_init(&store)?;
     let config = AgentConfig::from_env();
-    let current_commit = store.current_commit();
     let hello = protocol::Hello {
         version: protocol::VERSION.to_string(),
         build_commit: setup::BUILD_COMMIT.to_string(),
         hostname: config.hostname.clone(),
-        current_commit,
+        current_commit: store.current_commit(),
+        target_commit: store.target_commit(),
     };
     let mut session = make_agent_session(store, &config);
     let stdin = std::io::stdin().lock();

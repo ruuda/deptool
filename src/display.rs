@@ -14,10 +14,12 @@ use std::time::Duration;
 
 use git2::{Delta, Oid, Repository};
 
+use crate::checkout::oid_prefix;
 use crate::deploy::{DeployObserver, HostState};
 use crate::error::Result;
 use crate::plan::{AppDiff, Plan, SubdirChanges, SymlinkChanges, UnitActions};
 use crate::prim::{Hostname, gmtime};
+use crate::reapply::HostReapply;
 use crate::store::{Store, empty_tree_oid};
 
 impl std::fmt::Display for HostState {
@@ -161,15 +163,46 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
     Ok(())
 }
 
+/// Write the reapply plan: per host, the deployed commit it will converge
+/// on, and the units it will enable and start.
+///
+/// Unlike the deploy plan, this does not list files: every file of every
+/// app would be an addition against the empty tree, which is noise.
+pub fn print_reapply_plan(
+    out: &mut impl Write,
+    hosts: &BTreeMap<Hostname, HostReapply>,
+    color: UseColor,
+) -> Result<()> {
+    for (host, reapply) in hosts {
+        writeln!(out, "{host}")?;
+        let noun = if reapply.n_apps == 1 { "app" } else { "apps" };
+        writeln!(
+            out,
+            "    {} {} ({} {noun})",
+            color.yellow("reapply"),
+            oid_prefix(reapply.commit),
+            reapply.n_apps,
+        )?;
+        for unit in &reapply.units_enabled {
+            writeln!(out, "        {} {unit}", color.green("enable unit"))?;
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// Write the final success line; `action` is the leading phrase of the
+/// sentence, e.g. "Changes deployed" or "Reapplied".
 pub fn print_success_summary(
     out: &mut impl Write,
+    action: &str,
     n_hosts: usize,
     elapsed: Duration,
 ) -> Result<()> {
     let noun = if n_hosts == 1 { "host" } else { "hosts" };
     writeln!(
         out,
-        "\nChanges deployed successfully to {n_hosts} {noun} in {:.2}s.",
+        "\n{action} successfully to {n_hosts} {noun} in {:.2}s.",
         elapsed.as_secs_f64(),
     )?;
     Ok(())
@@ -208,6 +241,7 @@ fn color_prefix(color: UseColor, prefix: char) -> String {
     }
 }
 
+#[derive(PartialEq, Eq)]
 pub enum Decision {
     Apply,
     Abort,
@@ -244,6 +278,20 @@ pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Re
             "d" | "D" => print_diff(store, plan, DiffMode::Full, color)?,
             _ => return Ok(Decision::Abort),
         }
+    }
+}
+
+/// Show the reapply confirmation prompt. Enter or `N` aborts (the default).
+pub fn confirm_reapply(n_hosts: usize, cluster: &str) -> Result<Decision> {
+    let noun = if n_hosts == 1 { "host" } else { "hosts" };
+    print!("Reapply to {n_hosts} {noun} in cluster '{cluster}'? [y/N] ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    match input.trim() {
+        "y" | "Y" => Ok(Decision::Apply),
+        _ => Ok(Decision::Abort),
     }
 }
 
@@ -934,6 +982,35 @@ web1 (rollback unavailable)
         + config.toml
         + quadlets/myapp.container
         link quadlet myapp.container
+
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reapply_plan_lists_commit_app_count_and_units() -> Result<()> {
+        use std::collections::BTreeSet;
+        let hosts = BTreeMap::from([(
+            Hostname::from("web1"),
+            HostReapply {
+                commit: Oid::from_str("b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f")?,
+                n_apps: 2,
+                units_enabled: BTreeSet::from([
+                    "lego.timer".to_string(),
+                    "nginx.service".to_string(),
+                ]),
+            },
+        )]);
+        let mut out = Vec::new();
+        print_reapply_plan(&mut out, &hosts, UseColor::No)?;
+        assert_eq!(
+            String::from_utf8(out).expect("output is utf-8"),
+            "\
+web1
+    reapply b8a4c3df2a (2 apps)
+        enable unit lego.timer
+        enable unit nginx.service
 
 ",
         );

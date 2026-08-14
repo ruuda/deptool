@@ -36,6 +36,15 @@ pub enum Request {
     Apply {
         #[serde(with = "crate::prim::ser::oid")]
         target_commit: Oid,
+        mode: ApplyMode,
+    },
+}
+
+/// How `Apply` converges the host on the target commit.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub enum ApplyMode {
+    /// Apply the diff from the host's current commit to the target commit.
+    Deploy {
         /// Whether the agent should attempt rollback on failure.
         ///
         /// The agent recomputes this independently and asserts it matches.
@@ -43,6 +52,11 @@ pub enum Request {
         /// agent's execution agree -- a safeguard against bugs.
         is_rollback_safe: bool,
     },
+    /// Re-apply the target commit, which is already the host's current
+    /// commit, to repair drift: diff from the empty tree so every app is
+    /// re-materialized and every manifest-enabled unit is re-enabled and
+    /// started. Never rolls back.
+    Reapply,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,6 +69,10 @@ pub struct Hello {
     pub hostname: String,
     #[serde(default, with = "crate::prim::ser::oid_option")]
     pub current_commit: Option<Oid>,
+    /// Commit of the host's target ref. Diverges from `current_commit`
+    /// when an apply started but did not complete.
+    #[serde(default, with = "crate::prim::ser::oid_option")]
+    pub target_commit: Option<Oid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

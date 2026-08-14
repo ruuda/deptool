@@ -21,6 +21,10 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+ * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
+   the currently deployed revision on every host in the cluster. This command
+   should not be needed normally, but it helps to recover from bugs or manually
+   created drift.
 
 Improvements:
 

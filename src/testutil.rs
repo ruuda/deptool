@@ -337,18 +337,17 @@ impl TestHost {
         hostname: &str,
         apps_path: &std::path::Path,
     ) -> Box<dyn Connection> {
-        let repo = Repository::open(store_path).expect("repo is opened");
-        let current_commit = repo
-            .find_reference("refs/heads/current")
-            .ok()
-            .map(|r| r.peel_to_commit().expect("current ref is a commit").id());
-        let session = AgentSession::new_test(repo, hostname, apps_path);
+        let store = Store {
+            repo: Repository::open(store_path).expect("repo is opened"),
+        };
         let hello = Hello {
             version: protocol::VERSION.to_string(),
             build_commit: BUILD_COMMIT.to_string(),
             hostname: hostname.to_string(),
-            current_commit,
+            current_commit: store.current_commit(),
+            target_commit: store.target_commit(),
         };
+        let session = AgentSession::new_test(store.repo, hostname, apps_path);
         Box::new(LocalConnection {
             session,
             hello,
