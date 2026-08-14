@@ -24,6 +24,9 @@ New features:
 
 Improvements:
 
+ <!-- TODO(ruuda): I/O errors during apply now include the operation and path
+ (e.g. "failed to remove /etc/x: Is a directory") instead of only the bare OS
+ message. -->
  * Do not depend on shell brace expansion when installing the agent to improve
    compatibility, and print stderr when agent installation fails to aid
    debugging.

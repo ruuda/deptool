@@ -504,6 +504,15 @@ fn run() -> Result<()> {
 
 use agent::AgentConfig;
 
+/// Handler for `map_err` that wraps a reconcile failure with its subject,
+/// e.g. "unit symlinks".
+fn reconcile_failed(subject: &'static str) -> impl FnOnce(ApplyError) -> ApplyError {
+    move |cause| ApplyError::ReconcileFailed {
+        subject: subject.to_string(),
+        cause: cause.to_string(),
+    }
+}
+
 fn activate(
     desired: &plan::DesiredState,
     changes: &plan::SystemDiff<PathBuf>,
@@ -530,7 +539,8 @@ fn activate(
 
     // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
     // the quadlet generator over them.
-    checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.quadlets, apps_dir, quadlets_dir)
+        .map_err(reconcile_failed("quadlet symlinks"))?;
 
     // Reconcile manifest symlinks (e.g. config files in /etc).
     // TODO: log individual symlink changes.
@@ -539,7 +549,8 @@ fn activate(
     // Reconcile sysusers symlinks and materialize users. On app removal
     // this wastefully runs sysusers after unlinking the config, but it's
     // idempotent and not worth special-casing.
-    checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.sysusers, apps_dir, sysusers_dir)
+        .map_err(reconcile_failed("sysuser symlinks"))?;
     if changes.sysusers.content_changed {
         // Invoke the binary directly -- the systemd-sysusers.service
         // unit has ConditionNeedsUpdate=/etc which skips execution
@@ -583,7 +594,8 @@ fn activate(
     // as "linked units" and `systemctl disable` removes the link itself,
     // not just the enablement symlinks. Reconciling here restores them
     // and also picks up any new units from the deploy.
-    checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)?;
+    checkout::reconcile_managed_symlinks(&desired.units, apps_dir, units_dir)
+        .map_err(reconcile_failed("unit symlinks"))?;
 
     // Enable every unit the plan touches, newly enabled or merely restarted.
     // `systemctl enable` records the unit's path resolved through `current` to

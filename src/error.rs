@@ -69,10 +69,15 @@ impl fmt::Display for StoreError {
 /// A failure on the agent during a deploy request.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyError {
+    /// Materializing an app's files on the host failed.
+    CheckoutFailed { app: String, cause: String },
+    /// Updating a managed symlink directory failed. The subject specifies
+    /// which one, e.g. "unit symlinks".
+    ReconcileFailed { subject: String, cause: String },
     /// Failed to create or verify a symlink.
     SymlinkFailed { link: String, cause: String },
-    /// Failed to remove what was at a managed link location before placing
-    /// our symlink there (e.g. an unmanaged directory occupies the path).
+    /// Failed to remove an existing file or directory, e.g. an unmanaged
+    /// directory occupies a path where a managed symlink should go.
     RemoveFailed { path: String, cause: String },
     /// One or more systemd units failed to become active after apply.
     SystemdActivationFailed { units: Vec<String> },
@@ -84,7 +89,8 @@ pub enum ApplyError {
     SysusersActivationFailed,
     /// A store operation failed during the apply phase.
     Store(String),
-    /// An I/O error on the host.
+    /// An I/O error on the host, with the operation and path in the message.
+    /// There is deliberately no `From<io::Error>`: each site adds context.
     Io(String),
 }
 
@@ -94,20 +100,20 @@ impl From<StoreError> for ApplyError {
     }
 }
 
-impl From<std::io::Error> for ApplyError {
-    fn from(e: std::io::Error) -> Self {
-        ApplyError::Io(e.to_string())
-    }
-}
-
 impl fmt::Display for ApplyError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            ApplyError::CheckoutFailed { app, cause } => {
+                write!(f, "failed to check out app {app}: {cause}")
+            }
+            ApplyError::ReconcileFailed { subject, cause } => {
+                write!(f, "failed to update {subject}: {cause}")
+            }
             ApplyError::SymlinkFailed { link, cause } => {
-                write!(f, "cannot create symlink at {link}: {cause}")
+                write!(f, "failed to create symlink at {link}: {cause}")
             }
             ApplyError::RemoveFailed { path, cause } => {
-                write!(f, "cannot remove {path}: {cause}")
+                write!(f, "failed to remove {path}: {cause}")
             }
             ApplyError::SystemdActivationFailed { units } => {
                 write!(f, "units failed to become active: {}", units.join(", "))
@@ -391,7 +397,10 @@ mod tests {
         let exp = err
             .explain("web1")
             .expect("hostname mismatch has explanation");
-        assert!(exp.item.contains("web1"), "item names the expected host");
+        assert!(
+            exp.item.contains("web1"),
+            "item indicates the expected host"
+        );
         assert!(
             exp.item.contains("spinner"),
             "item shows the reported hostname"

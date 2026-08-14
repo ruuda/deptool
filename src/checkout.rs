@@ -67,9 +67,9 @@ fn checkout_app(
     };
     if needs_checkout {
         if version_dir.exists() {
-            fs::remove_dir_all(&version_dir)?;
+            remove_dir_all(&version_dir)?;
         }
-        fs::create_dir_all(&version_dir)?;
+        create_dir_all(&version_dir)?;
         store.checkout_app(commit_oid, host, app, &version_dir)?;
     }
 
@@ -77,15 +77,16 @@ fn checkout_app(
     let current = app_dir.join("current");
 
     if next.symlink_metadata().is_ok() {
-        fs::remove_file(&next)?;
+        remove_file(&next)?;
     }
-    unix_fs::symlink(&prefix, &next)?;
+    symlink(&prefix, &next)?;
 
     // Rotate current → previous before overwriting current.
     if current.symlink_metadata().is_ok() {
-        fs::rename(&current, app_dir.join("previous"))?;
+        let previous = app_dir.join("previous");
+        rename(&current, &previous)?;
     }
-    fs::rename(&next, &current)?;
+    rename(&next, &current)?;
 
     Ok(())
 }
@@ -94,7 +95,7 @@ fn checkout_app(
 pub fn remove_app(app: &str, apps_dir: &Path) -> Result<()> {
     let app_dir = apps_dir.join(app);
     if app_dir.exists() {
-        fs::remove_dir_all(&app_dir)?;
+        remove_dir_all(&app_dir)?;
     }
     Ok(())
 }
@@ -171,6 +172,15 @@ fn gc_app_dir(app_dir: &Path, log: &mut impl FnMut(std::fmt::Arguments<'_>)) {
     }
 }
 
+/// Handler for `map_err` that wraps a failure as `CheckoutFailed` for the
+/// given app.
+fn checkout_failed(app: &str) -> impl FnOnce(ApplyError) -> ApplyError + '_ {
+    move |cause| ApplyError::CheckoutFailed {
+        app: app.to_string(),
+        cause: cause.to_string(),
+    }
+}
+
 /// Checkout or remove each changed app on the filesystem.
 ///
 /// This is the only part of a deploy that mutates `apps_dir`. It does not
@@ -189,12 +199,14 @@ pub fn checkout(
             AppDiff::Add { .. } => {
                 log(format_args!("adding app {app}"));
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                checkout_app(store, oid, host, app, apps_dir, mode)?;
+                checkout_app(store, oid, host, app, apps_dir, mode)
+                    .map_err(checkout_failed(app))?;
             }
             AppDiff::Update { .. } => {
                 log(format_args!("updating app {app}"));
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                checkout_app(store, oid, host, app, apps_dir, mode)?;
+                checkout_app(store, oid, host, app, apps_dir, mode)
+                    .map_err(checkout_failed(app))?;
             }
             AppDiff::Remove { .. } => {
                 log(format_args!("removing app {app}"));
@@ -220,7 +232,7 @@ pub fn reconcile_managed_symlinks(
     for name in actual.keys() {
         if !desired.contains_key(name) {
             let link_path = target_dir.join(name);
-            fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
+            remove_file(&link_path)?;
             // Deptool manages files declaratively, so it shouldn't leave an
             // empty `<unit>.d` directory behind once our last drop-in is gone.
             let parent = link_path.parent().expect("a link path has a parent");
@@ -241,10 +253,9 @@ pub fn reconcile_managed_symlinks(
             let parent = link_path.parent().expect("a link path has a parent");
             create_managed_dir(target_dir, parent)?;
             if link_path.exists() || link_path.symlink_metadata().is_ok() {
-                fs::remove_file(&link_path).map_err(|e| remove_failed(&link_path, e))?;
+                remove_file(&link_path)?;
             }
-            unix_fs::symlink(desired_target, &link_path)
-                .map_err(|e| symlink_failed(&link_path, e))?;
+            symlink(desired_target, &link_path)?;
         }
     }
 
@@ -264,10 +275,10 @@ fn create_managed_dir(stop: &Path, dir: &Path) -> Result<()> {
         dir.starts_with(stop),
         "managed dir {dir:?} must be under the managed root {stop:?}",
     );
-    fs::create_dir_all(dir)?;
+    create_dir_all(dir)?;
     let mut level = dir;
     loop {
-        fs::set_permissions(level, fs::Permissions::from_mode(0o755))?;
+        set_permissions(level, fs::Permissions::from_mode(0o755))?;
         if level == stop {
             break;
         }
@@ -298,21 +309,80 @@ fn prune_empty_dirs(stop: &Path, dir: &Path) {
     }
 }
 
-/// Name the path in errors, so a bare io message like "Is a directory"
-/// doesn't reach the operator without context. The two variants keep the
-/// reported operation honest: removing the old entry versus creating the link.
-fn remove_failed(path: &Path, err: std::io::Error) -> ApplyError {
-    ApplyError::RemoveFailed {
+// The functions below wrap std::fs operations to include the failing operation
+// and path in the error, so a bare io message like "Is a directory" doesn't
+// reach the operator without context. Call the wrapper instead of std::fs
+// wherever the error propagates out of the apply; raw std::fs stays fine where
+// the caller inspects or discards the error itself.
+
+/// Handler for `map_err` on operations without a wrapper (reads on open
+/// files, directory iteration).
+fn io_failed<'a>(
+    operation: &'static str,
+    path: &'a Path,
+) -> impl FnOnce(std::io::Error) -> ApplyError + 'a {
+    move |err| ApplyError::Io(format!("failed to {operation} {}: {err}", path.display()))
+}
+
+fn remove_failed(path: &Path) -> impl FnOnce(std::io::Error) -> ApplyError + '_ {
+    move |err| ApplyError::RemoveFailed {
         path: path.display().to_string(),
         cause: err.to_string(),
     }
 }
 
-fn symlink_failed(link: &Path, err: std::io::Error) -> ApplyError {
-    ApplyError::SymlinkFailed {
+fn create_dir_all(path: &Path) -> Result<()> {
+    fs::create_dir_all(path).map_err(io_failed("create directory", path))
+}
+
+fn metadata(path: &Path) -> Result<fs::Metadata> {
+    fs::metadata(path).map_err(io_failed("inspect", path))
+}
+
+fn open(path: &Path) -> Result<fs::File> {
+    fs::File::open(path).map_err(io_failed("read", path))
+}
+
+/// Open a directory for iteration, or `None` if it does not exist.
+fn read_dir_if_exists(path: &Path) -> Result<Option<fs::ReadDir>> {
+    match fs::read_dir(path) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(io_failed("read directory", path)(err)),
+    }
+}
+
+fn read_link(path: &Path) -> Result<PathBuf> {
+    fs::read_link(path).map_err(io_failed("read symlink", path))
+}
+
+fn remove_dir_all(path: &Path) -> Result<()> {
+    fs::remove_dir_all(path).map_err(remove_failed(path))
+}
+
+fn remove_file(path: &Path) -> Result<()> {
+    fs::remove_file(path).map_err(remove_failed(path))
+}
+
+fn rename(from: &Path, to: &Path) -> Result<()> {
+    fs::rename(from, to).map_err(|err| {
+        ApplyError::Io(format!(
+            "failed to rename {} to {}: {err}",
+            from.display(),
+            to.display(),
+        ))
+    })
+}
+
+fn set_permissions(path: &Path, perms: fs::Permissions) -> Result<()> {
+    fs::set_permissions(path, perms).map_err(io_failed("set permissions on", path))
+}
+
+fn symlink(target: impl AsRef<Path>, link: &Path) -> Result<()> {
+    unix_fs::symlink(target, link).map_err(|err| ApplyError::SymlinkFailed {
         link: link.display().to_string(),
         cause: err.to_string(),
-    }
+    })
 }
 
 /// Reconcile manifest symlinks on the host filesystem.
@@ -327,14 +397,14 @@ pub fn reconcile_config_symlinks(apps_dir: &Path, changes: &SymlinkChanges<PathB
     for target in &changes.remove {
         if target.symlink_metadata().is_ok() {
             verify_managed(target, apps_dir)?;
-            fs::remove_file(target)?;
+            remove_file(target)?;
         }
     }
 
     for (target, source) in &changes.change {
         if target.symlink_metadata().is_ok() {
             verify_managed(target, apps_dir)?;
-            fs::remove_file(target)?;
+            remove_file(target)?;
         }
         create_symlink(source, target)?;
     }
@@ -361,11 +431,18 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
     match unix_fs::symlink(source, link) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            match classify_link(source, link)? {
+            // Classification reads the source as well as the link. Every
+            // wrapper error includes its own failing path, so wrapping in
+            // the link's error does not misattribute a source failure.
+            let state = classify_link(source, link).map_err(|cause| ApplyError::SymlinkFailed {
+                link: link_name.clone(),
+                cause: cause.to_string(),
+            })?;
+            match state {
                 LinkState::PointsAtSource => Ok(()),
                 LinkState::MatchingFile => {
-                    fs::remove_file(link)?;
-                    unix_fs::symlink(source, link)?;
+                    remove_file(link)?;
+                    symlink(source, link)?;
                     Ok(())
                 }
                 LinkState::Directory => Err(ApplyError::SymlinkFailed {
@@ -423,8 +500,8 @@ fn classify_link(source: &Path, link: &Path) -> Result<LinkState> {
     {
         return Ok(LinkState::PointsAtSource);
     }
-    let source_meta = fs::metadata(source)?;
-    let link_meta = fs::metadata(link)?;
+    let source_meta = metadata(source)?;
+    let link_meta = metadata(link)?;
     if link_meta.is_dir() {
         return Ok(LinkState::Directory);
     }
@@ -434,13 +511,17 @@ fn classify_link(source: &Path, link: &Path) -> Result<LinkState> {
     if source_meta.len() != link_meta.len() {
         return Ok(LinkState::Mismatch);
     }
-    let mut source = BufReader::new(fs::File::open(source)?);
-    let mut link = BufReader::new(fs::File::open(link)?);
+    let mut source_file = BufReader::new(open(source)?);
+    let mut link_file = BufReader::new(open(link)?);
     let mut buf_source = [0u8; 8192];
     let mut buf_link = [0u8; 8192];
     loop {
-        let n = source.read(&mut buf_source)?;
-        link.read_exact(&mut buf_link[..n])?;
+        let n = source_file
+            .read(&mut buf_source)
+            .map_err(io_failed("read", source))?;
+        link_file
+            .read_exact(&mut buf_link[..n])
+            .map_err(io_failed("read", link))?;
         if buf_source[..n] != buf_link[..n] {
             return Ok(LinkState::Mismatch);
         }
@@ -506,20 +587,19 @@ fn collect_managed_symlinks_into(
     prefix: &str,
     managed: &mut BTreeMap<String, PathBuf>,
 ) -> Result<()> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(e.into()),
+    let entries = match read_dir_if_exists(dir)? {
+        Some(entries) => entries,
+        None => return Ok(()),
     };
 
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(io_failed("read directory", dir))?;
         let path = entry.path();
         // Check is_symlink before is_dir: a symlink to a directory reports
         // is_dir() == true, but we must treat it as a single leaf, not
         // recurse through it into apps_dir.
         if path.is_symlink() {
-            let target = fs::read_link(&path)?;
+            let target = read_link(&path)?;
             if points_through_current(apps_dir, &target) {
                 let name = entry.file_name();
                 let name = name.to_str().ok_or_else(|| ApplyError::SymlinkFailed {
@@ -803,7 +883,7 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_managed_symlinks_names_path_when_a_directory_occupies_a_leaf() -> Result<()> {
+    fn reconcile_managed_symlinks_indicates_path_when_a_directory_occupies_a_leaf() -> Result<()> {
         let apps = TempDir::new("apps");
         let units = TempDir::new("units");
         let name = "nginx.service";
@@ -811,7 +891,7 @@ mod tests {
         let desired = BTreeMap::from([(name.to_string(), target)]);
 
         // A directory sits where a managed unit symlink should go. We can't
-        // `remove_file` a directory; the error must name the path so the
+        // `remove_file` a directory; the error must indicate the path so the
         // operator can find and clear the obstruction.
         let link_path = units.path().join(name);
         fs::create_dir(&link_path)?;
@@ -819,7 +899,7 @@ mod tests {
         let err = reconcile_managed_symlinks(&desired, apps.path(), units.path()).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("cannot remove") && msg.contains(&link_path.display().to_string()),
+            msg.contains("failed to remove") && msg.contains(&link_path.display().to_string()),
             "error says removal of the path failed, not symlink creation: {err}",
         );
         Ok(())
@@ -1286,7 +1366,58 @@ mod tests {
         let msg = err.to_string();
         assert!(
             msg.contains(&link.display().to_string()) && msg.contains("a directory already exists"),
-            "error names the occupied path and says it is a directory: {err}",
+            "error indicates the occupied path and that it is a directory: {err}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_error_indicates_the_symlink_being_created() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let apps = TempDir::new("apps");
+        let link = dir.path().join("tools.conf");
+        let source = apps.path().join("tools/current/tools.conf");
+        fs::create_dir_all(source.parent().expect("source has a parent"))?;
+        fs::write(&source, b"data")?;
+        // A dangling symlink occupies the link path. Classifying what it
+        // resolves to fails, and the operator must see for which symlink.
+        unix_fs::symlink(dir.path().join("missing"), &link)?;
+
+        let changes = SymlinkChanges {
+            create: vec![(link.clone(), source)],
+            remove: Vec::new(),
+            change: Vec::new(),
+        };
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
+        let msg = err.to_string();
+        let expected = format!("failed to create symlink at {}", link.display());
+        assert!(
+            msg.contains(&expected) && msg.contains("failed to inspect"),
+            "error indicates the symlink and the failing operation: {msg}",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_removal_of_a_directory_indicates_the_path() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let apps = TempDir::new("apps");
+        // The previous manifest had a symlink here, but a real directory
+        // occupies the path now. Removal fails; the error must indicate the
+        // path so the operator can find the obstruction.
+        let stray = dir.path().join("managed.conf");
+        fs::create_dir(&stray)?;
+
+        let changes = SymlinkChanges {
+            create: Vec::new(),
+            remove: vec![stray.clone()],
+            change: Vec::new(),
+        };
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to remove") && msg.contains(&stray.display().to_string()),
+            "error indicates the path whose removal failed: {err}",
         );
         Ok(())
     }
