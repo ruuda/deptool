@@ -96,10 +96,6 @@ changes to `.wants` symlinks created by enabling units.
 
 ### Restart systemd units
 
-<!-- TODO(ruuda): `deptool reapply` runs `systemctl start` instead of
-`restart` in this phase, so it does not disrupt units that are already
-running. Work that into this section (or a note about reapply). -->
-
 For enabled systemd units that are part of an app that was changed in any way,
 start or restart those units with `systemctl restart`. (Restart starts units
 that were not already started.) This ensures that we never forget to pick up new
@@ -107,6 +103,12 @@ configuration, but it may have false positives: cases where we restart the
 service even when it was not needed. For example, when we created a new symlink
 that does not affect the service. Although some services support reloading their
 configuration, for simplicity we always restart.
+
+In case of a [reapply](cmd/deptool_reapply.md) rather than a
+[deploy](cmd/deptool_deploy.md), Deptool runs `systemctl start` rather than
+`restart`. Start merely starts units that are not already running, it does not
+restart running units. Restarting _all_ managed units across the _entire_
+cluster at the exact same time would be a very bad idea!
 
 ### Check systemd unit status
 
