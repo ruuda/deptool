@@ -61,6 +61,14 @@ Bugfixes:
    point through `current`, as those are the only symlinks Deptool creates.
  * Trigger `systemctl daemon-reload` after an app with systemd unit changes.
    Previously it was triggered only when units were enabled or disabled.
+ * Fix a bug where an existing symlink that points to the correct target
+   directory, caused deployment to fail with a vague _Is a directory_ error.
+   This could happen in particular when a rollback-unsafe deployment created the
+   symlink. A retry of that deployment would try to test if the contents of the
+   target path already matched the contents of the source path, but this failed
+   because the target path is a directory rather than a file. Now Deptool skips
+   symlinks that already point at the correct source, and it reports a clear
+   error when the target path is a directory.
 
 ## 1.0.0
 
