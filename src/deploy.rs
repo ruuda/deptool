@@ -23,7 +23,7 @@ use parking_lot::Mutex;
 use crate::error::{ApplyError, Error, Explanation, HostError, Result};
 use crate::plan::Plan;
 use crate::prim::Hostname;
-use crate::protocol::{self, Hello, Message, Request};
+use crate::protocol::{self, ApplyMode, Hello, Message, Request};
 use crate::setup::{BUILD_COMMIT, HostConnector};
 use crate::store::{RefUpdate, Store};
 use crate::sync;
@@ -334,12 +334,14 @@ pub fn try_connect(
 
 /// Connect to all hosts and lock them, in parallel.
 ///
-/// Each host connects and immediately locks without waiting for other
-/// hosts. Deadlock is not possible because agents use non-blocking
-/// try-locks (returning `LockBusy` immediately if held). Tries every
-/// host even if some fail, so the caller gets all stale info in one pass.
+/// `hosts` maps each host to the commit we expect it to be at, `None` for
+/// a host that was never deployed to. Each host connects and immediately
+/// locks without waiting for other hosts. Deadlock is not possible because
+/// agents use non-blocking try-locks (returning `LockBusy` immediately if
+/// held). Tries every host even if some fail, so the caller gets all stale
+/// info in one pass.
 pub fn connect_and_lock(
-    plan: &Plan,
+    hosts: &BTreeMap<Hostname, Option<Oid>>,
     operator: &str,
     connector: &dyn HostConnector,
     progress: &DeployProgress,
@@ -350,7 +352,7 @@ pub fn connect_and_lock(
     });
 
     std::thread::scope(|s| {
-        for (host, host_plan) in &plan.hosts {
+        for (host, expected_current) in hosts {
             let result = &result;
             s.spawn(move || {
                 let mut conn = match try_connect(host, connector, progress) {
@@ -358,7 +360,7 @@ pub fn connect_and_lock(
                     None => return,
                 };
                 let lock_request = Request::Lock {
-                    expected_current_commit: host_plan.expected_current,
+                    expected_current_commit: *expected_current,
                     operator: operator.to_string(),
                 };
                 let msg = match conn.send_request(&lock_request) {
@@ -436,9 +438,50 @@ fn push_and_apply_host(
     progress.update(host, HostState::Applying);
     conn.send_request(&Request::Apply {
         target_commit: plan.commit,
-        is_rollback_safe: plan.hosts[host].is_rollback_safe,
+        mode: ApplyMode::Deploy {
+            is_rollback_safe: plan.hosts[host].is_rollback_safe,
+        },
     })?;
     conn.close();
+    let applied_commit = match read_apply_messages(host, conn, progress)? {
+        ApplyOutcome::Applied(oid) => oid,
+        // The progress state already shows the rolled-back host.
+        ApplyOutcome::RolledBack => return Ok(()),
+    };
+    assert_eq!(
+        applied_commit, plan.commit,
+        "applied commit matches plan commit"
+    );
+
+    let store = Store::open(store_path)?;
+    store.set_ref(
+        &format!("refs/remotes/{host}"),
+        applied_commit,
+        RefUpdate::ApplyComplete,
+    )?;
+
+    progress.update(host, HostState::Done);
+    Ok(())
+}
+
+/// Outcome of a finished apply exchange with the agent.
+pub enum ApplyOutcome {
+    /// The agent applied this commit.
+    Applied(Oid),
+    /// The agent rolled back after a failed apply (deploy mode only;
+    /// reapply never rolls back).
+    RolledBack,
+}
+
+/// Read the agent's messages during an apply until it closes the stream.
+///
+/// Forwards unit status and sysusers output to the progress log, and turns
+/// the agent's failure messages into errors.
+pub fn read_apply_messages(
+    host: &Hostname,
+    conn: &mut Box<dyn Connection>,
+    progress: &DeployProgress,
+) -> std::result::Result<ApplyOutcome, HostError> {
     let mut applied_commit = None;
     while let Some(message) = conn.read_message()? {
         match &message {
@@ -450,7 +493,7 @@ fn push_and_apply_host(
             }
             Message::RolledBack { error } => {
                 progress.update(host, HostState::RolledBack(error.clone()));
-                return Ok(());
+                return Ok(ApplyOutcome::RolledBack);
             }
             Message::ApplyFailed(apply_error) => {
                 return Err(HostError::ApplyFailed(apply_error.clone()));
@@ -477,23 +520,12 @@ fn push_and_apply_host(
             _ => {}
         }
     }
-    let applied_commit = applied_commit.ok_or_else(|| {
-        HostError::ProtocolError("agent closed without ApplyComplete".to_string())
-    })?;
-    assert_eq!(
-        applied_commit, plan.commit,
-        "applied commit matches plan commit"
-    );
-
-    let store = Store::open(store_path)?;
-    store.set_ref(
-        &format!("refs/remotes/{host}"),
-        applied_commit,
-        RefUpdate::ApplyComplete,
-    )?;
-
-    progress.update(host, HostState::Done);
-    Ok(())
+    match applied_commit {
+        Some(oid) => Ok(ApplyOutcome::Applied(oid)),
+        None => Err(HostError::ProtocolError(
+            "agent closed without ApplyComplete".to_string(),
+        )),
+    }
 }
 
 /// Pre-compute deduplicated packfiles for all hosts in the plan.
@@ -532,7 +564,7 @@ pub fn run_deploy(
     connector: &dyn HostConnector,
     progress: &DeployProgress,
 ) -> Result<()> {
-    let mut lock_result = connect_and_lock(plan, operator, connector, progress);
+    let mut lock_result = connect_and_lock(&plan.expected_commits(), operator, connector, progress);
 
     if lock_result.locked.len() < plan.hosts.len() {
         // Fetch from stale hosts so the tracking refs converge with
@@ -944,6 +976,7 @@ mod tests {
                     build_commit: BUILD_COMMIT.to_string(),
                     hostname: "spinner".to_string(),
                     current_commit: None,
+                    target_commit: None,
                 })))
             }
             fn install(&self, _host: &Hostname) -> std::result::Result<(), HostError> {

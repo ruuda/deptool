@@ -45,10 +45,11 @@ pub enum CheckoutMode {
 /// re-checked out (it may be from an interrupted deploy). In `Reuse`
 /// mode, an existing directory is trusted and only the symlinks are updated.
 ///
-/// `previous` always points to whatever `current` pointed to before this
-/// call. After a normal deploy this is the last successful version. After
-/// a rollback this is the *failed* version (useful for debugging), not the
-/// previous successful one.
+/// `previous` points to whatever `current` pointed to before this call.
+/// After a normal deploy this is the last successful version. After a
+/// rollback this is the *failed* version (useful for debugging), not the
+/// previous successful one. When `current` already points at the target
+/// version (a reapply), both symlinks stay untouched.
 fn checkout_app(
     store: &Store,
     commit_oid: Oid,
@@ -75,6 +76,14 @@ fn checkout_app(
 
     let next = app_dir.join("next");
     let current = app_dir.join("current");
+
+    // When `current` already points at the target version (a reapply, or a
+    // deploy retried after a crash), skip the rotation below: it would point
+    // `previous` at the same version as `current`, and the next gc would
+    // then delete the real rollback target.
+    if fs::read_link(&current).ok().as_deref() == Some(Path::new(&prefix)) {
+        return Ok(());
+    }
 
     if next.symlink_metadata().is_ok() {
         remove_file(&next)?;
@@ -725,6 +734,36 @@ mod tests {
         assert_eq!(
             fs::read_link(nginx.join("previous"))?,
             Path::new(&oid_prefix(c1))
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn checkout_app_keeps_previous_when_current_already_at_target() -> Result<()> {
+        let t = ApplyTest::new();
+        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+
+        let nginx = t.apps.path().join("nginx");
+
+        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+
+        // Re-checkout of the version that is already current (a reapply).
+        // Rotating here would point `previous` at the same version as
+        // `current`, and the next gc would then delete the real rollback
+        // target c1.
+        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+
+        assert_eq!(
+            fs::read_link(nginx.join("current"))?,
+            Path::new(&oid_prefix(c2))
+        );
+        assert_eq!(
+            fs::read_link(nginx.join("previous"))?,
+            Path::new(&oid_prefix(c1)),
+            "previous still points at the last distinct version",
         );
 
         Ok(())

@@ -7,7 +7,7 @@
 
 //! Deptool: a declarative deployment tool.
 //!
-//! Operator-side modules: [`plan`], [`deploy`], [`sync`], [`ping`], [`display`], [`setup`].
+//! Operator-side modules: [`plan`], [`deploy`], [`reapply`], [`sync`], [`ping`], [`display`], [`setup`].
 //! Agent-side modules: [`agent`], [`checkout`], [`log`].
 //! Shared: [`store`], [`protocol`], [`error`], [`prim`].
 
@@ -21,6 +21,7 @@ pub mod ping;
 pub mod plan;
 pub mod prim;
 pub mod protocol;
+pub mod reapply;
 pub mod setup;
 pub mod status;
 pub mod store;

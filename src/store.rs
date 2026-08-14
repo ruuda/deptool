@@ -113,14 +113,22 @@ impl Store {
 
     /// Read the host-local `refs/heads/current` commit, if it exists.
     pub fn current_commit(&self) -> Option<Oid> {
-        self.repo
-            .find_reference("refs/heads/current")
-            .ok()
-            .map(|r| {
-                r.peel_to_commit()
-                    .expect("current ref points to a commit")
-                    .id()
-            })
+        self.ref_commit("refs/heads/current")
+    }
+
+    /// Read the host-local `refs/heads/target` commit, if it exists.
+    ///
+    /// Diverges from `current` when an apply started but did not complete.
+    pub fn target_commit(&self) -> Option<Oid> {
+        self.ref_commit("refs/heads/target")
+    }
+
+    fn ref_commit(&self, refname: &str) -> Option<Oid> {
+        self.repo.find_reference(refname).ok().map(|r| {
+            r.peel_to_commit()
+                .expect("deptool refs point to commits")
+                .id()
+        })
     }
 
     /// Get the tree for a commit.

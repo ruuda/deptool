@@ -58,6 +58,25 @@ enum Cmd {
         #[bpaf(positional("DIR"))]
         dir: Option<PathBuf>,
     },
+    /// Re-apply the deployed configuration on each host to repair drift.
+    #[bpaf(command)]
+    Reapply {
+        /// Apply without prompting for confirmation.
+        #[bpaf(
+            long("no-confirm"),
+            flag(ConfirmMode::ApplyWithoutPrompt, ConfirmMode::Prompt)
+        )]
+        confirm_mode: ConfirmMode,
+        /// Restrict to the listed hosts (comma-separated, repeatable).
+        #[bpaf(long("limit"), argument("HOSTS"), many)]
+        limit: Vec<String>,
+        #[bpaf(long("local"), flag(ConnectMode::Local, ConnectMode::Remote), hide)]
+        connect_mode: ConnectMode,
+        /// Directory containing the config tree. Defaults to the previously
+        /// used one.
+        #[bpaf(positional("DIR"))]
+        dir: Option<PathBuf>,
+    },
     /// Refresh tracking refs by connecting to hosts.
     #[bpaf(command)]
     Sync {
@@ -312,26 +331,44 @@ fn run_deploy(
         ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
         ConfirmMode::Prompt => display::confirm(&repo, &plan, cluster_name(&dir), color)?,
     };
-    if let display::Decision::Abort = decision {
+    if decision == display::Decision::Abort {
         return Ok(());
     }
 
     let connector = make_connector(mode)?;
-
-    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
-    let hostname = prim::read_hostname();
-    let operator = format!("{user}@{hostname}");
 
     let hosts: Vec<_> = plan.hosts.keys().cloned().collect();
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts, Box::new(observer));
 
     let start = Instant::now();
-    let result = deploy::run_deploy(&repo, &plan, &operator, &*connector, &progress);
+    let result = deploy::run_deploy(&repo, &plan, &operator_id(), &*connector, &progress);
     let elapsed = start.elapsed();
 
-    // Per-host status lines have room for one phrase. Print explanation
-    // blocks at the end for failure classes that need more space.
+    print_error_explanations(&progress);
+
+    if result.is_ok() {
+        display::print_success_summary(
+            &mut std::io::stdout(),
+            "Changes deployed",
+            plan.hosts.len(),
+            elapsed,
+        )?;
+    }
+
+    result
+}
+
+/// Identity of the operator running this command, e.g. "deckard@spinner".
+fn operator_id() -> String {
+    let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
+    let hostname = prim::read_hostname();
+    format!("{user}@{hostname}")
+}
+
+/// Per-host status lines have room for one phrase. Print explanation
+/// blocks at the end for failure classes that need more space.
+fn print_error_explanations(progress: &deploy::DeployProgress) {
     for (description, items) in progress.explain_errors() {
         eprintln!();
         eprintln!("{description}");
@@ -341,9 +378,46 @@ fn run_deploy(
         }
         eprintln!();
     }
+}
+
+fn run_reapply(
+    store: PathBuf,
+    dir: Option<PathBuf>,
+    confirm_mode: ConfirmMode,
+    connect_mode: ConnectMode,
+    filter: &HostFilter,
+) -> Result<()> {
+    let repo = Store::open(&store)?;
+    let dir = resolve_dir(&repo, dir)?;
+    let hosts = reapply::select_hosts_to_reapply(&repo, &dir, filter)?;
+    if hosts.is_empty() {
+        eprintln!("No hosts to reapply in cluster '{}'.", cluster_name(&dir));
+        return Ok(());
+    }
+
+    let color = display::UseColor::from_env();
+    display::print_reapply_plan(&mut std::io::stdout(), &hosts, color)?;
+
+    let decision = match confirm_mode {
+        ConfirmMode::ApplyWithoutPrompt => display::Decision::Apply,
+        ConfirmMode::Prompt => display::confirm_reapply(hosts.len(), cluster_name(&dir))?,
+    };
+    if decision == display::Decision::Abort {
+        return Ok(());
+    }
+
+    let connector = make_connector(connect_mode)?;
+    let observer = display::StatusPrinter::new(color);
+    let progress = deploy::DeployProgress::new(hosts.keys().cloned().collect(), Box::new(observer));
+
+    let start = Instant::now();
+    let result = reapply::run_reapply(&repo, &hosts, &operator_id(), &*connector, &progress);
+    let elapsed = start.elapsed();
+
+    print_error_explanations(&progress);
 
     if result.is_ok() {
-        display::print_success_summary(&mut std::io::stdout(), plan.hosts.len(), elapsed)?;
+        display::print_success_summary(&mut std::io::stdout(), "Reapplied", hosts.len(), elapsed)?;
     }
 
     result
@@ -461,6 +535,18 @@ fn run() -> Result<()> {
             mode,
             &HostFilter::from_limit(&limit),
         )?,
+        Cmd::Reapply {
+            confirm_mode,
+            limit,
+            connect_mode,
+            dir,
+        } => run_reapply(
+            store,
+            dir,
+            confirm_mode,
+            connect_mode,
+            &HostFilter::from_limit(&limit),
+        )?,
         Cmd::Sync {
             sync_mode,
             limit,
@@ -514,6 +600,7 @@ fn reconcile_failed(subject: &'static str) -> impl FnOnce(ApplyError) -> ApplyEr
 }
 
 fn activate(
+    mode: protocol::ApplyMode,
     desired: &plan::DesiredState,
     changes: &plan::SystemDiff<PathBuf>,
     emit: &mut dyn FnMut(protocol::Message),
@@ -638,10 +725,16 @@ fn activate(
     }
 
     // `restart` also starts a unit that was not running, so the newly enabled
-    // ones need no separate start.
+    // ones need no separate start. Reapply uses `start` instead: it must not
+    // disrupt units that are already running, and `start` is a no-op for
+    // those while still bringing up stopped ones.
+    let (verb, verb_ing) = match mode {
+        protocol::ApplyMode::Deploy { .. } => ("restart", "restarting"),
+        protocol::ApplyMode::Reapply => ("start", "starting"),
+    };
     for unit in &touched {
-        log(&format!("restarting {unit}"));
-        systemctl_ok(&["restart", unit]);
+        log(&format!("{verb_ing} {unit}"));
+        systemctl_ok(&[verb, unit]);
     }
 
     if touched.is_empty() {
@@ -720,18 +813,21 @@ fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession
         store,
         prim::Hostname(config.hostname.clone()),
         config.apps_dir.clone(),
-        Box::new(move |desired, changes, emit, log: &mut dyn FnMut(&str)| {
-            activate(
-                desired,
-                changes,
-                emit,
-                log,
-                &apps_dir,
-                &quadlets_dir,
-                &sysusers_dir,
-                &units_dir,
-            )
-        }),
+        Box::new(
+            move |mode, desired, changes, emit, log: &mut dyn FnMut(&str)| {
+                activate(
+                    mode,
+                    desired,
+                    changes,
+                    emit,
+                    log,
+                    &apps_dir,
+                    &quadlets_dir,
+                    &sysusers_dir,
+                    &units_dir,
+                )
+            },
+        ),
         Some(log_path),
     )
 }
@@ -750,12 +846,12 @@ fn run_agent(store: PathBuf) -> Result<()> {
 
     let store = Store::open_or_init(&store)?;
     let config = AgentConfig::from_env();
-    let current_commit = store.current_commit();
     let hello = protocol::Hello {
         version: protocol::VERSION.to_string(),
         build_commit: setup::BUILD_COMMIT.to_string(),
         hostname: config.hostname.clone(),
-        current_commit,
+        current_commit: store.current_commit(),
+        target_commit: store.target_commit(),
     };
     let mut session = make_agent_session(store, &config);
     let stdin = std::io::stdin().lock();

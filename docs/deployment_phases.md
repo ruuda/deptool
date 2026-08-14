@@ -86,6 +86,10 @@ changes to `.wants` symlinks created by enabling units.
 
 ### Restart systemd units
 
+<!-- TODO(ruuda): `deptool reapply` runs `systemctl start` instead of
+`restart` in this phase, so it does not disrupt units that are already
+running. Work that into this section (or a note about reapply). -->
+
 For enabled systemd units that are part of an app that was changed in any way,
 start or restart those units with `systemctl restart`. (Restart starts units
 that were not already started.) This ensures that we never forget to pick up new

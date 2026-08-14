@@ -21,6 +21,13 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+ <!-- TODO(ruuda): Announce `deptool reapply`: converge hosts on their
+ deployed commit to repair drift (re-materialize checkouts, re-enable and
+ start manifest-enabled units without restarting running ones). It refuses
+ to run when a config host has no tracking ref (run sync first) or has a
+ incomplete deploy (target ref diverged from current). Also note the
+ checkout fix: re-applying the version that is already current no longer
+ rotates `previous`, which used to let gc delete the rollback target. -->
 
 Improvements:
 

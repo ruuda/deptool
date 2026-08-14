@@ -24,6 +24,9 @@ Additional commands:
  <dt><a href="../deptool_ping/"><strong>ping</strong></a></dt>
  <dd>Measure round-trip latency to each host.</dd>
 
+ <dt><a href="../deptool_reapply/"><strong>reapply</strong></a></dt>
+ <dd>Re-apply the deployed configuration to repair drift.</dd>
+
  <dt><a href="../deptool_sync/"><strong>sync</strong></a></dt>
  <dd>Fetch the latest cluster state.</dd>
 

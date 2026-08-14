@@ -153,6 +153,16 @@ pub struct Plan {
     pub commit: Oid,
 }
 
+impl Plan {
+    /// The commit each host is expected to be at before this plan applies.
+    pub fn expected_commits(&self) -> BTreeMap<Hostname, Option<Oid>> {
+        self.hosts
+            .iter()
+            .map(|(host, host_plan)| (host.clone(), host_plan.expected_current))
+            .collect()
+    }
+}
+
 /// A plan that has not yet been committed to the store.
 ///
 /// Carries everything `finalize` needs to create the commit: the host data,

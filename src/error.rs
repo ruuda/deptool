@@ -166,6 +166,10 @@ pub enum HostError {
     /// command chain failed before `sha256sum` ran (sudo denied, disk full,
     /// connection dropped). Carries the remote stderr for diagnosis.
     SetupNoChecksum { stderr: String },
+    /// The host's target ref diverged from its current ref: an earlier
+    /// deploy started but did not complete. Reapplying `current` could
+    /// revert changes that deploy already made, so reapply refuses the host.
+    IncompleteDeploy,
     /// Unexpected or malformed message from the agent session.
     ProtocolError(String),
     /// A store operation failed.
@@ -298,6 +302,9 @@ impl fmt::Display for HostError {
             HostError::SetupNoChecksum { .. } => {
                 f.write_str("install incomplete: no checksum from host")
             }
+            HostError::IncompleteDeploy => {
+                f.write_str("an earlier deploy did not complete, run 'deptool deploy' first")
+            }
             HostError::ProtocolError(msg) => write!(f, "protocol error: {msg}"),
             HostError::Store(msg) => write!(f, "{msg}"),
             HostError::PreApply(err) => write!(f, "{err}"),
@@ -320,7 +327,12 @@ pub enum Error {
     NoDefaultCluster,
     /// Hostnames passed via --limit don't appear in the cluster.
     UnknownHosts(Vec<Hostname>),
-    /// One or more hosts failed during a deploy.
+    /// The store has no tracking ref for a host in the config tree.
+    /// Reapply needs the deployed commit, and another operator may have
+    /// deployed to these hosts, so the fix is `deptool sync`, not
+    /// assuming they are fresh.
+    UnsyncedHosts(Vec<Hostname>),
+    /// One or more hosts failed during a deploy or reapply.
     DeployFailed(String),
 }
 
@@ -375,6 +387,15 @@ impl fmt::Display for Error {
             Error::UnknownHosts(hosts) => {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(f, "unknown hosts in --limit: {}", names.join(", "))
+            }
+            Error::UnsyncedHosts(hosts) => {
+                let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
+                write!(
+                    f,
+                    "no known deployed state for hosts: {}; \
+                     run 'deptool sync' first",
+                    names.join(", "),
+                )
             }
             // TODO: Later we could also find the common ancestor `cc` between
             // what the host has (`current`) and what we try to deploy, and then
