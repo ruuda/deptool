@@ -60,11 +60,25 @@ Besides putting files on hosts, Deptool can manage daemon and runtime state,
 like enabling and starting systemd units. This is specified in an optional
 _manifest_. See the [manifests reference](manifests.md) for the full format.
 
-<!-- TODO(ruuda): Add a "networkd/" section (alphabetically first, here).
-Files in it are symlinked into /etc/systemd/network, and Deptool runs
-`networkctl reload` when the directory contents change. Caveats to mention:
-removing a .netdev file does not delete the existing virtual device, and
-.link files are applied by udevd on the next uevent, not by the reload. -->
+### networkd/
+
+This directory contains [systemd-networkd][networkd] configuration files such as
+[.network files][dotnetwork] and [.netdev files][dotnetdev]. For every file in
+this directory, Deptool will create a symlink in `/etc/systemd/network` that
+points to it. The symlink points through the app’s `current` symlink. When a
+deploy changes the contents of an app’s `networkd` directory, Deptool executes
+[`networkctl reload`][netreload].
+
+> **Note**<br>
+> Beware that removing a `.netdev` file does not delete an existing virtual
+> device even after a `networkctl reload`. The change will only be picked up
+> after a reboot. Also note that `.link` files are managed by systemd-udevd
+> rather than networkd.
+
+[networkd]:   https://www.freedesktop.org/software/systemd/man/latest/systemd-networkd.service.html
+[dotnetwork]: https://www.freedesktop.org/software/systemd/man/latest/systemd.network.html
+[dotnetdev]:  https://www.freedesktop.org/software/systemd/man/latest/systemd.netdev.html
+[netreload]:  https://www.freedesktop.org/software/systemd/man/latest/networkctl.html#reload
 
 ### quadlets/
 

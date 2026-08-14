@@ -21,14 +21,8 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
- <!-- TODO(ruuda): Document networkd config support (networkd/ app dir,
- symlinked into /etc/systemd/network, `networkctl reload` on change);
- caveats are listed in the directory_layout.md TODO. -->
- <!-- TODO(ruuda): Manifest symlink updates now run before all managed
- directory reconciles (and so render first in the plan), so that migrating
- a file from a manifest symlink into a managed directory does not delete
- the freshly created managed link. -->
-
+ * Add support for [systemd-networkd config](directory_layout.md#networkd).
+   Deptool executes `networkctl reload` after a managed networkd file changes.
  * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
    the currently deployed revision on every host in the cluster. This command
    should not be needed normally, but it helps to recover from manually created

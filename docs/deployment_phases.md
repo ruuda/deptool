@@ -45,21 +45,13 @@ named after the commit we are deploying. Then point the app’s `current` symlin
 to it, and point `previous` at what `current` used to point to. This ensures
 configuration files change atomically per app.
 
-<!-- TODO(ruuda): Manifest symlink updates now run first, before all managed
-directory reconciles: removing a legacy manifest symlink from a managed
-directory after that directory's reconcile would delete the fresh managed
-link. Move the "Update symlinks" section accordingly and document the new
-"Update networkd configs" step that follows it: reconcile symlinks in
-/etc/systemd/network, then run `networkctl reload` if any networkd directory
-contents changed, and show `networkctl status` output (state, DNS, recent
-networkd journal lines) so the operator sees the effect. -->
+### Update networkd config
 
-### Update symlinks
-
-If there were changes to [symlinks defined in the manifest](manifests.md#symlinks),
-apply those to the filesystem. Symlinks point through the app’s `current`
-symlink, so this is only needed if symlinks change, not if the contents of the
-target change.
+Reconcile Deptool symlinks in `/etc/systemd/network` to match the current
+[networkd](directory_layout.md#networkd) files defined across the host’s apps.
+If the contents of any of the `networkd` directories changed, execute
+`networkctl reload`. Deptool forwards the output of `networkctl status` to the
+operator side, so the operator can see what the effect was.
 
 ### Update sysusers
 
@@ -67,7 +59,16 @@ Reconcile Deptool symlinks in `/etc/sysusers.d/` to match the current
 [sysusers](directory_layout.md#sysusers) defined across the host’s apps. If the
 contents of any of the `sysusers` directories changed, execute
 `systemd-sysusers` to ensure that users exist before the next step, so that
-systemd units can reference the users we just created.
+systemd units can reference the users we just created. Deptool forwards the
+output of `systemd-sysusers` to the operator side, so the operator can see what
+the effect was.
+
+### Update symlinks
+
+If there were changes to [symlinks defined in the manifest](manifests.md#symlinks),
+apply those to the filesystem. Symlinks point through the app’s `current`
+symlink, so this is only needed if symlinks change, not if the contents of the
+target change.
 
 ### Stop and disable systemd units
 
