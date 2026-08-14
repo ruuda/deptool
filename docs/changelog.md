@@ -24,9 +24,6 @@ New features:
 
 Improvements:
 
- <!-- TODO(ruuda): I/O errors during apply now include the operation and path
- (e.g. "failed to remove /etc/x: Is a directory") instead of only the bare OS
- message. -->
  * Do not depend on shell brace expansion when installing the agent to improve
    compatibility, and print stderr when agent installation fails to aid
    debugging.
@@ -39,12 +36,12 @@ Improvements:
  * It is now possible to remove all apps from a host by leaving the host’s
    directory empty in the config tree. Previously this required creating a
    placeholder file in the directory as a workaround.
+ * Deptool now reports IO errors that happen on the target host with more
+   context, in particular errors always include the path involved in the failed
+   operation.
 
 Bugfixes:
 
- <!-- TODO(ruuda): retrying a failed deploy no longer fails with a bare "Is a
- directory" error on manifest symlinks to directories; see
- journal/2026-08-14-symlink-eisdir.md. -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per
