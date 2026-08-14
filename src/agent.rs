@@ -32,6 +32,7 @@ use crate::store::{RefUpdate, Store};
 pub struct AgentConfig {
     pub hostname: String,
     pub apps_dir: PathBuf,
+    pub networkd_dir: PathBuf,
     pub quadlets_dir: PathBuf,
     pub sysusers_dir: PathBuf,
     pub units_dir: PathBuf,
@@ -43,6 +44,10 @@ impl AgentConfig {
         AgentConfig {
             hostname: test_override("DEPTOOL_HOSTNAME", &read_hostname()),
             apps_dir: PathBuf::from(test_override("DEPTOOL_APPS_DIR", "/var/lib/deptool/apps")),
+            networkd_dir: PathBuf::from(test_override(
+                "DEPTOOL_NETWORKD_DIR",
+                "/etc/systemd/network",
+            )),
             quadlets_dir: PathBuf::from(test_override(
                 "DEPTOOL_QUADLETS_DIR",
                 "/etc/containers/systemd",
@@ -410,6 +415,24 @@ impl AgentSession {
         Ok((app_diffs, system_diff))
     }
 
+    /// Collect the desired managed-symlink state for a commit's config.
+    fn desired_state(&self, commit_oid: Oid) -> Result<DesiredState, ApplyError> {
+        Ok(DesiredState {
+            networkd: self
+                .store
+                .desired_networkd(commit_oid, &self.hostname, &self.apps_dir)?,
+            quadlets: self
+                .store
+                .desired_quadlets(commit_oid, &self.hostname, &self.apps_dir)?,
+            sysusers: self
+                .store
+                .desired_sysusers(commit_oid, &self.hostname, &self.apps_dir)?,
+            units: self
+                .store
+                .desired_units(commit_oid, &self.hostname, &self.apps_dir)?,
+        })
+    }
+
     /// Modification phase. Rollback-safe activation failures trigger a
     /// rollback inline; other errors flow out via `Err`.
     fn apply_modification(
@@ -429,21 +452,7 @@ impl AgentSession {
             |msg| self.log(msg),
         )?;
 
-        let desired = DesiredState {
-            quadlets: self.store.desired_quadlets(
-                ctx.target_commit,
-                &self.hostname,
-                &self.apps_dir,
-            )?,
-            sysusers: self.store.desired_sysusers(
-                ctx.target_commit,
-                &self.hostname,
-                &self.apps_dir,
-            )?,
-            units: self
-                .store
-                .desired_units(ctx.target_commit, &self.hostname, &self.apps_dir)?,
-        };
+        let desired = self.desired_state(ctx.target_commit)?;
 
         // Only a deploy rolls back, and only when the diff is safe to
         // revert. Reapply is itself the recovery path, and the failure is
@@ -553,17 +562,7 @@ impl AgentSession {
         )?;
 
         let desired = match ctx.current_commit {
-            Some(oid) => DesiredState {
-                quadlets: self
-                    .store
-                    .desired_quadlets(oid, &self.hostname, &self.apps_dir)?,
-                sysusers: self
-                    .store
-                    .desired_sysusers(oid, &self.hostname, &self.apps_dir)?,
-                units: self
-                    .store
-                    .desired_units(oid, &self.hostname, &self.apps_dir)?,
-            },
+            Some(oid) => self.desired_state(oid)?,
             None => DesiredState::default(),
         };
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));

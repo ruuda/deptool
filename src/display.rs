@@ -148,8 +148,9 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
-            write_subdir_actions(out, &app_plan.system.quadlets, "quadlet", color)?;
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
+            write_subdir_actions(out, &app_plan.system.networkd, "networkd config", color)?;
+            write_subdir_actions(out, &app_plan.system.quadlets, "quadlet", color)?;
             write_subdir_actions(out, &app_plan.system.sysusers, "sysuser", color)?;
             write_unit_actions(
                 out,
@@ -959,6 +960,50 @@ web1
     remove myapp
         - sysusers/myapp.conf
         unlink sysuser myapp.conf
+
+",
+        );
+        Ok(())
+    }
+
+    /// The plan renders subject actions in the order activation executes
+    /// them, so the operator can predict execution. In particular a file
+    /// migrating from a manifest symlink into networkd/ must show the
+    /// unlink before the link: activation removes the legacy manifest
+    /// symlink before the managed reconcile claims the same path.
+    #[test]
+    fn plan_renders_subject_actions_in_activation_order() -> Result<()> {
+        let t = TestRepo::new();
+        let manifest = br#"{"symlinks": {"/etc/systemd/network/wg0.netdev": "wg0.netdev"}}"#;
+        let c1 = t.commit(&[
+            ("web1/wg/manifest.json", manifest),
+            ("web1/wg/wg0.netdev", b"[NetDev]"),
+        ]);
+        let c2 = t.commit(&[
+            ("web1/wg/networkd/wg0.netdev", b"[NetDev]"),
+            ("web1/wg/quadlets/wg.container", b"[Container]"),
+            ("web1/wg/sysusers/wg.conf", b"u wg -"),
+            ("web1/wg/systemd/wg.service", b"[Service]"),
+        ]);
+        let old_tree = app_tree_oid(&t.store.repo, c1, "web1", "wg");
+        let new_tree = app_tree_oid(&t.store.repo, c2, "web1", "wg");
+        let plan = t.plan_for(c2, "wg", AppDiff::Update { old_tree, new_tree })?;
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1 (rollback unavailable)
+    update wg
+        - manifest.json
+        + networkd/wg0.netdev
+        + quadlets/wg.container
+        + systemd/wg.service
+        + sysusers/wg.conf
+        - wg0.netdev
+        unlink /etc/systemd/network/wg0.netdev
+        link networkd config wg0.netdev
+        link quadlet wg.container
+        link sysuser wg.conf
+        link unit wg.service
 
 ",
         );

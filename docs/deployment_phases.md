@@ -45,12 +45,13 @@ named after the commit we are deploying. Then point the app’s `current` symlin
 to it, and point `previous` at what `current` used to point to. This ensures
 configuration files change atomically per app.
 
-### Update symlinks
+### Update networkd config
 
-If there were changes to [symlinks defined in the manifest](manifests.md#symlinks),
-apply those to the filesystem. Symlinks point through the app’s `current`
-symlink, so this is only needed if symlinks change, not if the contents of the
-target change.
+Reconcile Deptool symlinks in `/etc/systemd/network` to match the current
+[networkd](directory_layout.md#networkd) files defined across the host’s apps.
+If the contents of any of the `networkd` directories changed, execute
+`networkctl reload`. Deptool forwards the output of `networkctl status` to the
+operator side, so the operator can see what the effect was.
 
 ### Update sysusers
 
@@ -58,7 +59,16 @@ Reconcile Deptool symlinks in `/etc/sysusers.d/` to match the current
 [sysusers](directory_layout.md#sysusers) defined across the host’s apps. If the
 contents of any of the `sysusers` directories changed, execute
 `systemd-sysusers` to ensure that users exist before the next step, so that
-systemd units can reference the users we just created.
+systemd units can reference the users we just created. Deptool forwards the
+output of `systemd-sysusers` to the operator side, so the operator can see what
+the effect was.
+
+### Update symlinks
+
+If there were changes to [symlinks defined in the manifest](manifests.md#symlinks),
+apply those to the filesystem. Symlinks point through the app’s `current`
+symlink, so this is only needed if symlinks change, not if the contents of the
+target change.
 
 ### Stop and disable systemd units
 

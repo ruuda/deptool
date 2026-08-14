@@ -475,8 +475,8 @@ pub enum ApplyOutcome {
 
 /// Read the agent's messages during an apply until it closes the stream.
 ///
-/// Forwards unit status and sysusers output to the progress log, and turns
-/// the agent's failure messages into errors.
+/// Forwards unit status, networkd, and sysusers output to the progress log,
+/// and turns the agent's failure messages into errors.
 pub fn read_apply_messages(
     host: &Hostname,
     conn: &mut Box<dyn Connection>,
@@ -510,6 +510,9 @@ pub fn read_apply_messages(
             Message::SystemdUnitStatus { output } => {
                 let filtered = filter_systemd_status(output.trim_end());
                 progress.log_message(host, &filtered);
+            }
+            Message::NetworkdOutput { output } => {
+                progress.log_message(host, output.trim_end());
             }
             Message::SysusersOutput { output } => {
                 progress.log_message(host, output.trim_end());

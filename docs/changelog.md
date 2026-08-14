@@ -21,6 +21,8 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+ * Add support for [systemd-networkd config](directory_layout.md#networkd).
+   Deptool executes `networkctl reload` after a managed networkd file changes.
  * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
    the currently deployed revision on every host in the cluster. This command
    should not be needed normally, but it helps to recover from manually created

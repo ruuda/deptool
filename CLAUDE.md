@@ -99,6 +99,7 @@ Post-generation checklist (run after writing code, before presenting):
  - For each comment, identifier, and message: no animate verbs for inanimate subjects (name, tell, know, carry, want); use specifies, indicates, includes, records.
  - For each failure message: write "failed to <op>", not "cannot <op>" -- the attempt failed; impossibility is a claim the code usually cannot back.
  - For each user-visible change (new feature, new flag, new dir, new error, output format change): leave a `<!-- TODO(ruuda): ... -->` marker in `docs/changelog.md` under the unreleased section. The TODO marker is allowed without explicit permission; the prose is not.
+ - For each new managed mechanism or validation rule: deployed clusters hold states that predate it -- validation constrains the new config tree, never the already-deployed one. Trace the transition deploy from the legacy representation (which phases touch which paths, in what order) and write a migration test for it. Steady state is the easy case; the transition is where deploys eat data.
 
 ## Working with Git
 
