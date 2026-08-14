@@ -39,6 +39,9 @@ Improvements:
 
 Bugfixes:
 
+ <!-- TODO(ruuda): retrying a failed deploy no longer fails with a bare "Is a
+ directory" error on manifest symlinks to directories; see
+ journal/2026-08-14-symlink-eisdir.md. -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per

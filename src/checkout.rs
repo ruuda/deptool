@@ -348,6 +348,10 @@ pub fn reconcile_config_symlinks(apps_dir: &Path, changes: &SymlinkChanges<PathB
 
 /// Create a symlink at `link` pointing to `source`.
 ///
+/// A symlink that already points at `source` is left in place: a failed
+/// rollback-unsafe deploy leaves its symlinks behind, and the retry plans
+/// the same creates again.
+///
 /// If a file already exists at `link` with identical contents to `source`,
 /// it is replaced with the symlink. This supports incremental adoption:
 /// config files already present on the host can be moved under Deptool
@@ -357,17 +361,23 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
     match unix_fs::symlink(source, link) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            if files_match(source, link)? {
-                fs::remove_file(link)?;
-                unix_fs::symlink(source, link)?;
-                Ok(())
-            } else {
-                Err(ApplyError::SymlinkFailed {
+            match classify_link(source, link)? {
+                LinkState::PointsAtSource => Ok(()),
+                LinkState::MatchingFile => {
+                    fs::remove_file(link)?;
+                    unix_fs::symlink(source, link)?;
+                    Ok(())
+                }
+                LinkState::Directory => Err(ApplyError::SymlinkFailed {
+                    link: link_name,
+                    cause: "a directory already exists; remove it manually and retry".into(),
+                }),
+                LinkState::Mismatch => Err(ApplyError::SymlinkFailed {
                     link: link_name,
                     cause: "a file with different contents already exists; \
                             remove it manually and retry"
                         .into(),
-                })
+                }),
             }
         }
         Err(err) => {
@@ -388,25 +398,54 @@ fn create_symlink(source: &Path, link: &Path) -> Result<()> {
     }
 }
 
-/// Check whether two files have identical contents, without reading them
-/// entirely into memory.
-fn files_match(a: &Path, b: &Path) -> Result<bool> {
+/// What occupies the link path, relative to the symlink's source.
+///
+/// The caller derives error messages from this classification rather than
+/// from a second look at the filesystem, so a message cannot describe a
+/// different state than the one that was checked.
+enum LinkState {
+    /// A symlink that already points at the source.
+    PointsAtSource,
+    /// A regular file with contents identical to the source file.
+    MatchingFile,
+    /// A directory; there are no contents to compare.
+    Directory,
+    /// Anything else: contents differ, or a side is not a regular file.
+    Mismatch,
+}
+
+/// Classify what occupies the link path. Contents are compared without
+/// reading either file entirely into memory.
+fn classify_link(source: &Path, link: &Path) -> Result<LinkState> {
     use std::io::{BufReader, Read};
-    if fs::metadata(a)?.len() != fs::metadata(b)?.len() {
-        return Ok(false);
+    if let Ok(target) = fs::read_link(link)
+        && target == source
+    {
+        return Ok(LinkState::PointsAtSource);
     }
-    let mut a = BufReader::new(fs::File::open(a)?);
-    let mut b = BufReader::new(fs::File::open(b)?);
-    let mut buf_a = [0u8; 8192];
-    let mut buf_b = [0u8; 8192];
+    let source_meta = fs::metadata(source)?;
+    let link_meta = fs::metadata(link)?;
+    if link_meta.is_dir() {
+        return Ok(LinkState::Directory);
+    }
+    if !source_meta.is_file() || !link_meta.is_file() {
+        return Ok(LinkState::Mismatch);
+    }
+    if source_meta.len() != link_meta.len() {
+        return Ok(LinkState::Mismatch);
+    }
+    let mut source = BufReader::new(fs::File::open(source)?);
+    let mut link = BufReader::new(fs::File::open(link)?);
+    let mut buf_source = [0u8; 8192];
+    let mut buf_link = [0u8; 8192];
     loop {
-        let n = a.read(&mut buf_a)?;
-        b.read_exact(&mut buf_b[..n])?;
-        if buf_a[..n] != buf_b[..n] {
-            return Ok(false);
+        let n = source.read(&mut buf_source)?;
+        link.read_exact(&mut buf_link[..n])?;
+        if buf_source[..n] != buf_link[..n] {
+            return Ok(LinkState::Mismatch);
         }
         if n == 0 {
-            return Ok(true);
+            return Ok(LinkState::MatchingFile);
         }
     }
 }
@@ -1203,6 +1242,52 @@ mod tests {
             "error mentions the conflict: {err}",
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_create_of_existing_directory_symlink_is_a_noop() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let apps = TempDir::new("apps");
+        let link = dir.path().join("tools");
+        let source = apps.path().join("tools/current/tools");
+        fs::create_dir_all(&source)?;
+
+        // A rollback-unsafe deploy that fails after this step leaves the
+        // symlink behind, and the retry plans the same create again.
+        let changes = SymlinkChanges {
+            create: vec![(link.clone(), source.clone())],
+            remove: Vec::new(),
+            change: Vec::new(),
+        };
+        reconcile_config_symlinks(apps.path(), &changes)?;
+        reconcile_config_symlinks(apps.path(), &changes)?;
+
+        assert_eq!(fs::read_link(&link)?, source);
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_symlinks_refuses_to_adopt_a_directory() -> Result<()> {
+        let dir = TempDir::new("symlinks");
+        let apps = TempDir::new("apps");
+        let link = dir.path().join("tools");
+        let source = apps.path().join("tools/current/tools");
+        // A real directory occupies the link path; adoption cannot apply.
+        fs::create_dir_all(&link)?;
+        fs::create_dir_all(&source)?;
+
+        let changes = SymlinkChanges {
+            create: vec![(link.clone(), source)],
+            remove: Vec::new(),
+            change: Vec::new(),
+        };
+        let err = reconcile_config_symlinks(apps.path(), &changes).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&link.display().to_string()) && msg.contains("a directory already exists"),
+            "error names the occupied path and says it is a directory: {err}",
+        );
         Ok(())
     }
 
