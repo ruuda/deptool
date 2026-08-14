@@ -619,10 +619,14 @@ impl Activate for SystemdActivator {
         log: &mut dyn FnMut(&str),
     ) -> std::result::Result<(), ApplyError> {
         // The activation phases below run in alphabetical order by subject
-        // (networkd, quadlets, symlinks, sysusers, units). The only
-        // constraints are:
-        //   * manifest symlinks must run before unit start (units may depend
-        //     on paths the symlinks provide);
+        // (networkd, quadlets, sysusers, units), except that manifest
+        // symlinks run first. The only constraints are:
+        //   * manifest symlinks must run before the managed-dir reconciles
+        //     (a legacy manifest symlink can occupy a managed path -- from
+        //     before validation rejected those targets -- and removing it
+        //     after that directory's reconcile would delete the fresh managed
+        //     link), and before unit start (units may depend on paths the
+        //     symlinks provide);
         //   * sysusers must be materialized before unit start (units may run
         //     as those users);
         //   * unit disable must run before unit reconcile (systemd treats our
@@ -632,6 +636,10 @@ impl Activate for SystemdActivator {
         //   * unit enable and disable must run before `daemon-reload`, which must
         //     run before unit restart.
         // All other orderings are free.
+
+        // Reconcile manifest symlinks (e.g. config files in /etc).
+        // TODO: log individual symlink changes.
+        checkout::reconcile_config_symlinks(&self.apps_dir, &changes.symlinks)?;
 
         // Reconcile networkd config symlinks and reload networkd to apply
         // them. Removing a .netdev file does not delete the existing virtual
@@ -687,10 +695,6 @@ impl Activate for SystemdActivator {
         // the quadlet generator over them.
         checkout::reconcile_managed_symlinks(&desired.quadlets, &self.apps_dir, &self.quadlets_dir)
             .map_err(reconcile_failed("quadlet symlinks"))?;
-
-        // Reconcile manifest symlinks (e.g. config files in /etc).
-        // TODO: log individual symlink changes.
-        checkout::reconcile_config_symlinks(&self.apps_dir, &changes.symlinks)?;
 
         // Reconcile sysusers symlinks and materialize users. On app removal
         // this wastefully runs sysusers after unlinking the config, but it's

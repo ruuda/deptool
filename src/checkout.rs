@@ -865,6 +865,25 @@ mod tests {
         Ok(())
     }
 
+    /// The target changes when a file moves between app subdirectories, e.g.
+    /// migrating a file into networkd/ when updating to a Deptool version
+    /// that manages that directory.
+    #[test]
+    fn reconcile_managed_symlinks_repoints_symlink_when_target_changes() -> Result<()> {
+        let apps = TempDir::new("apps");
+        let networkd_dir = TempDir::new("networkd");
+        let link = networkd_dir.path().join("wg0.netdev");
+        let old_target = apps.path().join("wg/current/wg0.netdev");
+        let new_target = apps.path().join("wg/current/networkd/wg0.netdev");
+        unix_fs::symlink(&old_target, &link)?;
+
+        let desired = BTreeMap::from([("wg0.netdev".to_string(), new_target.clone())]);
+        reconcile_managed_symlinks(&desired, apps.path(), networkd_dir.path())?;
+
+        assert_eq!(std::fs::read_link(&link)?, new_target);
+        Ok(())
+    }
+
     #[test]
     fn reconcile_managed_symlinks_removes_symlink_not_in_desired_set() -> Result<()> {
         let apps = TempDir::new("apps");
