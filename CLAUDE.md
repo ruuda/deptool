@@ -34,6 +34,8 @@
  - Tests must not call `sleep`, `Instant::now`, `SystemTime::now`, or perform real I/O -- even with zero durations, timing calls couple test speed and stability to the scheduler, and "fast" tests on a developer laptop become flaky on a slow CI box. When code measures time or does IO, push those calls up to the caller so tests can pass deterministic substitutes (or test the pure data-in/data-out layer separately).
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
+ - For user-facing text (errors, logs, plan display), draft the exact output first and agree on it before building the machinery that produces it. Reworking plumbing is cheap; reworking it three times because the message content was never settled is not.
+ - Before sweeping a mechanical pattern (error context, logging) across many call sites, apply it to one dense function and judge the aggregate readability there first.
  - For large tasks, run `git diff` at the end and review your own work. It is very unlikely that you got a perfect version on your very first iteration, usually there are substantial things to change.
  - Before presenting code to the user, run the post-generation checklist below and fix what you find. Do not skip this step. Do not say "the code looks good" without having run `git diff` and walked every checklist item. Walking the checklist means articulating *why* each item passes for this change. If your check is "looks fine", that's rubber-stamping; you haven't actually checked. The checklist exists because these items are easy to miss when reviewing your own work — running it as ritual defeats the purpose.
  - I will review your changes afterwards, so optimize for small reviewable diffs. Do not change comments or code without a good reason.
@@ -94,6 +96,8 @@ Post-generation checklist (run after writing code, before presenting):
  - For each change to the order or grouping of steps in `activate()` (merging phases, moving an action, changing what runs in which step): update `docs/deployment_phases.md`, which narrates the apply sequence and drifts silently otherwise. Leave a `TODO(ruuda)` marker rather than rewriting the prose.
  - For each doc comment or user-facing message: sweep for project names lowercase outside backticks (Podman, Git, Nix, Cargo, Linux, Deptool) AND for common nouns wrongly title-cased mid-sentence (quadlet, unit, service, app, host, deploy, manifest, commit, cluster). The rule applies to names introduced this session even if they are not in CLAUDE.md.
  - For each technical term in a doc comment or user-facing message: if a reader would need a glossary (subsumes, idempotent, monotonic, projection, total order, induced, dual), define it inline or rephrase in plain English.
+ - For each comment, identifier, and message: no animate verbs for inanimate subjects (name, tell, know, carry, want); use specifies, indicates, includes, records.
+ - For each failure message: write "failed to <op>", not "cannot <op>" -- the attempt failed; impossibility is a claim the code usually cannot back.
  - For each user-visible change (new feature, new flag, new dir, new error, output format change): leave a `<!-- TODO(ruuda): ... -->` marker in `docs/changelog.md` under the unreleased section. The TODO marker is allowed without explicit permission; the prose is not.
 
 ## Working with Git
