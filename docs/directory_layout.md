@@ -60,6 +60,12 @@ Besides putting files on hosts, Deptool can manage daemon and runtime state,
 like enabling and starting systemd units. This is specified in an optional
 _manifest_. See the [manifests reference](manifests.md) for the full format.
 
+<!-- TODO(ruuda): Add a "networkd/" section (alphabetically first, here).
+Files in it are symlinked into /etc/systemd/network, and Deptool runs
+`networkctl reload` when the directory contents change. Caveats to mention:
+removing a .netdev file does not delete the existing virtual device, and
+.link files are applied by udevd on the next uevent, not by the reload. -->
+
 ### quadlets/
 
 This directory contains [Podman quadlets][quadlet]. For every file in in this

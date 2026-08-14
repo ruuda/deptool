@@ -45,6 +45,12 @@ named after the commit we are deploying. Then point the app’s `current` symlin
 to it, and point `previous` at what `current` used to point to. This ensures
 configuration files change atomically per app.
 
+<!-- TODO(ruuda): Document the new "Update networkd configs" step. It runs
+first, before the quadlet and manifest symlink updates: reconcile symlinks in
+/etc/systemd/network, then run `networkctl reload` if any networkd directory
+contents changed, and show `networkctl status` output (state, DNS, recent
+networkd journal lines) so the operator sees the effect. -->
+
 ### Update symlinks
 
 If there were changes to [symlinks defined in the manifest](manifests.md#symlinks),

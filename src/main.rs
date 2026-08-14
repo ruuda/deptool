@@ -603,6 +603,7 @@ fn reconcile_failed(subject: &'static str) -> impl FnOnce(ApplyError) -> ApplyEr
 /// invokes systemctl.
 struct SystemdActivator {
     apps_dir: PathBuf,
+    networkd_dir: PathBuf,
     quadlets_dir: PathBuf,
     sysusers_dir: PathBuf,
     units_dir: PathBuf,
@@ -618,7 +619,8 @@ impl Activate for SystemdActivator {
         log: &mut dyn FnMut(&str),
     ) -> std::result::Result<(), ApplyError> {
         // The activation phases below run in alphabetical order by subject
-        // (quadlets, symlinks, sysusers, units). The only constraints are:
+        // (networkd, quadlets, symlinks, sysusers, units). The only
+        // constraints are:
         //   * manifest symlinks must run before unit start (units may depend
         //     on paths the symlinks provide);
         //   * sysusers must be materialized before unit start (units may run
@@ -630,6 +632,56 @@ impl Activate for SystemdActivator {
         //   * unit enable and disable must run before `daemon-reload`, which must
         //     run before unit restart.
         // All other orderings are free.
+
+        // Reconcile networkd config symlinks and reload networkd to apply
+        // them. Removing a .netdev file does not delete the existing virtual
+        // device; it remains until `networkctl delete` or reboot.
+        checkout::reconcile_managed_symlinks(&desired.networkd, &self.apps_dir, &self.networkd_dir)
+            .map_err(reconcile_failed("networkd config symlinks"))?;
+        if changes.networkd.content_changed {
+            log("running networkctl reload");
+            let result = std::process::Command::new("networkctl")
+                .arg("reload")
+                .output();
+            match result {
+                Ok(output) => {
+                    // Systemd tools log to stderr, not stdout.
+                    let text = String::from_utf8_lossy(&output.stderr);
+                    let trimmed = text.trim_end();
+                    if !trimmed.is_empty() {
+                        emit(protocol::Message::NetworkdOutput {
+                            output: format!("networkctl reload:\n{trimmed}"),
+                        });
+                    }
+                    if !output.status.success() {
+                        return Err(ApplyError::NetworkdReloadFailed);
+                    }
+                }
+                Err(err) => {
+                    emit(protocol::Message::NetworkdOutput {
+                        output: format!("networkctl reload: {err}"),
+                    });
+                    return Err(ApplyError::NetworkdReloadFailed);
+                }
+            }
+
+            // The reload itself prints nothing, so show its effect: overall
+            // state, addresses, DNS servers, and the recent networkd journal
+            // lines with timestamps. Force color: networkctl won't color
+            // because stdout is a pipe, but the output is forwarded to the
+            // operator's terminal.
+            let output = match std::process::Command::new("networkctl")
+                .args(["status", "--lines=5"])
+                .env("SYSTEMD_COLORS", "true")
+                .output()
+            {
+                Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+                Err(err) => format!("failed to run networkctl status: {err}"),
+            };
+            emit(protocol::Message::NetworkdOutput {
+                output: format!("networkctl status:\n{output}"),
+            });
+        }
 
         // Reconcile quadlet symlinks. `daemon-reload` further down re-runs
         // the quadlet generator over them.
@@ -810,6 +862,7 @@ fn systemctl_ok(args: &[&str]) -> bool {
 fn make_agent_session(store: Store, config: &AgentConfig) -> agent::AgentSession {
     let activator = SystemdActivator {
         apps_dir: config.apps_dir.clone(),
+        networkd_dir: config.networkd_dir.clone(),
         quadlets_dir: config.quadlets_dir.clone(),
         sysusers_dir: config.sysusers_dir.clone(),
         units_dir: config.units_dir.clone(),

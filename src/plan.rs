@@ -60,6 +60,8 @@ impl AppDiff {
 /// Per-app instances can be combined via `merge` into a host-level aggregate.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SystemDiff<T = String> {
+    /// Networkd config file changes.
+    pub networkd: SubdirChanges,
     /// Quadlet file changes.
     pub quadlets: SubdirChanges,
     /// Manifest symlink changes.
@@ -87,13 +89,15 @@ impl<T> SystemDiff<T> {
     /// fields, so the exhaustiveness guarantee holds at every level.
     pub fn is_rollback_safe(&self) -> bool {
         let SystemDiff {
+            networkd,
             quadlets,
             symlinks,
             sysusers,
             units,
             unit_actions,
         } = self;
-        quadlets.is_rollback_safe()
+        networkd.is_rollback_safe()
+            && quadlets.is_rollback_safe()
             && symlinks.is_rollback_safe()
             && sysusers.is_rollback_safe()
             && units.is_rollback_safe()
@@ -102,6 +106,7 @@ impl<T> SystemDiff<T> {
 
     /// Move all entries from `other` into `self`, leaving `other` empty.
     pub fn append(&mut self, other: &mut Self) {
+        self.networkd.append(&mut other.networkd);
         self.quadlets.append(&mut other.quadlets);
         self.symlinks.append(&mut other.symlinks);
         self.sysusers.append(&mut other.sysusers);
@@ -118,6 +123,7 @@ impl SystemDiff {
     pub fn resolve_symlinks(self, app: &str, apps_dir: &Path) -> SystemDiff<PathBuf> {
         let current_dir = apps_dir.join(app).join("current");
         SystemDiff {
+            networkd: self.networkd,
             quadlets: self.quadlets,
             symlinks: self.symlinks.map(PathBuf::from, |s| current_dir.join(s)),
             sysusers: self.sysusers,
@@ -178,10 +184,11 @@ pub struct DraftPlan {
 /// Changes to a managed subdirectory between two commits, derived from Git
 /// trees only.
 ///
-/// The `systemd/`, `sysusers/`, and `quadlets/` directories are each symlinked
-/// into a system location; this captures which files appeared, disappeared,
-/// and whether the directory's content changed at all. We don't query the live
-/// system -- changes come from comparing the previous and target trees.
+/// The `networkd/`, `quadlets/`, `sysusers/`, and `systemd/` directories are
+/// each symlinked into a system location; this captures which files appeared,
+/// disappeared, and whether the directory's content changed at all. We don't
+/// query the live system -- changes come from comparing the previous and
+/// target trees.
 #[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubdirChanges {
     /// Files newly provided by this app.
@@ -190,8 +197,9 @@ pub struct SubdirChanges {
     pub unlink: Vec<String>,
     /// True iff the subtree differs between old and new tree: a file added,
     /// removed, or edited. Triggers the directory's systemd tool
-    /// (`daemon-reload`, `systemd-sysusers`); subsumes link and unlink, since
-    /// any file added or removed also changes the subtree oid.
+    /// (`daemon-reload`, `systemd-sysusers`, `networkctl reload`); subsumes
+    /// link and unlink, since any file added or removed also changes the
+    /// subtree oid.
     pub content_changed: bool,
 }
 
@@ -262,9 +270,12 @@ impl UnitActions {
 /// Desired managed-symlink state for a host deploy.
 ///
 /// Maps filenames to absolute symlink target paths for each managed
-/// directory (systemd units, sysusers configs, and quadlets).
+/// directory (networkd configs, quadlets, sysusers configs, and systemd
+/// units).
 #[derive(Default)]
 pub struct DesiredState {
+    /// Networkd config files to symlink in the networkd directory.
+    pub networkd: BTreeMap<String, PathBuf>,
     /// Quadlet files to symlink in the quadlets directory.
     pub quadlets: BTreeMap<String, PathBuf>,
     /// Sysuser config files to symlink in the sysusers directory.
@@ -415,9 +426,9 @@ pub fn diff_apps(
     changes
 }
 
-/// Diff a managed subdirectory (units, sysusers, quadlets) between two app
-/// trees into the files added, the files removed, and whether its content
-/// changed at all.
+/// Diff a managed subdirectory (networkd, quadlets, sysusers, units) between
+/// two app trees into the files added, the files removed, and whether its
+/// content changed at all.
 fn subdir_changes(
     store: &Store,
     old: Oid,
@@ -446,6 +457,7 @@ pub fn compute_system_diff(
     let new = diff.new_tree();
 
     Ok(SystemDiff {
+        networkd: subdir_changes(store, old, new, "networkd")?,
         quadlets: subdir_changes(store, old, new, "quadlets")?,
         symlinks: diff_symlinks(
             &store.read_manifest(old)?.symlinks,
@@ -971,6 +983,32 @@ mod tests {
                     "web1/nginx/manifest.json",
                     br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
                 ),
+            ],
+            &[("web1/nginx/nginx.conf", b"v2")],
+        )?;
+        assert!(d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_unsafe_when_networkd_files_added() -> Result<()> {
+        let d = diff_update(
+            &[("web1/nginx/nginx.conf", b"v1")],
+            &[
+                ("web1/nginx/nginx.conf", b"v2"),
+                ("web1/nginx/networkd/10-lan.network", b"[Match]"),
+            ],
+        )?;
+        assert!(!d.is_rollback_safe());
+        Ok(())
+    }
+
+    #[test]
+    fn rollback_safe_when_networkd_files_removed() -> Result<()> {
+        let d = diff_update(
+            &[
+                ("web1/nginx/nginx.conf", b"v1"),
+                ("web1/nginx/networkd/10-lan.network", b"[Match]"),
             ],
             &[("web1/nginx/nginx.conf", b"v2")],
         )?;

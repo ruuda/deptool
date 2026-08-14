@@ -85,6 +85,8 @@ pub enum ApplyError {
     /// units queried, so the status of each unit could not be determined.
     /// Distinct from `SystemdActivationFailed`: we don't know what's active.
     SystemdStatusUnreadable { output: String },
+    /// `networkctl reload` failed to apply changed networkd configs.
+    NetworkdReloadFailed,
     /// systemd-sysusers failed to materialize declared system users.
     SysusersActivationFailed,
     /// A store operation failed during the apply phase.
@@ -120,6 +122,9 @@ impl fmt::Display for ApplyError {
             }
             ApplyError::SystemdStatusUnreadable { output } => {
                 write!(f, "unexpected systemctl is-active output: {output:?}")
+            }
+            ApplyError::NetworkdReloadFailed => {
+                write!(f, "networkctl failed to reload networkd configs")
             }
             ApplyError::SysusersActivationFailed => {
                 write!(f, "systemd-sysusers failed to create system users")

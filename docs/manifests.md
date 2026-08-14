@@ -34,6 +34,10 @@ checkout. Deptool creates symlinks at the specified paths, pointing through
 To prevent interference with systemd units and sysusers managed by Deptool,
 symlink targets in `/etc/systemd/system` and `/etc/sysusers.d` are not allowed.
 Use the [designated directories](directory_layout.md#apps) for those instead.
+<!-- TODO(ruuda): The validator also rejects targets in /etc/systemd/network
+(networkd configs) and /etc/containers/systemd (quadlets); update the
+paragraph above to list all four managed directories. -->
+
 
 ## Incremental adoption
 

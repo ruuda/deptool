@@ -434,6 +434,21 @@ impl Store {
         self.desired_subdir_symlinks(commit_oid, host, apps_dir, "quadlets")
     }
 
+    /// List all networkd config files in an app tree's `networkd/` directory.
+    pub fn app_networkd(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
+        self.subdir_entries(app_tree_oid, "networkd")
+    }
+
+    /// Collect desired networkd symlinks for a host.
+    pub fn desired_networkd(
+        &self,
+        commit_oid: Oid,
+        host: &Hostname,
+        apps_dir: &Path,
+    ) -> Result<BTreeMap<String, PathBuf>> {
+        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "networkd")
+    }
+
     /// Read the enabled units from an app's manifest as a set.
     pub fn enabled_units(&self, app_tree_oid: Oid) -> Result<BTreeSet<String>> {
         let manifest = self.read_manifest(app_tree_oid)?;
@@ -477,9 +492,11 @@ impl Store {
     fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
         let apps = self.get_host_apps(config_tree, host)?;
 
-        // Track quadlet, sysuser, unit, and symlink-target conflicts across
-        // apps. Subdir-based dedup checks run first (canonical order:
-        // quadlets, sysusers, units), then the manifest-symlink loop.
+        // Track networkd config, quadlet, sysuser, unit, and symlink-target
+        // conflicts across apps. Subdir-based dedup checks run first
+        // (canonical order: networkd, quadlets, sysusers, units), then the
+        // manifest-symlink loop.
+        let mut networkd_owners: BTreeMap<String, String> = BTreeMap::new();
         let mut quadlet_owners: BTreeMap<String, String> = BTreeMap::new();
         let mut symlink_owners: BTreeMap<String, String> = BTreeMap::new();
         let mut sysuser_owners: BTreeMap<String, String> = BTreeMap::new();
@@ -488,6 +505,15 @@ impl Store {
         for (app, app_tree_oid) in &apps {
             let manifest = self.read_manifest(*app_tree_oid)?;
             let app_tree = self.repo.find_tree(*app_tree_oid)?;
+
+            // Check for duplicate networkd config files across apps.
+            for name in self.app_networkd(*app_tree_oid)? {
+                if let Some(other) = networkd_owners.insert(name.clone(), app.clone()) {
+                    return Err(StoreError::InvalidConfig(format!(
+                        "networkd config {name} provided by both {other} and {app}",
+                    )));
+                }
+            }
 
             // Check for duplicate quadlet files across apps.
             for name in self.app_quadlets(*app_tree_oid)? {
@@ -528,6 +554,7 @@ impl Store {
                 // that isn't in its desired set -- it can't distinguish
                 // manifest symlinks from managed ones.
                 for managed_dir in [
+                    "/etc/systemd/network",
                     "/etc/containers/systemd",
                     "/etc/sysusers.d",
                     "/etc/systemd/system",
@@ -535,8 +562,8 @@ impl Store {
                     if target.starts_with(&format!("{managed_dir}/")) {
                         return Err(StoreError::InvalidConfig(format!(
                             "app {app} symlink targets {managed_dir}/ which is \
-                             managed automatically; use the quadlets/, sysusers/, \
-                             or systemd/ app directory instead",
+                             managed automatically; use the networkd/, quadlets/, \
+                             sysusers/, or systemd/ app directory instead",
                         )));
                     }
                 }
@@ -796,6 +823,21 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_duplicate_networkd_config_across_apps() {
+        let t = TestRepo::new();
+        let oid = t.commit(&[
+            ("host/app1/networkd/10-lan.network", b"[Match]"),
+            ("host/app2/networkd/10-lan.network", b"[Match]"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("10-lan.network"), "{msg}");
+    }
+
+    #[test]
     fn validate_rejects_duplicate_quadlet_across_apps() {
         let t = TestRepo::new();
         let oid = t.commit(&[
@@ -861,6 +903,23 @@ mod tests {
         ]);
 
         t.store.validate(t.get_commit_tree_oid(oid))
+    }
+
+    #[test]
+    fn validate_rejects_symlink_into_networkd_dir() {
+        let t = TestRepo::new();
+        let manifest =
+            br#"{"symlinks": {"/etc/systemd/network/10-lan.network": "10-lan.network"}}"#;
+        let oid = t.commit(&[
+            ("host/web/manifest.json", manifest),
+            ("host/web/10-lan.network", b"[Match]"),
+        ]);
+
+        let err = t.store.validate(t.get_commit_tree_oid(oid)).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("/etc/systemd/network/"), "{msg}");
     }
 
     #[test]

@@ -148,6 +148,7 @@ pub fn print_plan(out: &mut impl Write, store: &Store, plan: &Plan, color: UseCo
                     }
                 }
             }
+            write_subdir_actions(out, &app_plan.system.networkd, "networkd config", color)?;
             write_subdir_actions(out, &app_plan.system.quadlets, "quadlet", color)?;
             write_symlink_actions(out, &app_plan.system.symlinks, color)?;
             write_subdir_actions(out, &app_plan.system.sysusers, "sysuser", color)?;
@@ -959,6 +960,32 @@ web1
     remove myapp
         - sysusers/myapp.conf
         unlink sysuser myapp.conf
+
+",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn added_app_with_networkd_shows_link_networkd_config_before_quadlet() -> Result<()> {
+        let t = TestRepo::new();
+        let c1 = t.commit(&[
+            ("web1/myapp/networkd/10-lan.network", b"[Match]"),
+            ("web1/myapp/quadlets/myapp.container", b"[Container]"),
+        ]);
+        let new_tree = app_tree_oid(&t.store.repo, c1, "web1", "myapp");
+        let plan = t.plan_for(c1, "myapp", AppDiff::Add { new_tree })?;
+        // The networkd line renders before the quadlet line because
+        // activation reconciles networkd configs first.
+        assert_eq!(
+            render(&t.store, &plan)?,
+            "\
+web1 (rollback unavailable)
+    add myapp
+        + networkd/10-lan.network
+        + quadlets/myapp.container
+        link networkd config 10-lan.network
+        link quadlet myapp.container
 
 ",
         );

@@ -21,6 +21,10 @@ Unreleased.
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
+ <!-- TODO(ruuda): Document networkd config support (networkd/ app dir,
+ symlinked into /etc/systemd/network, `networkctl reload` on change);
+ caveats are listed in the directory_layout.md TODO. -->
+
  * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
    the currently deployed revision on every host in the cluster. This command
    should not be needed normally, but it helps to recover from manually created

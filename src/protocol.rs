@@ -95,6 +95,11 @@ pub enum Message {
     SystemdUnitStatus {
         output: String,
     },
+    /// Output of networkctl after updating networkd configs: reload errors
+    /// and the status summary showing the reload's effect.
+    NetworkdOutput {
+        output: String,
+    },
     /// Output of `systemd-sysusers` after materializing system users.
     SysusersOutput {
         output: String,
