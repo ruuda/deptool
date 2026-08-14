@@ -71,24 +71,42 @@ pub fn try_flock_exclusive(file: &File) -> std::io::Result<bool> {
     }
 }
 
-/// Callback for post-checkout mutations (symlinks, systemd lifecycle).
-type OnActivate = Box<
-    dyn Fn(
-            ApplyMode,
-            &DesiredState,
-            &SystemDiff<PathBuf>,
-            &mut dyn FnMut(Message),
-            &mut dyn FnMut(&str),
-        ) -> std::result::Result<(), ApplyError>
-        + Send
-        + Sync,
->;
+/// Post-checkout mutations (symlinks, systemd lifecycle).
+///
+/// The session invokes this after materializing the checkout, both for a
+/// forward apply and for a rollback.
+pub trait Activate: Send + Sync {
+    fn activate(
+        &self,
+        mode: ApplyMode,
+        desired: &DesiredState,
+        changes: &SystemDiff<PathBuf>,
+        emit: &mut dyn FnMut(Message),
+        log: &mut dyn FnMut(&str),
+    ) -> std::result::Result<(), ApplyError>;
+}
+
+/// `Activate` implementation that leaves the host untouched, for tests.
+struct NoopActivator;
+
+impl Activate for NoopActivator {
+    fn activate(
+        &self,
+        _: ApplyMode,
+        _: &DesiredState,
+        _: &SystemDiff<PathBuf>,
+        _: &mut dyn FnMut(Message),
+        _: &mut dyn FnMut(&str),
+    ) -> std::result::Result<(), ApplyError> {
+        Ok(())
+    }
+}
 
 pub struct AgentSession {
     pub store: Store,
     pub hostname: Hostname,
+    activator: Box<dyn Activate>,
     apps_dir: PathBuf,
-    on_activate: OnActivate,
     log: LogState,
     state: SessionState,
 }
@@ -121,8 +139,8 @@ impl AgentSession {
     pub fn new(
         store: Store,
         hostname: Hostname,
+        activator: Box<dyn Activate>,
         apps_dir: PathBuf,
-        on_activate: OnActivate,
         log_path: Option<PathBuf>,
     ) -> Self {
         let log = match log_path {
@@ -132,8 +150,8 @@ impl AgentSession {
         AgentSession {
             store,
             hostname,
+            activator,
             apps_dir,
-            on_activate,
             log,
             state: SessionState::Unlocked,
         }
@@ -142,12 +160,11 @@ impl AgentSession {
     /// Create a session for testing that does not touch systemd or symlinks.
     #[doc(hidden)]
     pub fn new_test(repo: git2::Repository, hostname: &str, apps_dir: &std::path::Path) -> Self {
-        let on_activate: OnActivate = Box::new(|_, _, _, _, _| Ok(()));
         AgentSession::new(
             Store { repo },
             hostname.into(),
+            Box::new(NoopActivator),
             apps_dir.to_path_buf(),
-            on_activate,
             None,
         )
     }
@@ -437,7 +454,10 @@ impl AgentSession {
         };
 
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
-        match (self.on_activate)(ctx.mode, &desired, &system_diff, emit_message, &mut log_fn) {
+        match self
+            .activator
+            .activate(ctx.mode, &desired, &system_diff, emit_message, &mut log_fn)
+        {
             Ok(()) => {}
             Err(err) if rollback_on_failure => {
                 self.log(format_args!("activation failed, rolling back: {err}"));
@@ -547,7 +567,8 @@ impl AgentSession {
             None => DesiredState::default(),
         };
         let mut log_fn = |msg: &str| self.log(format_args!("{msg}"));
-        (self.on_activate)(ctx.mode, &desired, &system_diff, emit_message, &mut log_fn)?;
+        self.activator
+            .activate(ctx.mode, &desired, &system_diff, emit_message, &mut log_fn)?;
 
         match ctx.current_commit {
             Some(good) => self.store.set_ref(
@@ -575,6 +596,8 @@ fn format_opt_oid(oid: Option<Oid>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::testutil::{TempDir, TestHost, commit_files};
 
@@ -661,25 +684,43 @@ mod tests {
         }
     }
 
-    /// Build an OnActivate that returns results from a list, one per call.
-    fn activate_sequence(results: Vec<std::result::Result<(), ApplyError>>) -> super::OnActivate {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        let calls = Arc::new(AtomicUsize::new(0));
-        Box::new(move |_, _, _, _, _| {
-            let i = calls.fetch_add(1, Ordering::SeqCst);
-            results
+    /// `Activate` stub that returns results from a list, one per call.
+    struct SequenceActivator {
+        results: Vec<std::result::Result<(), ApplyError>>,
+        n_calls: AtomicUsize,
+    }
+
+    impl SequenceActivator {
+        fn new(results: Vec<std::result::Result<(), ApplyError>>) -> Self {
+            SequenceActivator {
+                results,
+                n_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl Activate for SequenceActivator {
+        fn activate(
+            &self,
+            _: ApplyMode,
+            _: &DesiredState,
+            _: &SystemDiff<PathBuf>,
+            _: &mut dyn FnMut(Message),
+            _: &mut dyn FnMut(&str),
+        ) -> std::result::Result<(), ApplyError> {
+            let i = self.n_calls.fetch_add(1, Ordering::SeqCst);
+            self.results
                 .get(i)
                 .expect("unexpected extra activate call")
                 .clone()
-        })
+        }
     }
 
-    /// Create a TestHost with a custom activate callback.
+    /// Create a TestHost with `files` committed to its store.
     fn test_host(
         hostname: &str,
         files: &[(&str, &[u8])],
-        on_activate: super::OnActivate,
+        activator: SequenceActivator,
     ) -> (TestHost, Oid) {
         let store_dir = TempDir::new("store");
         let apps = TempDir::new("apps");
@@ -688,8 +729,8 @@ mod tests {
         let session = AgentSession::new(
             store,
             hostname.into(),
+            Box::new(activator),
             apps.path().to_path_buf(),
-            on_activate,
             None,
         );
         let host = TestHost::from_parts(session, store_dir, apps);
@@ -737,10 +778,9 @@ mod tests {
 
     #[test]
     fn rollback_on_activate_failure() {
-        let on_activate = activate_sequence(vec![Err(activation_failed()), Ok(())]);
-
         // Two commits: c1 is the good state, c2 is the broken deploy.
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
+        let activator = SequenceActivator::new(vec![Err(activation_failed()), Ok(())]);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
         let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
@@ -781,9 +821,8 @@ mod tests {
 
     #[test]
     fn no_rollback_when_not_rollback_safe() {
-        let on_activate: super::OnActivate = Box::new(|_, _, _, _, _| Err(activation_failed()));
-
         // Data with a newly enabled unit -- not rollback-safe.
+        let activator = SequenceActivator::new(vec![Err(activation_failed())]);
         let (mut host, c1) = test_host(
             "web1",
             &[
@@ -793,7 +832,7 @@ mod tests {
                     br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
                 ),
             ],
-            on_activate,
+            activator,
         );
         lock_and_push(&mut host, c1);
 
@@ -809,10 +848,9 @@ mod tests {
 
     #[test]
     fn rollback_to_empty_on_first_deploy_failure() {
-        let on_activate = activate_sequence(vec![Err(activation_failed()), Ok(())]);
-
         // First deploy: no current_commit.
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
+        let activator = SequenceActivator::new(vec![Err(activation_failed()), Ok(())]);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
         lock_and_push(&mut host, c1);
 
         let msgs = host.interact(Request::Apply {
@@ -839,12 +877,11 @@ mod tests {
 
     #[test]
     fn failed_rollback_reports_rollback_error_and_logs_original() {
-        let on_activate = activate_sequence(vec![
+        let activator = SequenceActivator::new(vec![
             Err(activation_failed()),
             Err(ApplyError::Store("rollback IO error".into())),
         ]);
-
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], on_activate);
+        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
         let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
@@ -946,8 +983,8 @@ mod tests {
         // deploy would roll back here, a failing reapply must not (a second
         // activate call would panic the sequence with "unexpected extra
         // activate call").
-        let on_activate = activate_sequence(vec![Err(activation_failed())]);
-        let (mut host, c1) = test_host("web1", &[("other/app/conf", b"v1")], on_activate);
+        let activator = SequenceActivator::new(vec![Err(activation_failed())]);
+        let (mut host, c1) = test_host("web1", &[("other/app/conf", b"v1")], activator);
         host.set_current(c1);
         host.session
             .store
