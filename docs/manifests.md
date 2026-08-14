@@ -38,7 +38,7 @@ the following directories are not allowed:
 |-------------|---------------------|
 | /etc/containers/systemd | Use [quadlets](directory_layout.md#quadlets) instead. |
 | /etc/systemd/network    | Use [networkd](directory_layout.md#networkd) instead. |
-| /etc/systemd/systemd    | Use [systemd](directory_layout.md#systemd) instead.   |
+| /etc/systemd/system     | Use [systemd](directory_layout.md#systemd) instead.   |
 | /etc/sysusers.d         | Use [sysusers](directory_layout.md#sysusers) instead. |
 
 ## Incremental adoption
