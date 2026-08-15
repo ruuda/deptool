@@ -133,6 +133,50 @@ fn deploy_without_dir_or_default_names_the_problem() {
 }
 
 #[test]
+fn deploy_with_missing_dir_fails_without_replacing_the_default() {
+    let env = LocalEnv::new("testhost");
+    let out = env.run(&["deploy", "--plan-only", env.config_dir()]);
+    assert!(out.status.success(), "deploy with an existing dir succeeds");
+
+    let out = env.run(&["deploy", "--plan-only", "no-such-dir"]);
+    assert!(!out.status.success(), "deploy with a missing dir fails");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no config tree directory at 'no-such-dir'"),
+        "error includes the missing path, got: {stderr}",
+    );
+
+    let out = env.run(&["deploy", "--plan-only"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "deploy without dir still uses the earlier default: {stderr}",
+    );
+}
+
+#[test]
+fn deploy_with_vanished_default_dir_error_includes_path_and_origin() {
+    let env = LocalEnv::new("testhost");
+    let gone = env.config.path().join("gone");
+    fs::create_dir(&gone).unwrap();
+    let out = env.run(&["deploy", "--plan-only", gone.to_str().unwrap()]);
+    assert!(out.status.success(), "deploy with an existing dir succeeds");
+
+    fs::remove_dir(&gone).unwrap();
+    let out = env.run(&["deploy", "--plan-only"]);
+    assert!(!out.status.success(), "deploy with a vanished default fails");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no config tree directory at '"),
+        "error includes the vanished path, got: {stderr}",
+    );
+    assert!(
+        stderr.contains("previously used"),
+        "error explains where the path came from, got: {stderr}",
+    );
+}
+
+#[test]
 fn deploy_without_store_points_to_init() {
     let config = TempDir::new("config");
     let output = Command::new(DEPTOOL)

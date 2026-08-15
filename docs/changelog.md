@@ -30,6 +30,9 @@ New features:
 
 Improvements:
 
+ <!-- TODO(ruuda): Passing a config tree directory that does not exist now
+ fails with an error that includes the path, instead of a bare io error, and
+ no longer records the bad path as the default for subsequent runs. -->
  * Do not depend on shell brace expansion when installing the agent to improve
    compatibility, and print stderr when agent installation fails to aid
    debugging.

@@ -18,6 +18,8 @@ store, as long as the hosts have no overlap.
 When you provide `<dir>` explicitly, Deptool saves it to the `config` file in
 the store. On a subsequent run, you can omit `<dir>`, and Deptool will use the
 last-used one.
+<!-- TODO(ruuda): A <dir> that does not exist is now rejected before it is
+saved as the default. -->
 
 ## Options
 

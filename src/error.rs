@@ -330,6 +330,10 @@ pub enum Error {
     Json(serde_json::Error),
     /// No config tree was passed and none is recorded in the store.
     NoDefaultCluster,
+    /// The config tree directory passed on the command line does not exist.
+    ClusterNotFound(PathBuf),
+    /// The recorded default config tree directory does not exist.
+    DefaultClusterNotFound(PathBuf),
     /// Hostnames passed via --limit don't appear in the cluster.
     UnknownHosts(Vec<Hostname>),
     /// The store has no tracking ref for a host in the config tree.
@@ -388,6 +392,16 @@ impl fmt::Display for Error {
             Error::NoDefaultCluster => write!(
                 f,
                 "no default cluster; pass a config tree directory to set one",
+            ),
+            // Not "does not exist": the path may exist but be a file.
+            Error::ClusterNotFound(dir) => {
+                write!(f, "no config tree directory at '{}'", dir.display())
+            }
+            Error::DefaultClusterNotFound(dir) => write!(
+                f,
+                "no config tree directory at '{}' (the previously used \
+                 directory); pass a config tree directory to replace it",
+                dir.display(),
             ),
             Error::UnknownHosts(hosts) => {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();

@@ -286,14 +286,22 @@ fn cluster_name(dir: &Path) -> &str {
 }
 
 /// Resolve the config tree directory, recording an explicit one as the default
-/// for subsequent runs.
+/// for subsequent runs. The directory must exist before it is recorded, so a
+/// mistyped path does not become the default that later runs fail on.
 fn resolve_dir(store: &Store, dir: Option<PathBuf>) -> Result<PathBuf> {
     match dir {
         Some(d) => {
+            if !d.is_dir() {
+                return Err(Error::ClusterNotFound(d));
+            }
             store.set_default_cluster(&d)?;
             Ok(d)
         }
-        None => store.get_default_cluster()?.ok_or(Error::NoDefaultCluster),
+        None => match store.get_default_cluster()? {
+            Some(d) if d.is_dir() => Ok(d),
+            Some(d) => Err(Error::DefaultClusterNotFound(d)),
+            None => Err(Error::NoDefaultCluster),
+        },
     }
 }
 
