@@ -305,6 +305,19 @@ fn resolve_dir(store: &Store, dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
+/// Report that no host in the plan has changes to apply. Under --limit only
+/// the selected hosts were checked, so the message must not claim more.
+fn print_up_to_date(dir: &Path, filter: &HostFilter) {
+    let hosts = match filter {
+        HostFilter::All => "hosts",
+        HostFilter::Only(..) => "selected hosts",
+    };
+    eprintln!(
+        "All {hosts} in cluster '{}' are up to date.",
+        cluster_name(dir)
+    );
+}
+
 fn run_deploy(
     store: PathBuf,
     dir: Option<PathBuf>,
@@ -320,10 +333,7 @@ fn run_deploy(
     let plan = match plan::make_plan(&repo, tree_oid, filter)? {
         Some(draft) => draft.finalize(&repo)?,
         None => {
-            eprintln!(
-                "All hosts in cluster '{}' are up to date.",
-                cluster_name(&dir)
-            );
+            print_up_to_date(&dir, filter);
             return Ok(());
         }
     };
@@ -510,10 +520,7 @@ fn run_diff(
             let plan = draft.finalize(&store)?;
             display::print_diff(&store, &plan, mode, display::UseColor::from_env())?;
         }
-        None => eprintln!(
-            "All hosts in cluster '{}' are up to date.",
-            cluster_name(&dir)
-        ),
+        None => print_up_to_date(&dir, filter),
     }
     Ok(())
 }

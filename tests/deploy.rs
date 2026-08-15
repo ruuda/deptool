@@ -219,6 +219,34 @@ fn deploy_locally() {
 }
 
 #[test]
+fn up_to_date_message_covers_only_the_selection_under_limit() {
+    let env = LocalEnv::new("testhost");
+    env.write_config("nginx/nginx.conf", b"v1");
+    let out = env.run(&["deploy", "--no-confirm", env.config_dir()]);
+    assert!(out.status.success(), "initial deploy succeeds");
+
+    let out = env.run(&["deploy", "--plan-only"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("All hosts in cluster"),
+        "without --limit the message covers the whole cluster, got: {stderr}",
+    );
+
+    // Give a second host pending changes. A --limit run that excludes it
+    // must not claim the whole cluster is up to date.
+    let other = env.config.path().join("otherhost/nginx");
+    fs::create_dir_all(&other).unwrap();
+    fs::write(other.join("nginx.conf"), b"v1").unwrap();
+
+    let out = env.run(&["deploy", "--plan-only", "--limit", "testhost"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("All selected hosts in cluster"),
+        "with --limit the message covers only the selection, got: {stderr}",
+    );
+}
+
+#[test]
 fn sync_then_deploy_avoids_staleness() {
     let env = LocalEnv::new("testhost");
 

@@ -48,6 +48,8 @@ Improvements:
  * Deptool now reports IO errors that happen on the target host with more
    context, in particular errors always include the path involved in the failed
    operation.
+ <!-- TODO(ruuda): With --limit, the up-to-date message from deploy and diff
+ reads "All selected hosts" instead of claiming the whole cluster. -->
 
 Bugfixes:
 
