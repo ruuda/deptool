@@ -164,7 +164,10 @@ fn deploy_with_vanished_default_dir_error_includes_path_and_origin() {
 
     fs::remove_dir(&gone).unwrap();
     let out = env.run(&["deploy", "--plan-only"]);
-    assert!(!out.status.success(), "deploy with a vanished default fails");
+    assert!(
+        !out.status.success(),
+        "deploy with a vanished default fails"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("no config tree directory at '"),
