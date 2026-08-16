@@ -47,6 +47,17 @@ Improvements:
  * Do not depend on shell brace expansion when installing the agent to improve
    compatibility, and print stderr when agent installation fails to aid
    debugging.
+ <!-- TODO(ruuda): The install-failure stderr is now captured at every step
+ of the session (probing, sending the binary, reading the checksum), not
+ only the missing-checksum case. Could fold into the bullet above. -->
+ <!-- TODO(ruuda): Agent lock errors now include the lock file path ("failed
+ to open lock file '<path>'", "failed to lock '<path>'") instead of a bare io
+ error. -->
+ <!-- TODO(ruuda): The systemd status report after a deploy now includes the
+ status command's stderr, so an unknown unit shows its reason ("Unit x could
+ not be found") instead of a blank block. -->
+
+
  * List which specific systemd units failed to become active, if any.
  * Improve the error message for when symlink reconcile fails to remove an
    existing path.

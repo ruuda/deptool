@@ -870,10 +870,19 @@ impl Activate for SystemdActivator {
             .env("SYSTEMD_COLORS", "true")
             .output()
         {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            // Unit status goes to stdout, but messages like "Unit x could
+            // not be found" go to stderr; include both so an unknown unit
+            // reports its reason instead of an empty block.
+            Ok(o) => format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr),
+            ),
             Err(err) => format!("failed to run systemctl status: {err}"),
         };
-        emit(protocol::Message::SystemdUnitStatus { output });
+        if !output.trim().is_empty() {
+            emit(protocol::Message::SystemdUnitStatus { output });
+        }
 
         if inactive.is_empty() {
             Ok(())
