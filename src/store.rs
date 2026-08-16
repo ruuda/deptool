@@ -93,22 +93,33 @@ impl Store {
         self.repo.path()
     }
 
-    /// The config tree directory recorded by the most recent deploy or sync.
-    pub fn get_default_cluster(&self) -> Result<Option<PathBuf>> {
+    /// Read a string from the repo's git config, `None` when unset.
+    fn get_config_string(&self, key: &str) -> Result<Option<String>> {
         let config = self.repo.config()?;
-        match config.get_string("deptool.cluster") {
-            Ok(s) => Ok(Some(PathBuf::from(s))),
+        match config.get_string(key) {
+            Ok(s) => Ok(Some(s)),
             Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
             Err(e) => Err(StoreError::Git(e)),
         }
     }
 
+    fn set_config_string(&self, key: &str, value: &str) -> Result<()> {
+        let mut config = self.repo.config()?;
+        config.set_str(key, value)?;
+        Ok(())
+    }
+
+    /// The config tree directory recorded by the most recent deploy or sync.
+    pub fn get_default_cluster(&self) -> Result<Option<PathBuf>> {
+        Ok(self
+            .get_config_string("deptool.cluster")?
+            .map(PathBuf::from))
+    }
+
     /// Remember `path` as the default config tree for subsequent runs.
     pub fn set_default_cluster(&self, path: &Path) -> Result<()> {
         let s = path.to_str().expect("cluster path is valid UTF-8");
-        let mut config = self.repo.config()?;
-        config.set_str("deptool.cluster", s)?;
-        Ok(())
+        self.set_config_string("deptool.cluster", s)
     }
 
     /// The hostname recorded by the most recent apply on this host.
@@ -116,19 +127,12 @@ impl Store {
     /// The lock check compares it against the current `/etc/hostname` to
     /// detect renames. `None` on hosts deployed before recording existed.
     pub fn get_deployed_hostname(&self) -> Result<Option<Hostname>> {
-        let config = self.repo.config()?;
-        match config.get_string("deptool.hostname") {
-            Ok(s) => Ok(Some(Hostname(s))),
-            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
-            Err(e) => Err(StoreError::Git(e)),
-        }
+        Ok(self.get_config_string("deptool.hostname")?.map(Hostname))
     }
 
     /// Record `hostname` as the name this host's state was deployed under.
     pub fn set_deployed_hostname(&self, hostname: &Hostname) -> Result<()> {
-        let mut config = self.repo.config()?;
-        config.set_str("deptool.hostname", &hostname.0)?;
-        Ok(())
+        self.set_config_string("deptool.hostname", &hostname.0)
     }
 
     /// Read the host-local `refs/heads/current` commit, if it exists.
