@@ -32,6 +32,7 @@ impl std::fmt::Display for HostState {
             HostState::Locked => f.write_str("locked"),
             HostState::Pushing => f.write_str("pushing"),
             HostState::Applying => f.write_str("applying"),
+            HostState::WaitingForUnits(units) => write!(f, "waiting for {}", units.join(", ")),
             HostState::RollingBack => f.write_str("rolling back"),
             HostState::Done => f.write_str("done"),
             HostState::UpToDate => f.write_str("up to date"),

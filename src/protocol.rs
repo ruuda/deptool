@@ -101,6 +101,11 @@ pub enum Message {
     LockHostnameChanged {
         deployed_as: Option<Hostname>,
     },
+    /// Units still starting or stopping after the first activation check, so
+    /// the driver can show the operator what the deploy is waiting on.
+    WaitingForUnits {
+        units: Vec<String>,
+    },
     /// Output of `systemctl status` for systemd units that were just changed.
     SystemdUnitStatus {
         output: String,

@@ -86,7 +86,14 @@ Bugfixes:
  zero. -->
  <!-- TODO(ruuda): A successful Type=oneshot unit (which ends up inactive) is
  no longer reported as failed and rolled back; activation now checks each
- unit's load state and result, and waits up to 10s for units still starting. -->
+ unit's load state and result rather than is-active. It also detects a crash
+ loop (via NRestarts) and a unit blocked by a failed dependency. -->
+ <!-- TODO(ruuda): Units are now restarted in parallel without blocking on each
+ other, so a unit slow to stop (e.g. draining connections) no longer holds up
+ the deploy; the status line shows "waiting for <units>" while it waits (up to
+ 10s after the last restart settles). -->
+ <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
+ rejected, instead of silently widening the command to every host. -->
  <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
  rejected, instead of silently widening the command to every host. -->
  <!-- TODO(ruuda): A symlink or special file in the config tree is now
