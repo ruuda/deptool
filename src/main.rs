@@ -592,8 +592,14 @@ fn run() -> Result<()> {
             run_diff(store, dir, mode, &HostFilter::from_limit(&limit)?)?
         }
         Cmd::Init { dir } => {
+            let store_existed = store.exists();
             let initialized = Store::open_or_init(&store)?;
-            eprintln!("Initialized store at '{}'.", store.display());
+            let store_verb = if store_existed {
+                "Using existing"
+            } else {
+                "Initialized"
+            };
+            eprintln!("{store_verb} store at '{}'.", store.display());
             if let Some(dir) = dir {
                 let already_existed = dir.exists();
                 std::fs::create_dir_all(&dir)?;

@@ -366,9 +366,9 @@ pub enum Error {
     /// A --limit was given but lists no hosts (an empty value or only commas).
     EmptyLimit,
     /// The store has no tracking ref for a host in the config tree.
-    /// Reapply needs the deployed commit, and another operator may have
-    /// deployed to these hosts, so the fix is `deptool sync`, not
-    /// assuming they are fresh.
+    /// Reapply needs the deployed commit: either the host is new and was
+    /// never deployed (fix with `deptool deploy`), or another operator
+    /// deployed to it from a different store (fix with `deptool sync`).
     UnsyncedHosts(Vec<Hostname>),
     /// One or more hosts failed during a deploy or reapply.
     DeployFailed(String),
@@ -446,8 +446,9 @@ impl fmt::Display for Error {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(
                     f,
-                    "no known deployed state for hosts: {}; \
-                     run 'deptool sync' first",
+                    "no deployed state recorded for hosts: {}; if they are new, \
+                     run 'deptool deploy'; if another operator already deployed \
+                     to them, run 'deptool sync'",
                     names.join(", "),
                 )
             }

@@ -73,6 +73,10 @@ Bugfixes:
  rejected with its path, instead of panicking (inside an app) or being
  silently dropped (at the host or app level, where it then planned as a
  removal). -->
+ <!-- TODO(ruuda): Corrected misleading messages: reapply on a never-deployed
+ host now suggests 'deptool deploy' (not only 'deptool sync', a dead end); and
+ re-running 'deptool init' on an existing store reports "Using existing"
+ instead of "Initialized". -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per
