@@ -18,6 +18,17 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
+<!-- TODO(ruuda): Deploys now refuse hosts whose deployed commit has no config
+entry for their hostname (the state a hostname change leaves behind), instead
+of looping on 'stale' forever. Reference the new 'Renaming a host' page. -->
+
+<!-- TODO(ruuda): The agent now records the hostname in the host store on every
+apply, and the lock check compares it against /etc/hostname. This makes rename
+detection exact (it also catches name swaps and reused names, which the
+tree-entry check missed); the error names the old hostname. Hosts deployed
+before this release use the tree-entry check until their next apply records
+the name. -->
+
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).

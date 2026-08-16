@@ -389,6 +389,9 @@ pub fn connect_and_lock(
                     Ok(Some(Message::LockBusy { held_by })) => {
                         progress.update(host, HostState::LockBusy(held_by));
                     }
+                    Ok(Some(Message::LockHostnameChanged { deployed_as })) => {
+                        progress.update(host, HostError::HostnameChanged { deployed_as });
+                    }
                     Ok(other) => {
                         progress.update(
                             host,
@@ -647,7 +650,8 @@ mod tests {
     use super::*;
     use crate::plan::{HostFilter, HostPlan};
     use crate::testutil::{
-        TempDir, TestHost, TestRepo, assert_dir_contents, test_connector, test_progress,
+        TempDir, TestHost, TestRepo, assert_dir_contents, config_with, test_connector,
+        test_progress,
     };
 
     /// Run a deploy through run_deploy using in-memory connections.
@@ -832,6 +836,47 @@ mod tests {
         let plan = make_plan(commit_v2, &[("web1", None)]);
         deploy_to(&driver, &[&target], &plan)?;
         assert_eq!(driver.get_host_tracking_ref("web1"), Some(commit_v2));
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_after_rename_reports_hostname_changed() -> Result<()> {
+        // Deploy to the host under its old name, then rename the machine.
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let web1 = TestHost::new("web1");
+        deploy_to(&driver, &[&web1], &make_plan(c1, &[("web1", None)]))?;
+        let web2 = web1.renamed("web2");
+
+        // The config tree moves the host dir to the new name too.
+        let config = config_with(&[("web2/app/conf", b"v1")]);
+        let tree_oid = driver.store.build_tree(config.path())?;
+        let plan = crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)?
+            .expect("plan has changes")
+            .finalize(&driver.store)?;
+
+        let progress = test_progress(&["web2"]);
+        let connector = test_connector(&[&web2]);
+        let result = run_deploy(
+            &driver.store,
+            &plan,
+            "deckard@spinner",
+            &connector,
+            &progress,
+        );
+
+        assert!(result.is_err(), "deploy after a rename aborts");
+        assert!(
+            matches!(
+                &*progress.state("web2"),
+                HostState::Failed(HostError::HostnameChanged { deployed_as })
+                    if *deployed_as == Some(Hostname::from("web1"))
+            ),
+            "the error identifies the hostname the state was deployed under",
+        );
+        // No tracking ref appears for the new name: the refusal happens
+        // before the stale-fetch path that would record one.
+        assert_eq!(driver.get_host_tracking_ref("web2"), None);
         Ok(())
     }
 

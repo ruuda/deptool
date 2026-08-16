@@ -259,6 +259,18 @@ impl TestHost {
         host
     }
 
+    /// Model a hostname change on the machine: same store and apps
+    /// directory, new hostname.
+    pub fn renamed(self, hostname: &str) -> TestHost {
+        let repo = Repository::open(self._store.path()).expect("repo is opened");
+        let session = AgentSession::new_test(repo, hostname, self.apps.path());
+        TestHost {
+            session,
+            _store: self._store,
+            apps: self.apps,
+        }
+    }
+
     /// Set the host-local `refs/heads/current` ref.
     pub fn set_current(&self, commit_oid: Oid) {
         self.session

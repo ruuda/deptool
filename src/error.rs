@@ -150,6 +150,14 @@ pub enum HostError {
     AgentNotInstalled { stderr: String },
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
+    /// The hostname the host's state was deployed under differs from its
+    /// current hostname: the host was renamed after the deploy.
+    HostnameChanged {
+        /// The hostname the host's state was deployed under. `None` when
+        /// the host predates hostname recording and the rename was
+        /// inferred from the current commit lacking an entry for the host.
+        deployed_as: Option<Hostname>,
+    },
     /// The installed binary doesn't match the expected checksum.
     SetupChecksumMismatch {
         expected_hash: String,
@@ -225,6 +233,19 @@ impl HostError {
                     .to_string(),
                 item: format!("  {host}: /etc/hostname contains {actual:?}"),
             }),
+            HostError::HostnameChanged { deployed_as } => Some(Explanation {
+                description: "The host's state was deployed under a different hostname, so the\n\
+                             changes a deploy would compute do not match what is actually on the\n\
+                             host. This happens when /etc/hostname changes after a deploy. If\n\
+                             the rename is intended, delete the store on the host and deploy\n\
+                             again; the host is then treated as a fresh install. See 'Renaming\n\
+                             a host' in the manual."
+                    .to_string(),
+                item: match deployed_as {
+                    Some(name) => format!("  {host}: deployed as '{name}'"),
+                    None => format!("  {host}: deployed under an unknown name"),
+                },
+            }),
             HostError::SetupNoChecksum { stderr } => Some(Explanation {
                 description: "The install command finished without reporting the uploaded binary's\n\
                              checksum, so the transfer could not be verified. Usually the remote\n\
@@ -296,6 +317,12 @@ impl fmt::Display for HostError {
                 )
             }
             HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
+            HostError::HostnameChanged {
+                deployed_as: Some(name),
+            } => write!(f, "encountered previous deployment as '{name}'"),
+            HostError::HostnameChanged { deployed_as: None } => {
+                f.write_str("encountered previous deployment as different host")
+            }
             HostError::SetupChecksumMismatch { .. } => f.write_str("binary checksum mismatch"),
             HostError::SetupMissingBinary { platform, .. } => write!(
                 f,
