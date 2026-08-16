@@ -91,6 +91,13 @@ pub enum Message {
         /// Who currently holds the lock, if known.
         held_by: Option<String>,
     },
+    /// The host's current commit has no config entry for its own hostname:
+    /// the state was recorded under a different name, e.g. the host was
+    /// renamed after the deploy. Deploys are refused in this state.
+    LockNoHostConfig {
+        #[serde(with = "crate::prim::ser::oid")]
+        current_commit: Oid,
+    },
     /// Output of `systemctl status` for systemd units that were just changed.
     SystemdUnitStatus {
         output: String,

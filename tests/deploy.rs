@@ -284,6 +284,50 @@ fn sync_then_deploy_avoids_staleness() {
     );
 }
 
+// The refusal itself is covered by unit tests in agent.rs and deploy.rs;
+// this exercises the documented recovery end to end through the real
+// binary: deleting the host's store unblocks the deploy.
+#[test]
+fn deleting_host_store_unblocks_deploy_after_hostname_change() {
+    let mut env = LocalEnv::new("web1");
+    env.write_config("nginx/nginx.conf", b"v1");
+    let out = env.run(&["deploy", "--no-confirm", env.config_dir()]);
+    assert!(out.status.success(), "initial deploy succeeds");
+
+    // The machine is renamed: the hostname and the config tree directory
+    // change, the deployed state stays.
+    env.hostname = "web2";
+    fs::rename(
+        env.config.path().join("web1"),
+        env.config.path().join("web2"),
+    )
+    .unwrap();
+
+    let out = env.run(&["deploy", "--no-confirm"]);
+    assert!(!out.status.success(), "deploy after a rename is refused");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no config entry for the host"),
+        "the explanation describes the state, got: {stderr}",
+    );
+
+    // The documented recovery: delete the store on the host. The agent
+    // recreates an empty store, so the next deploy is a fresh install.
+    fs::remove_dir_all(env.remote_store.path()).unwrap();
+    env.write_config("nginx/nginx.conf", b"v2");
+    let out = env.run(&["deploy", "--no-confirm"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "deploy after deleting the store succeeds: {stderr}",
+    );
+    let current = env.apps.path().join("nginx/current");
+    assert_eq!(
+        fs::read_to_string(current.join("nginx.conf")).expect("nginx.conf is readable"),
+        "v2",
+    );
+}
+
 // Drift repair itself is covered by the unit tests in reapply.rs; this
 // exercises the CLI wiring end to end through the real binary.
 #[test]

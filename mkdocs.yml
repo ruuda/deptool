@@ -20,6 +20,7 @@ nav:
       - "Tutorial": "tutorial.md"
       - "User management": "user_management.md"
       - "Rolling back": "rollback.md"
+      - "Renaming a host": "renaming_hosts.md"
       - "Building": "building.md"
       - "Changelog": "changelog.md"
   - "Reference":

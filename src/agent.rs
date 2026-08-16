@@ -238,6 +238,28 @@ impl AgentSession {
         let _ = write!(&file, "{operator}");
 
         let actual_current_commit = self.current_commit();
+
+        // A current commit without an entry for this host means the state
+        // was recorded under a different hostname (e.g. /etc/hostname
+        // changed after the deploy). A deploy would diff against nothing
+        // and treat the host as empty, so refuse; the operator resolves
+        // this by reprovisioning the host or deleting its store. Release
+        // the lock by dropping `file`.
+        if let Some(commit) = actual_current_commit {
+            let has_own_entry = self
+                .store
+                .get_commit_tree(commit)
+                .expect("current commit resolves to a tree")
+                .get_name(&self.hostname.0)
+                .is_some();
+            if !has_own_entry {
+                emit_message(Message::LockNoHostConfig {
+                    current_commit: commit,
+                });
+                return;
+            }
+        }
+
         if actual_current_commit != expected_current_commit {
             // Stale: release the lock, the client won't be deploying.
             emit_message(Message::LockStale {
@@ -676,6 +698,26 @@ mod tests {
         drop(lock_holder);
     }
 
+    #[test]
+    fn lock_reports_no_host_config_when_current_tree_lacks_hostname() {
+        // The commit was deployed under the name web1, but the host now
+        // reports the hostname web2. Even with a matching expected commit,
+        // the lock must be refused: diffs keyed on web2 would treat the
+        // host as empty.
+        let (mut host, oid) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
+        host.set_current(oid);
+        let responses = host.interact(Request::Lock {
+            expected_current_commit: Some(oid),
+            operator: "deckard@spinner".into(),
+        });
+        assert_eq!(
+            responses,
+            vec![Message::LockNoHostConfig {
+                current_commit: oid,
+            }],
+        );
+    }
+
     /// A representative activation failure for tests that only need a sentinel.
     fn activation_failed() -> ApplyError {
         ApplyError::SystemdActivationFailed {
@@ -978,12 +1020,12 @@ mod tests {
 
     #[test]
     fn reapply_does_not_roll_back_on_activation_failure() {
-        // A host with no apps has an empty, rollback-safe diff: a failing
+        // An app without system effects has a rollback-safe diff: a failing
         // deploy would roll back here, a failing reapply must not (a second
         // activate call would panic the sequence with "unexpected extra
         // activate call").
         let activator = SequenceActivator::new(vec![Err(activation_failed())]);
-        let (mut host, c1) = test_host("web1", &[("other/app/conf", b"v1")], activator);
+        let (mut host, c1) = test_host("web1", &[("web1/app/conf", b"v1")], activator);
         host.set_current(c1);
         host.session
             .store

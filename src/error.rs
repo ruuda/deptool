@@ -10,8 +10,10 @@
 use std::fmt;
 use std::path::PathBuf;
 
+use git2::Oid;
 use serde::{Deserialize, Serialize};
 
+use crate::checkout::oid_prefix;
 use crate::prim::Hostname;
 
 /// An error from the Git store or its contents.
@@ -150,6 +152,13 @@ pub enum HostError {
     AgentNotInstalled { stderr: String },
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
+    /// The host's current commit has no config entry for the host's own
+    /// hostname: its state was recorded under a different name, e.g. the
+    /// host was renamed after the deploy.
+    NoHostConfig {
+        /// The host's current commit.
+        commit: Oid,
+    },
     /// The installed binary doesn't match the expected checksum.
     SetupChecksumMismatch {
         expected_hash: String,
@@ -225,6 +234,17 @@ impl HostError {
                     .to_string(),
                 item: format!("  {host}: /etc/hostname contains {actual:?}"),
             }),
+            HostError::NoHostConfig { commit } => Some(Explanation {
+                description: "The commit deployed at the host has no config entry for the host\n\
+                             itself. This happens when /etc/hostname changes after a deploy: the\n\
+                             deployed commit only has an entry for the old name. Deploys diff the\n\
+                             new config against the host's entry in the deployed commit, so this\n\
+                             state blocks any deploy. If the rename is intended, delete the store\n\
+                             on the host and deploy again; the host is then treated as a fresh\n\
+                             install. See 'Renaming a host' in the manual."
+                    .to_string(),
+                item: format!("  {host}: commit {} has no entry '{host}'", oid_prefix(*commit)),
+            }),
             HostError::SetupNoChecksum { stderr } => Some(Explanation {
                 description: "The install command finished without reporting the uploaded binary's\n\
                              checksum, so the transfer could not be verified. Usually the remote\n\
@@ -296,6 +316,9 @@ impl fmt::Display for HostError {
                 )
             }
             HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
+            HostError::NoHostConfig { .. } => {
+                f.write_str("deployed commit has no config for this host")
+            }
             HostError::SetupChecksumMismatch { .. } => f.write_str("binary checksum mismatch"),
             HostError::SetupMissingBinary { platform, .. } => write!(
                 f,

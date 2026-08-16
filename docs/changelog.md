@@ -18,6 +18,10 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
+<!-- TODO(ruuda): Deploys now refuse hosts whose deployed commit has no config
+entry for their hostname (the state a hostname change leaves behind), instead
+of looping on 'stale' forever. Reference the new 'Renaming a host' page. -->
+
 New features:
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
