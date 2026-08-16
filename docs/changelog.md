@@ -67,6 +67,8 @@ Improvements:
 
 Bugfixes:
 
+ <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
+ rejected, instead of silently widening the command to every host. -->
  <!-- TODO(ruuda): A symlink or special file in the config tree is now
  rejected with its path, instead of panicking (inside an app) or being
  silently dropped (at the host or app level, where it then planned as a

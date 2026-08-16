@@ -363,6 +363,8 @@ pub enum Error {
     DefaultClusterNotFound(PathBuf),
     /// Hostnames passed via --limit don't appear in the cluster.
     UnknownHosts(Vec<Hostname>),
+    /// A --limit was given but lists no hosts (an empty value or only commas).
+    EmptyLimit,
     /// The store has no tracking ref for a host in the config tree.
     /// Reapply needs the deployed commit, and another operator may have
     /// deployed to these hosts, so the fix is `deptool sync`, not
@@ -434,6 +436,12 @@ impl fmt::Display for Error {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(f, "unknown hosts in --limit: {}", names.join(", "))
             }
+            Error::EmptyLimit => write!(
+                f,
+                "no host names were given to --limit; list the hosts to include \
+                 (for example --limit web1,web2), or omit --limit to include \
+                 every host",
+            ),
             Error::UnsyncedHosts(hosts) => {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(

@@ -556,7 +556,7 @@ fn run() -> Result<()> {
             plan_only,
             confirm_mode,
             mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Reapply {
             confirm_mode,
@@ -568,7 +568,7 @@ fn run() -> Result<()> {
             dir,
             confirm_mode,
             connect_mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Sync {
             sync_mode,
@@ -580,16 +580,16 @@ fn run() -> Result<()> {
             dir,
             sync_mode,
             connect_mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Ping {
             limit,
             connect_mode,
             dir,
-        } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
-        Cmd::Status { limit, dir } => run_status(store, dir, &HostFilter::from_limit(&limit))?,
+        } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit)?)?,
+        Cmd::Status { limit, dir } => run_status(store, dir, &HostFilter::from_limit(&limit)?)?,
         Cmd::Diff { mode, limit, dir } => {
-            run_diff(store, dir, mode, &HostFilter::from_limit(&limit))?
+            run_diff(store, dir, mode, &HostFilter::from_limit(&limit)?)?
         }
         Cmd::Init { dir } => {
             let initialized = Store::open_or_init(&store)?;
