@@ -11,8 +11,8 @@ use deptool::*;
 
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Instant;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use bpaf::{Bpaf, long};
 
@@ -814,51 +814,130 @@ impl Activate for SystemdActivator {
             systemctl_ok(&["daemon-reload"]);
         }
 
-        // `restart` also starts a unit that was not running, so the newly enabled
-        // ones need no separate start. Reapply uses `start` instead: it must not
-        // disrupt units that are already running, and `start` is a no-op for
-        // those while still bringing up stopped ones.
+        // Restart (deploy) or start (reapply) every touched unit. `restart`
+        // also starts a unit that was not running, so newly enabled ones need
+        // no separate start. Reapply uses `start`: it must not disrupt units
+        // already running, and `start` is a no-op for those while still bringing
+        // up stopped ones.
         let (verb, verb_ing) = match mode {
             protocol::ApplyMode::Deploy { .. } => ("restart", "restarting"),
             protocol::ApplyMode::Reapply => ("start", "starting"),
         };
-        for unit in &touched {
-            log(&format!("{verb_ing} {unit}"));
-            systemctl_ok(&[verb, unit]);
-        }
-
         if touched.is_empty() {
             return Ok(());
         }
 
-        // Let services initialize before checking state. Previously we usd 100ms,
-        // but that was not enough for a binary inside a verity-protected EROFS to
-        // fully start and then fail on a potato cloud VM, let's give it 300ms.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // `is-active` prints one status word per unit, in argument order. Read
-        // the words, not the exit code: with several units it exits 0 if *any*
-        // one is active, which would hide a partial failure.
-        let report = std::process::Command::new("systemctl")
-            .arg("is-active")
-            .args(&touched)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-
-        // A different count means we can't map status words to units, which is a
-        // distinct failure from a unit not starting.
-        if report.lines().count() != touched.len() {
-            return Err(ApplyError::SystemdStatusUnreadable { output: report });
+        // Spawn the systemctl jobs without waiting on them: a unit slow to stop
+        // (e.g. draining connections) must not hold up the others, and running
+        // them together lets systemd restart in parallel. We track each child;
+        // it staying alive is systemd's own signal that the job is not done.
+        let mut restarts: Vec<PendingRestart> = Vec::new();
+        for unit in &touched {
+            log(&format!("{verb_ing} {unit}"));
+            // If we can't even spawn systemctl, polling and rollback (which both
+            // need it too) are hopeless, so bail out for the driver to report.
+            let child = Command::new("systemctl")
+                .args([verb, unit])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|err| {
+                    ApplyError::Io(format!("failed to run systemctl {verb} {unit}: {err}"))
+                })?;
+            restarts.push(PendingRestart {
+                unit: unit.to_string(),
+                child: Some(child),
+                baseline_restarts: None,
+            });
         }
 
-        let mut statuses = report.lines();
-        let mut inactive: Vec<String> = Vec::new();
-        for &unit in &touched {
-            if statuses.next() != Some("active") {
-                inactive.push(unit.to_string());
+        // Poll every 150ms to see if the restart job finished (the child
+        // exited), and also to check the state of the units. When units are
+        // failed or running, their state is clear, but they may be still
+        // activating, so then we wait, up to 10s from when the unit first
+        // started (the restart job blocks until then). Record the unit's
+        // NRestarts baseline at this point, if that goes up we also know that
+        // it failed. Previous experiments showed that on a slow VM, starting
+        // a binary from a dm-verity protected EROFS RootImage= took up to 300ms
+        // to get the unit running, 100ms delay was not enough, but back then we
+        // checked only once. Now that we poll, we can reduce the time of the
+        // initial poll, to keep Deptool fast for fast targets.
+        let mut deadline = Instant::now() + Duration::from_secs(10);
+        let mut announced_wait = false;
+        let failed_units: Vec<String> = loop {
+            std::thread::sleep(Duration::from_millis(150));
+
+            // Reap finished restart jobs before reading state, so a unit's
+            // NRestarts baseline is the count after its restart, not one read
+            // before the job finished. Each finished job also gives its unit a
+            // fresh 10s to prove it stays up.
+            for pending in &mut restarts {
+                if let Some(child) = &mut pending.child {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            pending.child = None;
+                            deadline = Instant::now() + Duration::from_secs(10);
+                        }
+                        _ => {} // still running, or a reap error -- keep waiting
+                    }
+                }
             }
-        }
+
+            // `show` prints one property block per unit, in argument order.
+            let report = Command::new("systemctl")
+                .args(["show", "--property=LoadState,ActiveState,Result,NRestarts"])
+                .args(&touched)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
+            let blocks: Vec<&str> = report.trim().split("\n\n").collect();
+            if blocks.len() != touched.len() {
+                return Err(ApplyError::SystemdStatusUnreadable { output: report });
+            }
+            let statuses: Vec<UnitStatus> = blocks
+                .iter()
+                .map(|&block| UnitStatus::from_show_block(block))
+                .collect();
+
+            let mut failed_units = Vec::new();
+            let mut waiting_units = Vec::new();
+            for (pending, status) in restarts.iter_mut().zip(&statuses) {
+                // Record the crash baseline on the first poll after the job ends.
+                if pending.child.is_none() && pending.baseline_restarts.is_none() {
+                    pending.baseline_restarts = Some(status.restarts);
+                }
+                let outcome = match pending.baseline_restarts {
+                    Some(baseline) => status.activation(baseline),
+                    None => Activation::Starting, // restart job still running
+                };
+                match outcome {
+                    Activation::Succeeded => {}
+                    Activation::Starting => waiting_units.push(pending.unit.clone()),
+                    Activation::Failed => failed_units.push(pending.unit.clone()),
+                }
+            }
+
+            // If any unit failed, we can already start rollback without waiting
+            // for the others.
+            if !failed_units.is_empty() {
+                break failed_units;
+            }
+            let all_restarted = restarts.iter().all(|p| p.child.is_none());
+            if all_restarted && (waiting_units.is_empty() || Instant::now() >= deadline) {
+                // Done waiting: clear the live "waiting for" line so it does not
+                // linger while we finish (ref update, gc) before reporting done.
+                if announced_wait {
+                    emit(protocol::Message::WaitingForUnits { units: Vec::new() });
+                }
+                break Vec::new();
+            }
+            if !waiting_units.is_empty() {
+                emit(protocol::Message::WaitingForUnits {
+                    units: waiting_units,
+                });
+                announced_wait = true;
+            }
+        };
 
         // Force color: systemctl won't color because stdout is a pipe,
         // but the output is forwarded to the operator's terminal.
@@ -882,12 +961,83 @@ impl Activate for SystemdActivator {
             emit(protocol::Message::SystemdUnitStatus { output });
         }
 
-        if inactive.is_empty() {
+        if failed_units.is_empty() {
             Ok(())
         } else {
-            Err(ApplyError::SystemdActivationFailed { units: inactive })
+            Err(ApplyError::SystemdActivationFailed {
+                units: failed_units,
+            })
         }
     }
+}
+
+/// A unit's state, from the `systemctl show` properties we query.
+struct UnitStatus<'a> {
+    load_state: &'a str,
+    active_state: &'a str,
+    result: &'a str,
+    restarts: u64,
+}
+
+/// The outcome of (re)starting a unit.
+#[derive(Debug, PartialEq)]
+enum Activation {
+    Succeeded,
+    Starting,
+    Failed,
+}
+
+impl<'a> UnitStatus<'a> {
+    /// Parse one property block from `systemctl show` output.
+    fn from_show_block(block: &'a str) -> Self {
+        let prop = |key: &str| {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .unwrap_or("")
+        };
+        UnitStatus {
+            load_state: prop("LoadState="),
+            active_state: prop("ActiveState="),
+            result: prop("Result="),
+            restarts: prop("NRestarts=").parse().unwrap_or(0),
+        }
+    }
+
+    /// Classify the unit, given the `NRestarts` count captured when its restart
+    /// finished. A higher count now means systemd auto-restarted the unit since
+    /// -- it crashed -- which catches a crash loop even in the brief windows it
+    /// looks active. It also failed if it did not load or its result is a
+    /// failure; an empty result (a unit that never produces one, e.g. a target)
+    /// is not a failure. Otherwise it succeeded once it reaches active or
+    /// inactive (a completed `Type=oneshot`); activating or deactivating (still
+    /// restarting) is in progress. Keying on the result, not `is-active`, is
+    /// what makes a completed oneshot and a dependency-blocked unit come out
+    /// right (both inactive, with a success and a non-success result).
+    fn activation(&self, baseline_restarts: u64) -> Activation {
+        if self.load_state != "loaded"
+            || (!self.result.is_empty() && self.result != "success")
+            || self.restarts > baseline_restarts
+        {
+            Activation::Failed
+        } else if self.active_state == "active" || self.active_state == "inactive" {
+            Activation::Succeeded
+        } else {
+            Activation::Starting
+        }
+    }
+}
+
+/// A unit's in-flight restart: the `systemctl` child while its job runs, and
+/// the `NRestarts` count captured when it finished -- the baseline that later
+/// crash-driven restarts are measured against. A deploy's `restart` resets
+/// NRestarts to 0, but a reapply's `start` of an already-running unit is a
+/// no-op that leaves it untouched, so we record the baseline rather than
+/// assume zero.
+struct PendingRestart {
+    unit: String,
+    child: Option<Child>,
+    baseline_restarts: Option<u64>,
 }
 
 fn systemctl_ok(args: &[&str]) -> bool {
@@ -976,5 +1126,40 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_keys_on_result_and_restart_count_not_is_active() {
+        let classify =
+            |block: &str, baseline| UnitStatus::from_show_block(block).activation(baseline);
+        // Literal `systemctl show` blocks; the baseline is a unit's NRestarts
+        // when its restart finished. A completed Type=oneshot is inactive with
+        // a successful result; a unit blocked by a failed dependency is inactive
+        // too, but its result is not success; a target has no result; a unit
+        // still stopping (a slow restart) is deactivating; a crash loop shows
+        // more restarts than the baseline even in the brief window it is active.
+        let oneshot = "LoadState=loaded\nActiveState=inactive\nResult=success\nNRestarts=0";
+        let running = "LoadState=loaded\nActiveState=active\nResult=success\nNRestarts=0";
+        let crashed = "LoadState=loaded\nActiveState=failed\nResult=exit-code\nNRestarts=0";
+        let blocked = "LoadState=loaded\nActiveState=inactive\nResult=dependency\nNRestarts=0";
+        let starting = "LoadState=loaded\nActiveState=activating\nResult=success\nNRestarts=0";
+        let stopping = "LoadState=loaded\nActiveState=deactivating\nResult=success\nNRestarts=0";
+        let missing = "LoadState=not-found\nActiveState=inactive\nResult=success\nNRestarts=0";
+        let target = "LoadState=loaded\nActiveState=active\nResult=\nNRestarts=0";
+        let crash_loop = "LoadState=loaded\nActiveState=active\nResult=success\nNRestarts=3";
+        assert_eq!(classify(oneshot, 0), Activation::Succeeded);
+        assert_eq!(classify(running, 0), Activation::Succeeded);
+        assert_eq!(classify(crashed, 0), Activation::Failed);
+        assert_eq!(classify(blocked, 0), Activation::Failed);
+        assert_eq!(classify(starting, 0), Activation::Starting);
+        assert_eq!(classify(stopping, 0), Activation::Starting);
+        assert_eq!(classify(missing, 0), Activation::Failed);
+        assert_eq!(classify(target, 0), Activation::Succeeded);
+        assert_eq!(classify(crash_loop, 0), Activation::Failed);
     }
 }

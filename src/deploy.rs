@@ -37,6 +37,8 @@ pub enum HostState {
     Locked,
     Pushing,
     Applying,
+    /// Apply: units are still starting or stopping; live-updated list.
+    WaitingForUnits(Vec<String>),
     RollingBack,
     Done,
     /// Sync found the host already at the expected commit; nothing to fetch.
@@ -505,6 +507,13 @@ pub fn read_apply_messages(
             }
             Message::RollingBack => {
                 progress.update(host, HostState::RollingBack);
+            }
+            Message::WaitingForUnits { units } if units.is_empty() => {
+                // Wait over; back to applying while the agent finishes up.
+                progress.update(host, HostState::Applying);
+            }
+            Message::WaitingForUnits { units } => {
+                progress.update(host, HostState::WaitingForUnits(units.clone()));
             }
             Message::RolledBack { error } => {
                 progress.update(host, HostState::RolledBack(error.clone()));
