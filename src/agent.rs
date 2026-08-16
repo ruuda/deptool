@@ -184,6 +184,50 @@ impl AgentSession {
         self.store.current_commit()
     }
 
+    /// The refusal to report when the host's deployed state belongs to a
+    /// different hostname, `None` when the identity checks pass.
+    ///
+    /// Deploys diff the target against this host's subtree in the current
+    /// commit, looked up by hostname; under a changed name that lookup
+    /// finds another host's config or nothing at all, so the computed
+    /// changes would not match what is actually on this machine. The
+    /// hostname recorded at the last apply is the exact check; hosts
+    /// deployed before recording existed fall back to checking that the
+    /// commit has an entry for this host at all. The fallback misses a
+    /// name swap, but self-retires: the next apply records the name.
+    fn check_deployed_hostname(&self, current_commit: Option<Oid>) -> Option<Message> {
+        // Without a current commit there is no state to protect; a fresh
+        // deploy records the identity.
+        let commit = current_commit?;
+        match self
+            .store
+            .get_deployed_hostname()
+            .expect("host store config is readable")
+        {
+            Some(deployed_as) if deployed_as != self.hostname => {
+                Some(Message::LockHostnameChanged {
+                    deployed_as: Some(deployed_as),
+                })
+            }
+            Some(_) => None,
+            // Fallback for hosts last deployed by an older Deptool that
+            // did not record the hostname yet.
+            None => {
+                let has_own_entry = self
+                    .store
+                    .get_commit_tree(commit)
+                    .expect("current commit resolves to a tree")
+                    .get_name(&self.hostname.0)
+                    .is_some();
+                if has_own_entry {
+                    None
+                } else {
+                    Some(Message::LockHostnameChanged { deployed_as: None })
+                }
+            }
+        }
+    }
+
     fn handle_lock(
         &mut self,
         expected_current_commit: Option<Oid>,
@@ -239,25 +283,13 @@ impl AgentSession {
 
         let actual_current_commit = self.current_commit();
 
-        // A current commit without an entry for this host means the state
-        // was recorded under a different hostname (e.g. /etc/hostname
-        // changed after the deploy). A deploy would diff against nothing
-        // and treat the host as empty, so refuse; the operator resolves
-        // this by reprovisioning the host or deleting its store. Release
-        // the lock by dropping `file`.
-        if let Some(commit) = actual_current_commit {
-            let has_own_entry = self
-                .store
-                .get_commit_tree(commit)
-                .expect("current commit resolves to a tree")
-                .get_name(&self.hostname.0)
-                .is_some();
-            if !has_own_entry {
-                emit_message(Message::LockNoHostConfig {
-                    current_commit: commit,
-                });
-                return;
-            }
+        // Refuse when the deployed state belongs to a different hostname
+        // (e.g. /etc/hostname changed after the deploy); the operator
+        // resolves this by reprovisioning the host or deleting its store.
+        // Release the lock by dropping `file`.
+        if let Some(refusal) = self.check_deployed_hostname(actual_current_commit) {
+            emit_message(refusal);
+            return;
         }
 
         if actual_current_commit != expected_current_commit {
@@ -508,6 +540,9 @@ impl AgentSession {
                 operator: &ctx.operator,
             },
         )?;
+        // Record which config entry this state belongs to; the lock check
+        // compares it against /etc/hostname to detect renames.
+        self.store.set_deployed_hostname(&self.hostname)?;
 
         checkout::gc_old_checkouts(&self.apps_dir, |msg| self.log(msg));
 
@@ -699,21 +734,49 @@ mod tests {
     }
 
     #[test]
-    fn lock_reports_no_host_config_when_current_tree_lacks_hostname() {
-        // The commit was deployed under the name web1, but the host now
-        // reports the hostname web2. Even with a matching expected commit,
-        // the lock must be refused: diffs keyed on web2 would treat the
-        // host as empty.
-        let (mut host, oid) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
-        host.set_current(oid);
-        let responses = host.interact(Request::Lock {
-            expected_current_commit: Some(oid),
+    fn lock_refuses_when_state_was_deployed_under_another_name() {
+        // The host was deployed as web1 and now reports the hostname web2.
+        // Without a recorded hostname (last deployed by an older Deptool)
+        // and no web2 entry in the commit, the tree-entry fallback refuses.
+        let (mut host, c1) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
+        host.set_current(c1);
+        let lock = Request::Lock {
+            expected_current_commit: None,
             operator: "deckard@spinner".into(),
-        });
+        };
         assert_eq!(
-            responses,
-            vec![Message::LockNoHostConfig {
-                current_commit: oid,
+            host.interact(lock.clone()),
+            vec![Message::LockHostnameChanged { deployed_as: None }],
+        );
+
+        // A name swap: the commit also has a web2 entry (another machine's
+        // config). The fallback passes and the lock proceeds to the stale
+        // answer -- the swap goes undetected.
+        let store = Store::open(host.session.store.path()).expect("store opens");
+        let c2 = commit_files(
+            &store,
+            &[("web1/nginx/conf", b"v1"), ("web2/nginx/conf", b"v2")],
+        )
+        .expect("commit succeeds");
+        host.set_current(c2);
+        assert_eq!(
+            host.interact(lock.clone()),
+            vec![Message::LockStale {
+                expected_commit: None,
+                actual_commit: Some(c2),
+            }],
+        );
+
+        // With the recorded hostname the swap is refused, and the error
+        // identifies the old name.
+        host.session
+            .store
+            .set_deployed_hostname(&Hostname::from("web1"))
+            .expect("hostname is recorded");
+        assert_eq!(
+            host.interact(lock),
+            vec![Message::LockHostnameChanged {
+                deployed_as: Some(Hostname::from("web1")),
             }],
         );
     }
@@ -793,7 +856,7 @@ mod tests {
     }
 
     #[test]
-    fn successful_apply_sets_refs_and_reflog() {
+    fn successful_apply_sets_refs_and_reflog_and_records_hostname() {
         let (mut host, c1) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         lock_and_push(&mut host, c1);
 
@@ -815,6 +878,15 @@ mod tests {
             [entry] => assert_eq!(*entry, (c1, "deploy by deckard@spinner: set target".into())),
             other => panic!("unexpected target reflog: {other:?}"),
         }
+
+        assert_eq!(
+            host.session
+                .store
+                .get_deployed_hostname()
+                .expect("host store config is readable"),
+            Some(Hostname::from("web1")),
+            "the apply records the hostname the state belongs to",
+        );
     }
 
     #[test]

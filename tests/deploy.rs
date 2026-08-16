@@ -307,8 +307,8 @@ fn deleting_host_store_unblocks_deploy_after_hostname_change() {
     assert!(!out.status.success(), "deploy after a rename is refused");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("no config entry for the host"),
-        "the explanation describes the state, got: {stderr}",
+        stderr.contains("deployed as 'web1'"),
+        "the explanation identifies the old hostname, got: {stderr}",
     );
 
     // The documented recovery: delete the store on the host. The agent

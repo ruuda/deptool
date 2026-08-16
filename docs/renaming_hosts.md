@@ -5,7 +5,12 @@ identifies the host's config by hostname. After you change a host's
 `/etc/hostname`, the deployed commit only has config for the old name, and
 `deptool deploy` refuses the host:
 
-    web2: failed: deployed commit has no config for this host
+    web2: failed: host was deployed as 'web1'
+
+<!-- TODO(ruuda): Since recording the deployed hostname, detection is exact
+(it catches name swaps too) and no longer relies on the deployed commit's
+entries; hosts deployed before the recording existed show "host was deployed
+under another name" instead. Update the first paragraph's mechanism. -->
 
 There is no in-place rename; treat the rename like a reprovision. Delete the
 store on the host, then deploy:

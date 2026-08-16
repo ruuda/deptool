@@ -389,13 +389,8 @@ pub fn connect_and_lock(
                     Ok(Some(Message::LockBusy { held_by })) => {
                         progress.update(host, HostState::LockBusy(held_by));
                     }
-                    Ok(Some(Message::LockNoHostConfig { current_commit })) => {
-                        progress.update(
-                            host,
-                            HostError::NoHostConfig {
-                                commit: current_commit,
-                            },
-                        );
+                    Ok(Some(Message::LockHostnameChanged { deployed_as })) => {
+                        progress.update(host, HostError::HostnameChanged { deployed_as });
                     }
                     Ok(other) => {
                         progress.update(
@@ -845,7 +840,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_after_rename_reports_missing_host_config() -> Result<()> {
+    fn deploy_after_rename_reports_hostname_changed() -> Result<()> {
         // Deploy to the host under its old name, then rename the machine.
         let driver = TestRepo::new();
         let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
@@ -874,9 +869,10 @@ mod tests {
         assert!(
             matches!(
                 &*progress.state("web2"),
-                HostState::Failed(HostError::NoHostConfig { commit }) if *commit == c1
+                HostState::Failed(HostError::HostnameChanged { deployed_as })
+                    if *deployed_as == Some(Hostname::from("web1"))
             ),
-            "the error identifies the deployed commit that lacks a 'web2' entry",
+            "the error identifies the hostname the state was deployed under",
         );
         // No tracking ref appears for the new name: the refusal happens
         // before the stale-fetch path that would record one.

@@ -111,6 +111,26 @@ impl Store {
         Ok(())
     }
 
+    /// The hostname recorded by the most recent apply on this host.
+    ///
+    /// The lock check compares it against the current `/etc/hostname` to
+    /// detect renames. `None` on hosts deployed before recording existed.
+    pub fn get_deployed_hostname(&self) -> Result<Option<Hostname>> {
+        let config = self.repo.config()?;
+        match config.get_string("deptool.hostname") {
+            Ok(s) => Ok(Some(Hostname(s))),
+            Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+            Err(e) => Err(StoreError::Git(e)),
+        }
+    }
+
+    /// Record `hostname` as the name this host's state was deployed under.
+    pub fn set_deployed_hostname(&self, hostname: &Hostname) -> Result<()> {
+        let mut config = self.repo.config()?;
+        config.set_str("deptool.hostname", &hostname.0)?;
+        Ok(())
+    }
+
     /// Read the host-local `refs/heads/current` commit, if it exists.
     pub fn current_commit(&self) -> Option<Oid> {
         self.ref_commit("refs/heads/current")
