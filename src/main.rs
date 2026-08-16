@@ -477,10 +477,18 @@ fn run_sync(
     if hosts.is_empty() {
         let cluster = cluster_name(&dir);
         match sync_mode {
-            sync::SyncMode::OnlyChanged => eprintln!(
-                "No hosts in cluster '{cluster}' have config changes. \
-                 Drop --changed to sync every host.",
-            ),
+            // Under --limit only the selected hosts were checked, so the
+            // message must not claim more.
+            sync::SyncMode::OnlyChanged => match filter {
+                HostFilter::All => eprintln!(
+                    "No hosts in cluster '{cluster}' have config changes. \
+                     Drop --changed to sync every host.",
+                ),
+                HostFilter::Only(..) => eprintln!(
+                    "No selected hosts in cluster '{cluster}' have config changes. \
+                     Drop --changed to sync them anyway.",
+                ),
+            },
             sync::SyncMode::AllHosts => eprintln!("No hosts to sync in cluster '{cluster}'."),
         }
         return Ok(());

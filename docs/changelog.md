@@ -50,6 +50,9 @@ Improvements:
    operation.
  <!-- TODO(ruuda): With --limit, the up-to-date message from deploy and diff
  reads "All selected hosts" instead of claiming the whole cluster. -->
+ <!-- TODO(ruuda): Same for sync --changed: with --limit, the no-changes
+ message reads "No selected hosts" instead of claiming the whole cluster. -->
+
 
 Bugfixes:
 
