@@ -859,6 +859,7 @@ impl Activate for SystemdActivator {
         // fail quickly (a bare binary on a verity-protected EROFS needed that
         // long on a slow VM).
         let mut deadline = Instant::now() + Duration::from_secs(10);
+        let mut announced_wait = false;
         let failed_units: Vec<String> = loop {
             std::thread::sleep(Duration::from_millis(300));
 
@@ -917,12 +918,18 @@ impl Activate for SystemdActivator {
             }
             let all_restarted = restarts.iter().all(|p| p.child.is_none());
             if all_restarted && (waiting_units.is_empty() || Instant::now() >= deadline) {
+                // Done waiting: clear the live "waiting for" line so it does not
+                // linger while we finish (ref update, gc) before reporting done.
+                if announced_wait {
+                    emit(protocol::Message::WaitingForUnits { units: Vec::new() });
+                }
                 break Vec::new();
             }
             if !waiting_units.is_empty() {
                 emit(protocol::Message::WaitingForUnits {
                     units: waiting_units,
                 });
+                announced_wait = true;
             }
         };
 

@@ -508,6 +508,10 @@ pub fn read_apply_messages(
             Message::RollingBack => {
                 progress.update(host, HostState::RollingBack);
             }
+            Message::WaitingForUnits { units } if units.is_empty() => {
+                // Wait over; back to applying while the agent finishes up.
+                progress.update(host, HostState::Applying);
+            }
             Message::WaitingForUnits { units } => {
                 progress.update(host, HostState::WaitingForUnits(units.clone()));
             }
