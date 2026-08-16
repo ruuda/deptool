@@ -12,7 +12,7 @@ use deptool::*;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bpaf::{Bpaf, long};
 
@@ -831,34 +831,38 @@ impl Activate for SystemdActivator {
             return Ok(());
         }
 
-        // Let services initialize before checking state. Previously we usd 100ms,
-        // but that was not enough for a binary inside a verity-protected EROFS to
-        // fully start and then fail on a potato cloud VM, let's give it 300ms.
-        std::thread::sleep(std::time::Duration::from_millis(300));
+        // Poll every 300ms until every touched unit settles, or 10s passes; a
+        // unit still `activating` then is taken as started. The 300ms also
+        // gives a service time to start and then fail quickly -- a bare binary
+        // on a verity-protected EROFS needed that long on a slow VM.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let failed_units: Vec<String> = loop {
+            std::thread::sleep(Duration::from_millis(300));
+            let report = std::process::Command::new("systemctl")
+                .args(["show", "--property=LoadState,ActiveState,Result"])
+                .args(&touched)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
 
-        // `is-active` prints one status word per unit, in argument order. Read
-        // the words, not the exit code: with several units it exits 0 if *any*
-        // one is active, which would hide a partial failure.
-        let report = std::process::Command::new("systemctl")
-            .arg("is-active")
-            .args(&touched)
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
-            .unwrap_or_default();
-
-        // A different count means we can't map status words to units, which is a
-        // distinct failure from a unit not starting.
-        if report.lines().count() != touched.len() {
-            return Err(ApplyError::SystemdStatusUnreadable { output: report });
-        }
-
-        let mut statuses = report.lines();
-        let mut inactive: Vec<String> = Vec::new();
-        for &unit in &touched {
-            if statuses.next() != Some("active") {
-                inactive.push(unit.to_string());
+            // `show` prints one property block per unit, in argument order.
+            let blocks: Vec<&str> = report.trim().split("\n\n").collect();
+            if blocks.len() != touched.len() {
+                return Err(ApplyError::SystemdStatusUnreadable { output: report });
             }
-        }
+            let mut failed_units = Vec::new();
+            let mut any_starting = false;
+            for (unit, &block) in touched.iter().zip(&blocks) {
+                match UnitStatus::from_show_block(block).activation() {
+                    Activation::Succeeded => {}
+                    Activation::Starting => any_starting = true,
+                    Activation::Failed => failed_units.push(unit.to_string()),
+                }
+            }
+            if !failed_units.is_empty() || !any_starting || Instant::now() >= deadline {
+                break failed_units;
+            }
+        };
 
         // Force color: systemctl won't color because stdout is a pipe,
         // but the output is forwarded to the operator's terminal.
@@ -882,10 +886,60 @@ impl Activate for SystemdActivator {
             emit(protocol::Message::SystemdUnitStatus { output });
         }
 
-        if inactive.is_empty() {
+        if failed_units.is_empty() {
             Ok(())
         } else {
-            Err(ApplyError::SystemdActivationFailed { units: inactive })
+            Err(ApplyError::SystemdActivationFailed {
+                units: failed_units,
+            })
+        }
+    }
+}
+
+/// A unit's state, from the `systemctl show` properties we query.
+struct UnitStatus<'a> {
+    load_state: &'a str,
+    active_state: &'a str,
+    result: &'a str,
+}
+
+/// The outcome of (re)starting a unit.
+#[derive(Debug, PartialEq)]
+enum Activation {
+    Succeeded,
+    Starting,
+    Failed,
+}
+
+impl<'a> UnitStatus<'a> {
+    /// Parse one property block from `systemctl show` output.
+    fn from_show_block(block: &'a str) -> Self {
+        let prop = |key: &str| {
+            block
+                .lines()
+                .find_map(|l| l.strip_prefix(key))
+                .unwrap_or("")
+        };
+        UnitStatus {
+            load_state: prop("LoadState="),
+            active_state: prop("ActiveState="),
+            result: prop("Result="),
+        }
+    }
+
+    /// Classify the unit. It failed if it did not load or its result is a
+    /// failure; an empty result (a unit that never produces one, e.g. a
+    /// target) is not a failure. This keys on the result rather than
+    /// `is-active` because a completed `Type=oneshot` is inactive with a
+    /// successful result, and a unit blocked by a failed dependency is
+    /// inactive with a non-success result.
+    fn activation(&self) -> Activation {
+        if self.load_state != "loaded" || (!self.result.is_empty() && self.result != "success") {
+            Activation::Failed
+        } else if self.active_state == "activating" {
+            Activation::Starting
+        } else {
+            Activation::Succeeded
         }
     }
 }
@@ -976,5 +1030,30 @@ fn main() {
     if let Err(e) = run() {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_keys_on_result_not_is_active() {
+        let classify = |block: &str| UnitStatus::from_show_block(block).activation();
+        // Literal `systemctl show` blocks. A completed Type=oneshot is inactive
+        // with a successful result; a unit blocked by a failed dependency is
+        // inactive too, but its result is not success; a target has no result.
+        let oneshot = "LoadState=loaded\nActiveState=inactive\nResult=success";
+        let crashed = "LoadState=loaded\nActiveState=failed\nResult=exit-code";
+        let blocked = "LoadState=loaded\nActiveState=inactive\nResult=dependency";
+        let starting = "LoadState=loaded\nActiveState=activating\nResult=success";
+        let missing = "LoadState=not-found\nActiveState=inactive\nResult=success";
+        let target = "LoadState=loaded\nActiveState=active\nResult=";
+        assert_eq!(classify(oneshot), Activation::Succeeded);
+        assert_eq!(classify(crashed), Activation::Failed);
+        assert_eq!(classify(blocked), Activation::Failed);
+        assert_eq!(classify(starting), Activation::Starting);
+        assert_eq!(classify(missing), Activation::Failed);
+        assert_eq!(classify(target), Activation::Succeeded);
     }
 }

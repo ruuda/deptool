@@ -84,6 +84,9 @@ Bugfixes:
  <!-- TODO(ruuda): 'deptool sync' and 'deptool ping' now exit non-zero when a
  host fails, like deploy and reapply already did, instead of always exiting
  zero. -->
+ <!-- TODO(ruuda): A successful Type=oneshot unit (which ends up inactive) is
+ no longer reported as failed and rolled back; activation now checks each
+ unit's load state and result, and waits up to 10s for units still starting. -->
  <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
  rejected, instead of silently widening the command to every host. -->
  <!-- TODO(ruuda): A symlink or special file in the config tree is now
