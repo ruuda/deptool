@@ -99,7 +99,9 @@ fn platform_subdir(platform: &str) -> String {
     subdir
 }
 
-const GC_MAX_SIZE_BYTES: u64 = 64 * 1024 * 1024;
+// A Deptool x86-64 Linux binary is about 1.7 MiB, so keeping 24 MiB should be
+// plenty to have the past few versions around.
+const GC_MAX_SIZE_BYTES: u64 = 24 * 1024 * 1024;
 const GC_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Install the deptool binary on the target host.
