@@ -391,7 +391,7 @@ pub enum Error {
     /// never deployed (fix with `deptool deploy`), or another operator
     /// deployed to it from a different store (fix with `deptool sync`).
     UnsyncedHosts(Vec<Hostname>),
-    /// One or more hosts failed during a deploy or reapply.
+    /// One or more hosts failed during a deploy, reapply, sync, or ping.
     DeployFailed(String),
 }
 

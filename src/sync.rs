@@ -73,7 +73,7 @@ pub fn run_sync(
     hosts: &BTreeMap<Hostname, Option<Oid>>,
     connector: &dyn HostConnector,
     progress: &DeployProgress,
-) {
+) -> Result<()> {
     // Connect to all hosts in parallel, checking Hello for staleness.
     // A host is stale whenever its current commit differs from the tracking
     // ref, including the asymmetric cases: a fresh host (`actual = None`)
@@ -115,6 +115,8 @@ pub fn run_sync(
             Err(err) => progress.update(&host, err),
         }
     }
+
+    progress.outcome()
 }
 
 /// Reconcile each stale host's tracking ref with its current commit.
@@ -205,7 +207,7 @@ mod tests {
         let names: Vec<&str> = to_sync.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&names);
         let connector = test_connector(hosts);
-        run_sync(&driver.store, &to_sync, &connector, &progress);
+        run_sync(&driver.store, &to_sync, &connector, &progress)?;
         Ok(progress)
     }
 
@@ -327,5 +329,22 @@ mod tests {
             "stale host reaches terminal Updated state after deleting ref",
         );
         Ok(())
+    }
+
+    #[test]
+    fn sync_reports_failure_when_a_host_is_unreachable() {
+        let driver = TestRepo::new();
+        // The expected commit is never read; the connection fails first.
+        let to_sync = BTreeMap::from([(Hostname::from("web1"), None)]);
+        let progress = test_progress(&["web1"]);
+        // A connector that knows no hosts, so connecting to web1 fails.
+        let connector = test_connector(&[]);
+
+        let result = run_sync(&driver.store, &to_sync, &connector, &progress);
+
+        assert!(
+            result.is_err(),
+            "sync exits non-zero when a host cannot be reached",
+        );
     }
 }

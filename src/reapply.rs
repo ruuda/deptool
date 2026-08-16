@@ -147,12 +147,7 @@ pub fn run_reapply(
         }
     });
 
-    match progress.num_failed() {
-        0 => Ok(()),
-        n => Err(Error::DeployFailed(format!(
-            "encountered errors on {n} host(s)"
-        ))),
-    }
+    progress.outcome()
 }
 
 /// Reapply on a single host.

@@ -78,6 +78,9 @@ Improvements:
 
 Bugfixes:
 
+ <!-- TODO(ruuda): 'deptool sync' and 'deptool ping' now exit non-zero when a
+ host fails, like deploy and reapply already did, instead of always exiting
+ zero. -->
  <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
  rejected, instead of silently widening the command to every host. -->
  <!-- TODO(ruuda): A symlink or special file in the config tree is now

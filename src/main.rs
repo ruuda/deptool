@@ -460,8 +460,7 @@ fn run_ping(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.clone(), Box::new(observer));
-    ping::run_ping(&hosts, &*connector, &progress);
-    Ok(())
+    ping::run_ping(&hosts, &*connector, &progress)
 }
 
 fn run_sync(
@@ -496,8 +495,7 @@ fn run_sync(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.keys().cloned().collect(), Box::new(observer));
-    sync::run_sync(&store, &hosts, &*connector, &progress);
-    Ok(())
+    sync::run_sync(&store, &hosts, &*connector, &progress)
 }
 
 fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result<()> {
