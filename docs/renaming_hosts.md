@@ -1,29 +1,58 @@
 # Renaming a host
 
-A deployed host stores the commit that is deployed on it, and that commit
-identifies the host's config by hostname. After you change a host's
-`/etc/hostname`, the deployed commit only has config for the old name, and
-`deptool deploy` refuses the host:
+Deptool encourages reprovisioning over renaming hosts. Renames often have
+far-reaching unintended consequences. Having said this, even though initial
+provisioning is fast with Deptool, reprovisioning is not always feasible,
+especially when a host holds state that is difficult to move. This chapter
+explains how to handle host renames with Deptool.
 
-    web2: failed: host was deployed as 'web1'
+## Safety checks
 
-<!-- TODO(ruuda): Since recording the deployed hostname, detection is exact
-(it catches name swaps too) and no longer relies on the deployed commit's
-entries; hosts deployed before the recording existed show "host was deployed
-under another name" instead. Update the first paragraph's mechanism. -->
+Deptool computes the deployment plan offline, based on the config tree, and
+[tracking refs per host](store.md#operator-side-refs). When you rename a host,
+the base for this diff is no longer accurate, and the plan will be misleading.
+In the best case, the hostname is new, and the renamed host shows up as a new
+host in the plan. This is inaccurate, but at least not harmful: deploys are
+idempotent. If a hostname is reused though, the base for the diff is incorrect,
+and the plan can fail to execute.
 
-There is no in-place rename; treat the rename like a reprovision. Delete the
-store on the host, then deploy:
+To prevent executing incorrect plans against renamed hosts, Deptool prevents
+deploying against hosts whose hostname has changed since the previous deploy.
+For example, if we deployed against `web1`, and then rename it to `web2` in the
+config tree, in its `/etc/hostname`, and in <abbr>DNS</abbr> or <abbr>SSH</abbr>
+config, then Deptool would report:
 
-    ssh web2 sudo rm -rf /var/lib/deptool/store
-    deptool deploy
+    web2: failed: encountered previous deployment as 'web1'
 
-The deploy treats the host as a fresh install: it deploys every app and
-restarts every enabled unit. Deleting the store discards the host's
-deployment history (its refs and reflogs), like a reprovision would. The
-files under `/var/lib/deptool/apps` and the systemd units stay in place
-until the deploy replaces them.
+At this point the host needs manual intervention before it can be deployed to
+again. If the rename was unintentional, rename it back. When the rename _was_
+intentional, see below.
 
-Apps that only existed under the old name are not stopped or disabled by the
-fresh deploy. To drop apps from the host, remove them from the config tree
-and deploy *before* the rename, so Deptool stops and cleans them up.
+## Unblocking a renamed host
+
+The way to unblock a renamed host, is to convert it into a fresh install. We can
+do that by deleting the Deptool store on the host. Beware of the consequences of
+deleting the store!
+
+> **Warning**<br>
+> When you delete the Deptool store from a host, Deptool is no longer aware of
+> what is deployed there. Although every deployment step is designed to be
+> convergent where possible, not everything can be undone without the store.
+> For example, when Deptool creates a generic symlink on the filesystem, the
+> existence of that symlink is only tracked in the store. Without the store,
+> Deptool does not know the symlink exists, and it cannot remove it later.
+
+When you _only_ rename a host, without changing its config tree, deleting the
+store and doing a fresh install is safe. Deptool deployments are idempotent, so
+deploying the same state is safe.
+
+To proceed, on the renamed host, delete the store that records the deployment
+history under the old name:
+
+    rm -fr /var/lib/deptool/store
+
+The next deploy against this host will treat it as a new host, and recreate
+the store just as on new installations. Deptool currently has no mechanism to
+preserve the host-side deployment history on a renamed host.
+
+

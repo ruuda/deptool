@@ -319,9 +319,9 @@ impl fmt::Display for HostError {
             HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
             HostError::HostnameChanged {
                 deployed_as: Some(name),
-            } => write!(f, "host was deployed as '{name}'"),
+            } => write!(f, "encountered previous deployment as '{name}'"),
             HostError::HostnameChanged { deployed_as: None } => {
-                f.write_str("host was deployed under another name")
+                f.write_str("encountered previous deployment as different host")
             }
             HostError::SetupChecksumMismatch { .. } => f.write_str("binary checksum mismatch"),
             HostError::SetupMissingBinary { platform, .. } => write!(
