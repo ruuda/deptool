@@ -67,6 +67,10 @@ Improvements:
 
 Bugfixes:
 
+ <!-- TODO(ruuda): A symlink or special file in the config tree is now
+ rejected with its path, instead of panicking (inside an app) or being
+ silently dropped (at the host or app level, where it then planned as a
+ removal). -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per

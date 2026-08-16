@@ -709,7 +709,8 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid
         let name = entry.file_name();
         let name = name.to_str().ok_or(StoreError::NonUtf8FileName)?;
 
-        match entry.file_type()? {
+        let file_type = entry.file_type()?;
+        match file_type {
             ft if ft.is_dir() => {
                 let oid = build_tree_recursive(repo, &entry.path(), depth + 1)?;
                 // Prune subtrees with no files below the host level:
@@ -722,8 +723,9 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid
                     tb.insert(name, oid, 0o040000)?;
                 }
             }
-            // Skip non-directories at the host and app levels, see above.
-            _ if depth < 2 => {}
+            // Regular files above the app level (a per-host or per-cluster
+            // readme, say) belong to no app, so they are not committed.
+            ft if ft.is_file() && depth < 2 => {}
             ft if ft.is_file() => {
                 let contents = fs::read(entry.path())?;
                 let oid = repo.blob(&contents)?;
@@ -734,7 +736,21 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid
                 };
                 tb.insert(name, oid, mode)?;
             }
-            _ => panic!("Unsupported directory entry: {name}"),
+            // A symlink or special file has no representation in the config
+            // tree we build, so reject it with its path rather than skip it:
+            // skipping a symlinked app directory would make a deployed app
+            // look absent, which the plan then turns into a removal.
+            _ => {
+                let kind = if file_type.is_symlink() {
+                    "a symlink"
+                } else {
+                    "a special file"
+                };
+                return Err(StoreError::InvalidConfig(format!(
+                    "'{}' is {kind}; a config tree may contain only regular files and directories",
+                    entry.path().display(),
+                )));
+            }
         }
     }
 
@@ -746,6 +762,7 @@ mod tests {
     use super::*;
     use crate::error::StoreError;
     use crate::testutil::{TestRepo, config_with};
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn commit_appends_to_main_branch() -> Result<()> {
@@ -775,6 +792,22 @@ mod tests {
         assert_eq!(commit.parent_count(), 2);
         assert_eq!(commit.parent_id(0).expect("parent 0"), c1);
         assert_eq!(commit.parent_id(1).expect("parent 1"), c2);
+    }
+
+    #[test]
+    fn build_tree_rejects_a_symlinked_app_directory() {
+        // A symlinked app directory was silently dropped, so replacing a real
+        // app with a symlink would plan as removing the app. (A symlink within
+        // an app hits the same arm, but at a depth that used to panic.)
+        let t = TestRepo::new();
+        let config = config_with(&[("web1/nginx/nginx.conf", b"v1")]);
+        symlink("nginx", config.path().join("web1/caddy")).expect("symlink is created");
+
+        let err = t.store.build_tree(config.path()).unwrap_err();
+        let StoreError::InvalidConfig(msg) = err else {
+            panic!("expected InvalidConfig, got {err}")
+        };
+        assert!(msg.contains("caddy"), "{msg}");
     }
 
     #[test]
