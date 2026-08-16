@@ -851,17 +851,21 @@ impl Activate for SystemdActivator {
             });
         }
 
-        // Poll every 300ms. A restart job finishing (its child exiting) is when
-        // we record that unit's NRestarts baseline and give it a fresh 10s to
-        // prove it stays up. We never report success while a job runs, and a
-        // unit that fails -- crashes, or won't load -- breaks out at once so the
-        // deploy can roll back. The 300ms also lets a service start and then
-        // fail quickly (a bare binary on a verity-protected EROFS needed that
-        // long on a slow VM).
+        // Poll every 150ms to see if the restart job finished (the child
+        // exited), and also to check the state of the units. When units are
+        // failed or running, their state is clear, but they may be still
+        // activating, so then we wait, up to 10s from when the unit first
+        // started (the restart job blocks until then). Record the unit's
+        // NRestarts baseline at this point, if that goes up we also know that
+        // it failed. Previous experiments showed that on a slow VM, starting
+        // a binary from a dm-verity protected EROFS RootImage= took up to 300ms
+        // to get the unit running, 100ms delay was not enough, but back then we
+        // checked only once. Now that we poll, we can reduce the time of the
+        // initial poll, to keep Deptool fast for fast targets.
         let mut deadline = Instant::now() + Duration::from_secs(10);
         let mut announced_wait = false;
         let failed_units: Vec<String> = loop {
-            std::thread::sleep(Duration::from_millis(300));
+            std::thread::sleep(Duration::from_millis(150));
 
             // Reap finished restart jobs before reading state, so a unit's
             // NRestarts baseline is the count after its restart, not one read
@@ -913,6 +917,8 @@ impl Activate for SystemdActivator {
                 }
             }
 
+            // If any unit failed, we can already start rollback without waiting
+            // for the others.
             if !failed_units.is_empty() {
                 break failed_units;
             }
