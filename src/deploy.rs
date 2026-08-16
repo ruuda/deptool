@@ -116,6 +116,18 @@ impl DeployProgress {
         states.values().filter(|s| s.is_failure()).count()
     }
 
+    /// `Ok` if every host succeeded, otherwise a `DeployFailed` error
+    /// reporting how many hosts failed. The host-fan-out commands return
+    /// this so a per-host failure sets a non-zero exit code.
+    pub fn outcome(&self) -> Result<()> {
+        let message = match self.num_failed() {
+            0 => return Ok(()),
+            1 => "encountered errors on 1 host".to_string(),
+            n => format!("encountered errors on {n} hosts"),
+        };
+        Err(Error::DeployFailed(message))
+    }
+
     /// Long-form explanations for failed hosts, grouped by description.
     pub fn explain_errors(&self) -> BTreeMap<String, BTreeSet<String>> {
         let mut groups = BTreeMap::new();
@@ -605,12 +617,7 @@ pub fn run_deploy(
         }
     });
 
-    match progress.num_failed() {
-        0 => Ok(()),
-        n => Err(Error::DeployFailed(format!(
-            "encountered errors on {n} host(s)"
-        ))),
-    }
+    progress.outcome()
 }
 
 /// Strip noise from `systemctl status` output.

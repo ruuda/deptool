@@ -245,7 +245,8 @@ impl AgentSession {
             Ok(f) => f,
             Err(err) => {
                 emit_message(Message::ErrorPreApply(ApplyError::Io(format!(
-                    "failed to open lock file: {err}",
+                    "failed to open lock file '{}': {err}",
+                    lock_path.display(),
                 ))));
                 return;
             }
@@ -267,7 +268,8 @@ impl AgentSession {
             }
             Err(err) => {
                 emit_message(Message::ErrorPreApply(ApplyError::Io(format!(
-                    "flock failed: {err}",
+                    "failed to lock '{}': {err}",
+                    lock_path.display(),
                 ))));
                 return;
             }

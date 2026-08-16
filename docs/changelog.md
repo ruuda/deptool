@@ -47,6 +47,20 @@ Improvements:
  * Do not depend on shell brace expansion when installing the agent to improve
    compatibility, and print stderr when agent installation fails to aid
    debugging.
+ <!-- TODO(ruuda): The install-failure stderr is now captured at every step
+ of the session (probing, sending the binary, reading the checksum), not
+ only the missing-checksum case. Could fold into the bullet above. -->
+ <!-- TODO(ruuda): Agent lock errors now include the lock file path ("failed
+ to open lock file '<path>'", "failed to lock '<path>'") instead of a bare io
+ error. -->
+ <!-- TODO(ruuda): The systemd status report after a deploy now includes the
+ status command's stderr, so an unknown unit shows its reason ("Unit x could
+ not be found") instead of a blank block. -->
+ <!-- TODO(ruuda): The deploy and reapply confirmation prompts now re-ask on
+ unrecognized input, instead of treating any typo as no and aborting. Enter
+ and an explicit no still abort. -->
+
+
  * List which specific systemd units failed to become active, if any.
  * Improve the error message for when symlink reconcile fails to remove an
    existing path.
@@ -67,6 +81,19 @@ Improvements:
 
 Bugfixes:
 
+ <!-- TODO(ruuda): 'deptool sync' and 'deptool ping' now exit non-zero when a
+ host fails, like deploy and reapply already did, instead of always exiting
+ zero. -->
+ <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
+ rejected, instead of silently widening the command to every host. -->
+ <!-- TODO(ruuda): A symlink or special file in the config tree is now
+ rejected with its path, instead of panicking (inside an app) or being
+ silently dropped (at the host or app level, where it then planned as a
+ removal). -->
+ <!-- TODO(ruuda): Corrected misleading messages: reapply on a never-deployed
+ host now suggests 'deptool deploy' (not only 'deptool sync', a dead end); and
+ re-running 'deptool init' on an existing store reports "Using existing"
+ instead of "Initialized". -->
  * Fix a bug where an inactive unit could be masked by an active one when
    multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per

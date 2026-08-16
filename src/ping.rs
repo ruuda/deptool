@@ -11,7 +11,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use crate::deploy::{self, DeployProgress, HostState};
-use crate::error::HostError;
+use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::setup::HostConnector;
@@ -81,7 +81,11 @@ fn fmt_slot(d: Option<Duration>, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 /// One thread per host; hosts run independently. RTT covers the agent
 /// session's request/response round-trip; SSH connection setup is in
 /// `try_connect` and is not included.
-pub fn run_ping(hosts: &[Hostname], connector: &dyn HostConnector, progress: &DeployProgress) {
+pub fn run_ping(
+    hosts: &[Hostname],
+    connector: &dyn HostConnector,
+    progress: &DeployProgress,
+) -> Result<()> {
     std::thread::scope(|s| {
         for host in hosts {
             s.spawn(move || match ping_host(host, connector, progress) {
@@ -90,6 +94,7 @@ pub fn run_ping(hosts: &[Hostname], connector: &dyn HostConnector, progress: &De
             });
         }
     });
+    progress.outcome()
 }
 
 fn ping_host(
@@ -138,6 +143,21 @@ fn ping_host(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{test_connector, test_progress};
+
+    #[test]
+    fn ping_reports_failure_when_a_host_is_unreachable() {
+        let progress = test_progress(&["web1"]);
+        // A connector that knows no hosts, so connecting to web1 fails.
+        let connector = test_connector(&[]);
+
+        let result = run_ping(&[Hostname::from("web1")], &connector, &progress);
+
+        assert!(
+            result.is_err(),
+            "ping exits non-zero when a host cannot be reached",
+        );
+    }
 
     #[test]
     fn ping_stats_picks_min_p50_at_nearest_rank_p95_gated_by_count() {

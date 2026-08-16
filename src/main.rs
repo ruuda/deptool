@@ -460,8 +460,7 @@ fn run_ping(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.clone(), Box::new(observer));
-    ping::run_ping(&hosts, &*connector, &progress);
-    Ok(())
+    ping::run_ping(&hosts, &*connector, &progress)
 }
 
 fn run_sync(
@@ -496,8 +495,7 @@ fn run_sync(
     let connector = make_connector(connect_mode)?;
     let observer = display::StatusPrinter::new(display::UseColor::from_env());
     let progress = deploy::DeployProgress::new(hosts.keys().cloned().collect(), Box::new(observer));
-    sync::run_sync(&store, &hosts, &*connector, &progress);
-    Ok(())
+    sync::run_sync(&store, &hosts, &*connector, &progress)
 }
 
 fn run_status(store: PathBuf, dir: Option<PathBuf>, filter: &HostFilter) -> Result<()> {
@@ -556,7 +554,7 @@ fn run() -> Result<()> {
             plan_only,
             confirm_mode,
             mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Reapply {
             confirm_mode,
@@ -568,7 +566,7 @@ fn run() -> Result<()> {
             dir,
             confirm_mode,
             connect_mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Sync {
             sync_mode,
@@ -580,20 +578,26 @@ fn run() -> Result<()> {
             dir,
             sync_mode,
             connect_mode,
-            &HostFilter::from_limit(&limit),
+            &HostFilter::from_limit(&limit)?,
         )?,
         Cmd::Ping {
             limit,
             connect_mode,
             dir,
-        } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit))?,
-        Cmd::Status { limit, dir } => run_status(store, dir, &HostFilter::from_limit(&limit))?,
+        } => run_ping(store, dir, connect_mode, &HostFilter::from_limit(&limit)?)?,
+        Cmd::Status { limit, dir } => run_status(store, dir, &HostFilter::from_limit(&limit)?)?,
         Cmd::Diff { mode, limit, dir } => {
-            run_diff(store, dir, mode, &HostFilter::from_limit(&limit))?
+            run_diff(store, dir, mode, &HostFilter::from_limit(&limit)?)?
         }
         Cmd::Init { dir } => {
+            let store_existed = store.exists();
             let initialized = Store::open_or_init(&store)?;
-            eprintln!("Initialized store at '{}'.", store.display());
+            let store_verb = if store_existed {
+                "Using existing"
+            } else {
+                "Initialized"
+            };
+            eprintln!("{store_verb} store at '{}'.", store.display());
             if let Some(dir) = dir {
                 let already_existed = dir.exists();
                 std::fs::create_dir_all(&dir)?;
@@ -864,10 +868,19 @@ impl Activate for SystemdActivator {
             .env("SYSTEMD_COLORS", "true")
             .output()
         {
-            Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+            // Unit status goes to stdout, but messages like "Unit x could
+            // not be found" go to stderr; include both so an unknown unit
+            // reports its reason instead of an empty block.
+            Ok(o) => format!(
+                "{}{}",
+                String::from_utf8_lossy(&o.stdout),
+                String::from_utf8_lossy(&o.stderr),
+            ),
             Err(err) => format!("failed to run systemctl status: {err}"),
         };
-        emit(protocol::Message::SystemdUnitStatus { output });
+        if !output.trim().is_empty() {
+            emit(protocol::Message::SystemdUnitStatus { output });
+        }
 
         if inactive.is_empty() {
             Ok(())

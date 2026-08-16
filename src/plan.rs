@@ -516,8 +516,13 @@ impl HostFilter {
     /// We accept both repetition (`--limit a --limit b`) and comma-separated
     /// values (`--limit a,b`), with append semantics. Empty pieces from a
     /// stray comma (`--limit a,`) are dropped. No `--limit` at all yields
-    /// `HostFilter::All`.
-    pub fn from_limit(args: &[String]) -> Self {
+    /// `HostFilter::All`; a `--limit` that lists no hosts (an empty value, or
+    /// only commas) is an error, since selecting zero hosts is never intended.
+    pub fn from_limit(args: &[String]) -> Result<Self> {
+        // Distinguish no --limit (All) from a --limit that resolved to nothing.
+        if args.is_empty() {
+            return Ok(HostFilter::All);
+        }
         let hosts: Vec<Hostname> = args
             .iter()
             .flat_map(|s| s.split(','))
@@ -525,9 +530,9 @@ impl HostFilter {
             .map(Hostname::from)
             .collect();
         if hosts.is_empty() {
-            HostFilter::All
+            Err(Error::EmptyLimit)
         } else {
-            HostFilter::Only(hosts)
+            Ok(HostFilter::Only(hosts))
         }
     }
 
@@ -832,6 +837,23 @@ mod tests {
         let tree_oid = t.get_commit_tree_oid(c1);
         assert!(make_plan(&t.store, tree_oid, &HostFilter::All)?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn from_limit_rejects_a_limit_that_lists_no_hosts() {
+        // An empty value or only commas must error, not widen the blast
+        // radius to every host.
+        assert!(HostFilter::from_limit(&["".into()]).is_err());
+        assert!(HostFilter::from_limit(&[",".into()]).is_err());
+    }
+
+    #[test]
+    fn from_limit_maps_absent_and_present_values() {
+        assert!(matches!(HostFilter::from_limit(&[]), Ok(HostFilter::All)));
+        let Ok(HostFilter::Only(hosts)) = HostFilter::from_limit(&["web1,".into()]) else {
+            panic!("expected Only")
+        };
+        assert_eq!(hosts, vec![Hostname::from("web1")]);
     }
 
     #[test]

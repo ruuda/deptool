@@ -166,6 +166,26 @@ fn resolve_binary_path(binaries_dir: &Path, bin_name: &str, platform: &str) -> P
     binaries_dir.join(platform_subdir(platform)).join(bin_name)
 }
 
+/// Read whatever the remote install command wrote to stderr, trimmed.
+///
+/// The install paths pipe stderr instead of inheriting it, so when the
+/// session fails this is the only place the remote's error text (SSH auth,
+/// sudo denied) survives. Returns an empty string when there is none.
+fn take_remote_stderr(child: &mut std::process::Child) -> String {
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
+    }
+    stderr.trim().to_string()
+}
+
+/// Build a `SetupInterrupted` error, draining the remote stderr into it.
+fn setup_interrupted(child: &mut std::process::Child) -> HostError {
+    HostError::SetupInterrupted {
+        stderr: take_remote_stderr(child),
+    }
+}
+
 fn run_install_session(
     child: &mut std::process::Child,
     binaries_dir: &Path,
@@ -177,13 +197,14 @@ fn run_install_session(
     // in the && chain, so its output reaches us before dd needs the
     // binary on stdin.
     let mut uname_line = String::new();
-    stdout
+    let uname_bytes = stdout
         .read_line(&mut uname_line)
-        .map_err(HostError::connection_failed)?;
-    if uname_line.is_empty() {
-        return Err(HostError::ConnectionFailed(
-            "host closed connection before reporting uname".into(),
-        ));
+        .map_err(|_| setup_interrupted(child))?;
+    // Zero bytes is EOF: the session ended before uname printed, usually
+    // because SSH never connected. Either way the reason is on the remote's
+    // stderr, not here.
+    if uname_bytes == 0 {
+        return Err(setup_interrupted(child));
     }
     let platform = uname_line.trim();
     let binary_path = resolve_binary_path(binaries_dir, bin_name, platform);
@@ -206,12 +227,13 @@ fn run_install_session(
         }
     };
 
-    child
-        .stdin
-        .take()
-        .expect("stdin is piped")
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    stdin
         .write_all(&binary)
-        .map_err(HostError::connection_failed)?;
+        .map_err(|_| setup_interrupted(child))?;
+    // Close stdin so the remote `dd` sees EOF and the command chain moves
+    // on to sha256sum; otherwise both ends block.
+    drop(stdin);
 
     // Compute the expected hash in parallel with the remote -- by the
     // time write_all returns, the remote shell is already running chmod
@@ -228,16 +250,12 @@ fn run_install_session(
     let mut sha_line = String::new();
     stdout
         .read_line(&mut sha_line)
-        .map_err(HostError::connection_failed)?;
+        .map_err(|_| setup_interrupted(child))?;
     let actual_hash = match sha_line.split_whitespace().next() {
         Some(hash) => hash,
         None => {
-            let mut stderr = String::new();
-            if let Some(mut err) = child.stderr.take() {
-                let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
-            }
             return Err(HostError::SetupNoChecksum {
-                stderr: stderr.trim().to_string(),
+                stderr: take_remote_stderr(child),
             });
         }
     };

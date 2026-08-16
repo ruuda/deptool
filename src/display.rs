@@ -254,6 +254,19 @@ pub enum DiffMode {
     Stat,
 }
 
+/// Interpret a yes/no answer to a confirmation prompt.
+///
+/// Empty input -- the `[N]` default, and also EOF -- and an explicit no
+/// abort. Unrecognized input returns `None` so the caller re-prompts,
+/// rather than a typo silently aborting the run.
+fn confirm_answer(input: &str) -> Option<Decision> {
+    match input.trim() {
+        "y" | "Y" => Some(Decision::Apply),
+        "n" | "N" | "" => Some(Decision::Abort),
+        _ => None,
+    }
+}
+
 /// Show the confirmation prompt.
 ///
 /// `d` shows the full file diff for all hosts in a single pager, then
@@ -274,10 +287,15 @@ pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Re
 
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        match input.trim() {
-            "y" | "Y" => return Ok(Decision::Apply),
-            "d" | "D" => print_diff(store, plan, DiffMode::Full, color)?,
-            _ => return Ok(Decision::Abort),
+
+        // 'd' shows the diff and re-prompts; it's not a yes/no answer.
+        if matches!(input.trim(), "d" | "D") {
+            print_diff(store, plan, DiffMode::Full, color)?;
+            continue;
+        }
+        match confirm_answer(&input) {
+            Some(decision) => return Ok(decision),
+            None => println!("Please answer 'y', 'n', or 'd'."),
         }
     }
 }
@@ -285,14 +303,16 @@ pub fn confirm(store: &Store, plan: &Plan, cluster: &str, color: UseColor) -> Re
 /// Show the reapply confirmation prompt. Enter or `N` aborts (the default).
 pub fn confirm_reapply(n_hosts: usize, cluster: &str) -> Result<Decision> {
     let noun = if n_hosts == 1 { "host" } else { "hosts" };
-    print!("Reapply to {n_hosts} {noun} in cluster '{cluster}'? [y/N] ");
-    io::stdout().flush()?;
+    loop {
+        print!("Reapply to {n_hosts} {noun} in cluster '{cluster}'? [y/N] ");
+        io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-    match input.trim() {
-        "y" | "Y" => Ok(Decision::Apply),
-        _ => Ok(Decision::Abort),
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        match confirm_answer(&input) {
+            Some(decision) => return Ok(decision),
+            None => println!("Please answer 'y' or 'n'."),
+        }
     }
 }
 

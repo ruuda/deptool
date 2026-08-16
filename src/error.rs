@@ -174,6 +174,12 @@ pub enum HostError {
     /// Distinct from `SetupMissingBinary`, which is the expected
     /// "no such file" case with its own remediation hint.
     SetupReadError { path: PathBuf, cause: String },
+    /// The install session broke before the binary could be verified: the
+    /// SSH connection or remote command chain ended while probing the host,
+    /// sending the binary, or reading the checksum back. Usually SSH could
+    /// not connect or a remote command failed (auth denied, sudo denied).
+    /// Carries the remote stderr for diagnosis.
+    SetupInterrupted { stderr: String },
     /// The install command finished without reporting the uploaded binary's
     /// checksum, so the transfer could not be verified. Usually the remote
     /// command chain failed before `sha256sum` ran (sudo denied, disk full,
@@ -246,16 +252,18 @@ impl HostError {
                     None => format!("  {host}: deployed under an unknown name"),
                 },
             }),
+            HostError::SetupInterrupted { stderr } => Some(Explanation {
+                description: "The install session ended before the binary could be verified.\n\
+                             The host's stderr:"
+                    .to_string(),
+                item: stderr_item(host, stderr),
+            }),
             HostError::SetupNoChecksum { stderr } => Some(Explanation {
                 description: "The install command finished without reporting the uploaded binary's\n\
                              checksum, so the transfer could not be verified. Usually the remote\n\
                              command failed before it got that far. The host's stderr was:"
                     .to_string(),
-                item: if stderr.is_empty() {
-                    format!("  {host}: (the host produced no stderr)")
-                } else {
-                    format!("  {host}:\n    {}", stderr.replace('\n', "\n    "))
-                },
+                item: stderr_item(host, stderr),
             }),
             HostError::SetupChecksumMismatch {
                 expected_hash,
@@ -296,6 +304,16 @@ pub struct Explanation {
     pub item: String,
 }
 
+/// Format a host's captured stderr as an explanation item: indented under
+/// the host name, or a placeholder when the host produced none.
+fn stderr_item(host: &str, stderr: &str) -> String {
+    if stderr.is_empty() {
+        format!("  {host}: (the host produced no stderr)")
+    } else {
+        format!("  {host}:\n    {}", stderr.replace('\n', "\n    "))
+    }
+}
+
 impl From<StoreError> for HostError {
     fn from(e: StoreError) -> Self {
         HostError::Store(e)
@@ -331,6 +349,9 @@ impl fmt::Display for HostError {
             HostError::SetupReadError { path, cause } => {
                 write!(f, "failed to read '{}': {cause}", path.display(),)
             }
+            HostError::SetupInterrupted { .. } => {
+                f.write_str("install interrupted before the binary was verified")
+            }
             HostError::SetupNoChecksum { .. } => {
                 f.write_str("install incomplete: no checksum from host")
             }
@@ -363,12 +384,14 @@ pub enum Error {
     DefaultClusterNotFound(PathBuf),
     /// Hostnames passed via --limit don't appear in the cluster.
     UnknownHosts(Vec<Hostname>),
+    /// A --limit was given but lists no hosts (an empty value or only commas).
+    EmptyLimit,
     /// The store has no tracking ref for a host in the config tree.
-    /// Reapply needs the deployed commit, and another operator may have
-    /// deployed to these hosts, so the fix is `deptool sync`, not
-    /// assuming they are fresh.
+    /// Reapply needs the deployed commit: either the host is new and was
+    /// never deployed (fix with `deptool deploy`), or another operator
+    /// deployed to it from a different store (fix with `deptool sync`).
     UnsyncedHosts(Vec<Hostname>),
-    /// One or more hosts failed during a deploy or reapply.
+    /// One or more hosts failed during a deploy, reapply, sync, or ping.
     DeployFailed(String),
 }
 
@@ -434,12 +457,19 @@ impl fmt::Display for Error {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(f, "unknown hosts in --limit: {}", names.join(", "))
             }
+            Error::EmptyLimit => write!(
+                f,
+                "no host names were given to --limit; list the hosts to include \
+                 (for example --limit web1,web2), or omit --limit to include \
+                 every host",
+            ),
             Error::UnsyncedHosts(hosts) => {
                 let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
                 write!(
                     f,
-                    "no known deployed state for hosts: {}; \
-                     run 'deptool sync' first",
+                    "no deployed state recorded for hosts: {}; if they are new, \
+                     run 'deptool deploy'; if another operator already deployed \
+                     to them, run 'deptool sync'",
                     names.join(", "),
                 )
             }
@@ -457,6 +487,21 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explain_setup_interrupted_shows_the_hosts_stderr() {
+        let err = HostError::SetupInterrupted {
+            stderr: "sudo: a password is required".into(),
+        };
+        let exp = err
+            .explain("web1")
+            .expect("interrupted setup has explanation");
+        assert!(exp.item.contains("web1"), "item includes the host");
+        assert!(
+            exp.item.contains("sudo: a password is required"),
+            "item shows the remote stderr",
+        );
+    }
 
     #[test]
     fn explain_hostname_mismatch_names_host_and_reported_value() {
