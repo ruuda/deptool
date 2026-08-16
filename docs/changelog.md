@@ -56,6 +56,9 @@ Improvements:
  <!-- TODO(ruuda): The systemd status report after a deploy now includes the
  status command's stderr, so an unknown unit shows its reason ("Unit x could
  not be found") instead of a blank block. -->
+ <!-- TODO(ruuda): The deploy and reapply confirmation prompts now re-ask on
+ unrecognized input, instead of treating any typo as no and aborting. Enter
+ and an explicit no still abort. -->
 
 
  * List which specific systemd units failed to become active, if any.
