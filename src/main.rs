@@ -909,25 +909,21 @@ impl Activate for SystemdActivator {
                 // This is the first status read after the job ended, so it
                 // records the baseline.
                 if let RestartState::JobDone = pending.state {
-                    pending.state = RestartState::Settling {
-                        baseline_restarts: status.restarts,
-                    };
+                    pending.state = RestartState::Settling(status.clone());
                 }
                 match &pending.state {
                     // Without a baseline the unit is still waiting.
                     RestartState::Job(_) | RestartState::JobDone => {
                         waiting_units.push(pending.unit.clone())
                     }
-                    RestartState::Settling { baseline_restarts } => {
-                        match status.activation(*baseline_restarts) {
-                            Activation::Succeeded => {}
-                            Activation::Running if status.settled(now) => {}
-                            Activation::Running | Activation::Starting => {
-                                waiting_units.push(pending.unit.clone())
-                            }
-                            Activation::Failed => failed_units.push(pending.unit.clone()),
+                    RestartState::Settling(baseline) => match status.activation(baseline) {
+                        Activation::Succeeded => {}
+                        Activation::Running if status.settled(now) => {}
+                        Activation::Running | Activation::Starting => {
+                            waiting_units.push(pending.unit.clone())
                         }
-                    }
+                        Activation::Failed => failed_units.push(pending.unit.clone()),
+                    },
                 }
             }
 
@@ -988,13 +984,14 @@ impl Activate for SystemdActivator {
 }
 
 /// A unit's state, from the `systemctl show` properties we query.
-struct UnitStatus<'a> {
-    load_state: &'a str,
-    active_state: &'a str,
+#[derive(Clone)]
+struct UnitStatus {
+    load_state: String,
+    active_state: String,
     /// When the unit last entered the active state, as a `CLOCK_MONOTONIC`
     /// offset since boot; renewed on every re-entry, zero if never active.
     active_enter_monotonic: Duration,
-    result: &'a str,
+    result: String,
     restarts: u64,
 }
 
@@ -1017,13 +1014,13 @@ enum Activation {
     Failed,
 }
 
-impl<'a> UnitStatus<'a> {
+impl UnitStatus {
     /// Parse one property block from `systemctl show` output.
     ///
     /// A missing or garbled numeric property is an error, not a default: a
     /// fallback of 0 would read as "entered active at boot" and "never
     /// restarted", silently disabling the settle and crash checks.
-    fn from_show_block(block: &'a str) -> std::result::Result<UnitStatus<'a>, ApplyError> {
+    fn from_show_block(block: &str) -> std::result::Result<UnitStatus, ApplyError> {
         let prop = |key: &str| {
             block
                 .lines()
@@ -1042,18 +1039,19 @@ impl<'a> UnitStatus<'a> {
             .parse()
             .map_err(unreadable)?;
         Ok(UnitStatus {
-            load_state: prop("LoadState="),
-            active_state: prop("ActiveState="),
+            load_state: prop("LoadState=").to_string(),
+            active_state: prop("ActiveState=").to_string(),
             active_enter_monotonic: Duration::from_micros(active_enter_micros),
-            result: prop("Result="),
+            result: prop("Result=").to_string(),
             restarts,
         })
     }
 
-    /// Classify the unit, given the `NRestarts` count captured when its restart
-    /// finished. A higher count now means systemd auto-restarted the unit since
-    /// -- it crashed -- which catches a crash loop even in the brief windows it
-    /// looks active. It also failed if it did not load or its result is a
+    /// Classify the unit against its baseline: the status captured when its
+    /// restart finished. More restarts now than in the baseline means systemd
+    /// auto-restarted the unit since -- it crashed -- which catches a crash
+    /// loop even in the brief windows it looks active. It also failed if it
+    /// did not load or its result is a
     /// failure; an empty result (a unit that never produces one, e.g. a target)
     /// is not a failure. Otherwise inactive (a completed `Type=oneshot`)
     /// succeeded, active is running (provisionally good, see
@@ -1061,10 +1059,10 @@ impl<'a> UnitStatus<'a> {
     /// restarting) is in progress. Keying on the result, not `is-active`, is
     /// what makes a completed oneshot and a dependency-blocked unit come out
     /// right (both inactive, with a success and a non-success result).
-    fn activation(&self, baseline_restarts: u64) -> Activation {
+    fn activation(&self, baseline: &UnitStatus) -> Activation {
         if self.load_state != "loaded"
             || (!self.result.is_empty() && self.result != "success")
-            || self.restarts > baseline_restarts
+            || self.restarts > baseline.restarts
         {
             Activation::Failed
         } else if self.active_state == "inactive" {
@@ -1100,12 +1098,12 @@ enum RestartState {
     /// The job finished, but no status read happened since; the first one
     /// after it records the baseline.
     JobDone,
-    /// The unit is judged against this NRestarts count, from the first status
-    /// read after the job. A deploy's `restart` resets NRestarts to 0, but a
-    /// reapply's `start` of an already-running unit is a no-op that leaves
-    /// the count untouched, so we record it rather than assume zero;
-    /// crash-driven restarts push it above the baseline.
-    Settling { baseline_restarts: u64 },
+    /// The unit is judged against its status from the first read after the
+    /// job finished. Judging needs that baseline: a deploy's `restart` resets
+    /// NRestarts to 0, but a reapply's `start` of an already-running unit is
+    /// a no-op that leaves the count untouched, so we record what we observed
+    /// rather than assume zeroes.
+    Settling(UnitStatus),
 }
 
 /// The host's `CLOCK_MONOTONIC` reading, as the offset since boot.
@@ -1219,15 +1217,16 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn show_block(block: &str) -> UnitStatus<'_> {
+    fn show_block(block: &str) -> UnitStatus {
         UnitStatus::from_show_block(block).expect("the fixture block parses")
     }
 
     #[test]
     fn activation_keys_on_result_and_restart_count_not_is_active() {
-        let classify = |block, baseline| show_block(block).activation(baseline);
-        // Literal `systemctl show` blocks; the baseline is a unit's NRestarts
-        // when its restart finished. A completed Type=oneshot is inactive with
+        let classify = |block, baseline| show_block(block).activation(&show_block(baseline));
+        // Literal `systemctl show` blocks; the baseline is the unit's status
+        // captured when its restart finished, so for steady units it equals
+        // the current block. A completed Type=oneshot is inactive with
         // a successful result (and never entered active); a unit blocked by a
         // failed dependency is inactive too, but its result is not success; a
         // target block has no Result or NRestarts lines at all; a unit still
@@ -1245,22 +1244,22 @@ mod tests {
         let missing = "LoadState=not-found\nActiveState=inactive\nActiveEnterTimestampMonotonic=0\nResult=success\nNRestarts=0";
         let target = "LoadState=loaded\nActiveState=active\nActiveEnterTimestampMonotonic=1";
         let crash_loop = "LoadState=loaded\nActiveState=active\nActiveEnterTimestampMonotonic=1\nResult=success\nNRestarts=3";
-        assert_eq!(classify(oneshot, 0), Activation::Succeeded);
-        assert_eq!(classify(running, 0), Activation::Running);
-        assert_eq!(classify(crashed, 0), Activation::Failed);
-        assert_eq!(classify(blocked, 0), Activation::Failed);
-        assert_eq!(classify(starting, 0), Activation::Starting);
-        assert_eq!(classify(stopping, 0), Activation::Starting);
-        assert_eq!(classify(missing, 0), Activation::Failed);
-        assert_eq!(classify(target, 0), Activation::Running);
-        assert_eq!(classify(crash_loop, 0), Activation::Failed);
+        assert_eq!(classify(oneshot, oneshot), Activation::Succeeded);
+        assert_eq!(classify(running, running), Activation::Running);
+        assert_eq!(classify(crashed, crashed), Activation::Failed);
+        assert_eq!(classify(blocked, blocked), Activation::Failed);
+        assert_eq!(classify(starting, starting), Activation::Starting);
+        assert_eq!(classify(stopping, stopping), Activation::Starting);
+        assert_eq!(classify(missing, missing), Activation::Failed);
+        assert_eq!(classify(target, target), Activation::Running);
+        assert_eq!(classify(crash_loop, running), Activation::Failed);
     }
 
     #[test]
     fn from_show_block_parses_the_active_enter_timestamp_as_micros() {
-        // A parse failure falls back to zero, which reads as "active since
-        // boot" and would silently disable the settle window, so the key and
-        // the unit (microseconds) are worth pinning.
+        // Pins the unit (microseconds): misreading the value as milliseconds
+        // would make every unit look active for 1000x longer than it was,
+        // silently settling everything instantly.
         let block = "ActiveState=active\nActiveEnterTimestampMonotonic=10827970236";
         let status = show_block(block);
         assert_eq!(
