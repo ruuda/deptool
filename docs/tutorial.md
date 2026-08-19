@@ -177,6 +177,7 @@ Description=Caddy webserver
 After=network-online.target nss-lookup.target
 
 [Service]
+Type=notify
 ExecStart=/bin/caddy run --config /var/lib/deptool/apps/caddy/current/Caddyfile
 # Other configuration keys omitted here for brevity.
 

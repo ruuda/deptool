@@ -109,32 +109,51 @@ service even when it was not needed. For example, when we created a new symlink
 that does not affect the service. Although some services support reloading their
 configuration, for simplicity we always restart.
 
+Deptool restarts all affected systemd units in parallel.
+
 In case of a [reapply](cmd/deptool_reapply.md) rather than a
 [deploy](cmd/deptool_deploy.md), Deptool runs `systemctl start` rather than
 `restart`. Start merely starts units that are not already running, it does not
 restart running units. Restarting _all_ managed units across the _entire_
 cluster at the exact same time would be a very bad idea!
 
-<!-- TODO(ruuda): The restart/start jobs now run without blocking on each
-other: Deptool spawns them together (parallel; systemd still honors ordering)
-and tracks the child processes, so a unit slow to stop no longer holds up the
-rest. -->
-
 ### Check systemd unit status
 
-We wait 300ms to give services the opportunity to start. Then for all apps that
-changed, we check the `systemctl status` of the units that are enabled in their
-manifest. If none of them failed, apply is complete on this host.
+Deptool waits briefly to confirm that units enabled in the manifest started
+successfully. This ensures that we report a useful status back to the operator.
+(A daemon might start, but crash after 5ms because it couldn’t read a config
+file, or bind to a port.) It also enables Deptool to detect more reliably when
+a deployment failed, and start a rollback.
 
-<!-- TODO(ruuda): This is now a poll loop rather than one 300ms wait. It polls
-every 300ms, waits until each restart job's process has exited (each exit
-extends a 10s soak so a fast crash-after-start is still caught), and classifies
-each unit from LoadState/ActiveState/Result: a completed oneshot is
-inactive-but-successful, a unit blocked by a failed dependency is inactive with
-a non-success result, and a crash loop is caught by NRestarts rising above the
-count captured when the restart finished. Units still starting or stopping are
-shown live to the operator as "waiting for ...". -->
+ 1. We wait for systemd to signal that it started affected units, by waiting
+    for the `systemctl restart` command to exit. This command blocks until the
+    current instance has exited, which can take a while in case of a graceful
+    shutdown, for example when a webserver waits until all connections are
+    closed.
+ 2. After a unit first becomes `active`, we continue to poll its status for
+    500ms to confirm that it stays up. A one-shot unit that finishes
+    successfully and ends up in the `inactive` state is also considered a
+    success.
+ 3. For units that remain `starting`, we poll up to 10 seconds. After that
+    deadline, Deptool assumes that the deploy is successful.
 
+If a unit fails at any point, Deptool considers the deploy failed. If the
+deployment is rollback-safe, Deptool initiates the rollback at the first
+failure; it does not wait for the status of other units. If all units that
+are enabled stay up, apply is complete on this host.
+
+> **Tip**<br>
+> A `Type=simple` systemd unit does not provide a reliable way to measure that
+> startup was successful and complete. When the application supports it,
+> `Type=notify` is more precise: it enables Deptool to wait until the daemon
+> itself confirms that it started successfully. For applications that don’t
+> support `notify`, consider using `Type=exec`, which waits for the `execve`
+> call to succeed before marking the unit as `active`. This matters especially
+> for units that use mounts: `Type=simple` reports a unit as `active` when
+> systemd is still setting up prerequisites, which might fail. See also the
+> [systemd `Type=` documentation][sd-type].
+
+[sd-type]: https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html#Type=
 
 ## Rollback
 
