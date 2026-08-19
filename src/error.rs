@@ -81,8 +81,9 @@ pub enum ApplyError {
     RemoveFailed { path: String, cause: String },
     /// One or more systemd units failed to become active after apply.
     SystemdActivationFailed { units: Vec<String> },
-    /// `systemctl is-active` returned a different number of status words than
-    /// units queried, so the status of each unit could not be determined.
+    /// `systemctl show` output could not be interpreted: a different number
+    /// of property blocks than units queried, or an unparseable property
+    /// value, so the status of each unit could not be determined.
     /// Distinct from `SystemdActivationFailed`: we don't know what's active.
     SystemdStatusUnreadable { output: String },
     /// `networkctl reload` failed to apply changed networkd configs.
@@ -121,7 +122,7 @@ impl fmt::Display for ApplyError {
                 write!(f, "units failed to become active: {}", units.join(", "))
             }
             ApplyError::SystemdStatusUnreadable { output } => {
-                write!(f, "unexpected systemctl is-active output: {output:?}")
+                write!(f, "unexpected systemctl show output: {output:?}")
             }
             ApplyError::NetworkdReloadFailed => {
                 write!(f, "networkctl failed to reload networkd configs")
