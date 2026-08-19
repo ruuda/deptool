@@ -177,18 +177,13 @@ Description=Caddy webserver
 After=network-online.target nss-lookup.target
 
 [Service]
+Type=notify
 ExecStart=/bin/caddy run --config /var/lib/deptool/apps/caddy/current/Caddyfile
 # Other configuration keys omitted here for brevity.
 
 [Install]
 WantedBy=multi-user.target
 ```
-
-<!-- TODO(ruuda): Recommend Type=exec over the default Type=simple for service
-units (perhaps in this example). With exec, systemd fails the start job when
-setup before execve fails (a missing binary, a missing user, a failing
-BindReadOnlyPaths= mount), so Deptool detects the failure on its first status
-poll and rolls back, instead of relying on the settle window to catch it. -->
 
 We can manage this systemd unit with Deptool as well. If we place it in the
 `systemd` subdirectory of the `caddy` app, then Deptool will automatically make
