@@ -31,6 +31,8 @@
 ## Working through a task
 
  - Keep testability in mind from the start. Functional approaches (pure core, IO at the edge) are often more feasible to test than imperative code.
+ - Before building bookkeeping to infer a fact (elapsed time, counters, baselines), check what the system already records -- `systemctl show` prints everything systemd knows, /proc and file metadata likewise. The recorded fact beats a sampled proxy, and finding it often deletes the bookkeeping.
+ - State tracked across iterations has implied invariants: a waiting set only shrinks, a baseline is written once, items with independent lifecycles get per-item state. Treat these as acceptance criteria -- verify them before presenting, and surface violations instead of dismissing them as cosmetic.
  - Tests must not call `sleep`, `Instant::now`, `SystemTime::now`, or perform real I/O -- even with zero durations, timing calls couple test speed and stability to the scheduler, and "fast" tests on a developer laptop become flaky on a slow CI box. When code measures time or does IO, push those calls up to the caller so tests can pass deterministic substitutes (or test the pure data-in/data-out layer separately).
  - Do not pull in external dependencies without permission. Permission will only be granted if there is a good justification.
  - The docs are not law. If we discover design flaws while implementing, we can stop and change the design.
