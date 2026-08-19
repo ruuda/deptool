@@ -846,18 +846,18 @@ impl Activate for SystemdActivator {
                 })?;
             restarts.push(PendingRestart {
                 unit: unit.to_string(),
-                child: Some(child),
-                baseline_restarts: None,
+                state: RestartState::Job(child),
             });
         }
 
-        // Poll every 150ms to see if the restart job finished (the child
-        // exited), and also to check the state of the units. When units are
-        // failed or running, their state is clear, but they may be still
-        // activating, so then we wait, up to 10s from when the unit first
-        // started (the restart job blocks until then). Record the unit's
-        // NRestarts baseline at this point, if that goes up we also know that
-        // it failed. Previous experiments showed that on a slow VM, starting
+        // Poll every 100ms to see if the restart job finished (the child
+        // exited), and also to check the state of the units. Failed units are
+        // clear; active units count only after a 500ms settle window past
+        // their restart job finishing (see `Activation::Running`). Units still
+        // activating we wait for, up to 10s from when the unit first started
+        // (the restart job blocks until then). Record the unit's NRestarts
+        // baseline at this point, if that goes up we also know that it
+        // failed. Previous experiments showed that on a slow VM, starting
         // a binary from a dm-verity protected EROFS RootImage= took up to 300ms
         // to get the unit running, 100ms delay was not enough, but back then we
         // checked only once. Now that we poll, we can reduce the time of the
@@ -865,18 +865,19 @@ impl Activate for SystemdActivator {
         let mut deadline = Instant::now() + Duration::from_secs(10);
         let mut announced_wait = false;
         let failed_units: Vec<String> = loop {
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(Duration::from_millis(100));
+            let now = Instant::now();
 
             // Reap finished restart jobs before reading state, so a unit's
             // NRestarts baseline is the count after its restart, not one read
             // before the job finished. Each finished job also gives its unit a
             // fresh 10s to prove it stays up.
             for pending in &mut restarts {
-                if let Some(child) = &mut pending.child {
+                if let RestartState::Job(child) = &mut pending.state {
                     match child.try_wait() {
                         Ok(Some(_)) => {
-                            pending.child = None;
-                            deadline = Instant::now() + Duration::from_secs(10);
+                            pending.state = RestartState::JobDone;
+                            deadline = now + Duration::from_secs(10);
                         }
                         _ => {} // still running, or a reap error -- keep waiting
                     }
@@ -902,18 +903,30 @@ impl Activate for SystemdActivator {
             let mut failed_units = Vec::new();
             let mut waiting_units = Vec::new();
             for (pending, status) in restarts.iter_mut().zip(&statuses) {
-                // Record the crash baseline on the first poll after the job ends.
-                if pending.child.is_none() && pending.baseline_restarts.is_none() {
-                    pending.baseline_restarts = Some(status.restarts);
+                // This is the first status read after the job ended, so it
+                // records the baseline; the settle window runs from here.
+                if let RestartState::JobDone = pending.state {
+                    pending.state = RestartState::Settling(RestartBaseline {
+                        restarts: status.restarts,
+                        settle_until: now + Duration::from_millis(500),
+                    });
                 }
-                let outcome = match pending.baseline_restarts {
-                    Some(baseline) => status.activation(baseline),
-                    None => Activation::Starting, // restart job still running
-                };
-                match outcome {
-                    Activation::Succeeded => {}
-                    Activation::Starting => waiting_units.push(pending.unit.clone()),
-                    Activation::Failed => failed_units.push(pending.unit.clone()),
+                match &pending.state {
+                    // Without a baseline the unit is still waiting.
+                    RestartState::Job(_) | RestartState::JobDone => {
+                        waiting_units.push(pending.unit.clone())
+                    }
+                    RestartState::Settling(baseline) => {
+                        match status.activation(baseline.restarts) {
+                            Activation::Succeeded => {}
+                            // Trust a running unit only once its settle window elapsed.
+                            Activation::Running if now >= baseline.settle_until => {}
+                            Activation::Running | Activation::Starting => {
+                                waiting_units.push(pending.unit.clone())
+                            }
+                            Activation::Failed => failed_units.push(pending.unit.clone()),
+                        }
+                    }
                 }
             }
 
@@ -922,8 +935,10 @@ impl Activate for SystemdActivator {
             if !failed_units.is_empty() {
                 break failed_units;
             }
-            let all_restarted = restarts.iter().all(|p| p.child.is_none());
-            if all_restarted && (waiting_units.is_empty() || Instant::now() >= deadline) {
+            let all_restarted = restarts
+                .iter()
+                .all(|p| !matches!(p.state, RestartState::Job(_)));
+            if all_restarted && (waiting_units.is_empty() || now >= deadline) {
                 // Done waiting: clear the live "waiting for" line so it does not
                 // linger while we finish (ref update, gc) before reporting done.
                 if announced_wait {
@@ -982,7 +997,16 @@ struct UnitStatus<'a> {
 /// The outcome of (re)starting a unit.
 #[derive(Debug, PartialEq)]
 enum Activation {
+    /// A final good state, e.g. a completed `Type=oneshot`.
     Succeeded,
+    /// Active with its process up -- but only provisionally good. Systemd
+    /// reports a `Type=simple` unit as active as soon as it forked the
+    /// service process, before the setup in the child (mount namespace, exec)
+    /// succeeded or failed, so a fresh active can hide a process that already
+    /// died. Running counts as succeeded only once it held for a settle
+    /// window after the restart job finished; a quick death surfaces within
+    /// that window as a non-success result or a rising `NRestarts`.
+    Running,
     Starting,
     Failed,
 }
@@ -1009,8 +1033,9 @@ impl<'a> UnitStatus<'a> {
     /// -- it crashed -- which catches a crash loop even in the brief windows it
     /// looks active. It also failed if it did not load or its result is a
     /// failure; an empty result (a unit that never produces one, e.g. a target)
-    /// is not a failure. Otherwise it succeeded once it reaches active or
-    /// inactive (a completed `Type=oneshot`); activating or deactivating (still
+    /// is not a failure. Otherwise inactive (a completed `Type=oneshot`)
+    /// succeeded, active is running (provisionally good, see
+    /// `Activation::Running`), and activating or deactivating (still
     /// restarting) is in progress. Keying on the result, not `is-active`, is
     /// what makes a completed oneshot and a dependency-blocked unit come out
     /// right (both inactive, with a success and a non-success result).
@@ -1020,24 +1045,45 @@ impl<'a> UnitStatus<'a> {
             || self.restarts > baseline_restarts
         {
             Activation::Failed
-        } else if self.active_state == "active" || self.active_state == "inactive" {
+        } else if self.active_state == "inactive" {
             Activation::Succeeded
+        } else if self.active_state == "active" {
+            Activation::Running
         } else {
             Activation::Starting
         }
     }
 }
 
-/// A unit's in-flight restart: the `systemctl` child while its job runs, and
-/// the `NRestarts` count captured when it finished -- the baseline that later
-/// crash-driven restarts are measured against. A deploy's `restart` resets
-/// NRestarts to 0, but a reapply's `start` of an already-running unit is a
-/// no-op that leaves it untouched, so we record the baseline rather than
-/// assume zero.
+/// A unit's in-flight restart: its name and where the restart is in its
+/// lifecycle.
 struct PendingRestart {
     unit: String,
-    child: Option<Child>,
-    baseline_restarts: Option<u64>,
+    state: RestartState,
+}
+
+/// Where a unit's restart is in its lifecycle.
+enum RestartState {
+    /// The spawned `systemctl` child; it exiting marks the restart job done.
+    Job(Child),
+    /// The job finished, but no status read happened since; the first one
+    /// after it records the baseline.
+    JobDone,
+    /// The unit is judged against the recorded baseline.
+    Settling(RestartBaseline),
+}
+
+/// Recorded on the first poll after a unit's restart job finished.
+///
+/// A deploy's `restart` resets NRestarts to 0, but a reapply's `start` of an
+/// already-running unit is a no-op that leaves the count untouched, so we
+/// record it rather than assume zero; crash-driven restarts push it above
+/// this baseline. The settle window is per unit and written once, so a unit
+/// that settled stays settled when another unit's restart finishes later --
+/// the set of units we wait for only shrinks.
+struct RestartBaseline {
+    restarts: u64,
+    settle_until: Instant,
 }
 
 fn systemctl_ok(args: &[&str]) -> bool {
@@ -1143,6 +1189,9 @@ mod tests {
         // too, but its result is not success; a target has no result; a unit
         // still stopping (a slow restart) is deactivating; a crash loop shows
         // more restarts than the baseline even in the brief window it is active.
+        // An active unit is running, not succeeded: a fresh active can hide a
+        // process that already died during setup, so the poll loop holds
+        // running units to the settle window (see `Activation::Running`).
         let oneshot = "LoadState=loaded\nActiveState=inactive\nResult=success\nNRestarts=0";
         let running = "LoadState=loaded\nActiveState=active\nResult=success\nNRestarts=0";
         let crashed = "LoadState=loaded\nActiveState=failed\nResult=exit-code\nNRestarts=0";
@@ -1153,13 +1202,13 @@ mod tests {
         let target = "LoadState=loaded\nActiveState=active\nResult=\nNRestarts=0";
         let crash_loop = "LoadState=loaded\nActiveState=active\nResult=success\nNRestarts=3";
         assert_eq!(classify(oneshot, 0), Activation::Succeeded);
-        assert_eq!(classify(running, 0), Activation::Succeeded);
+        assert_eq!(classify(running, 0), Activation::Running);
         assert_eq!(classify(crashed, 0), Activation::Failed);
         assert_eq!(classify(blocked, 0), Activation::Failed);
         assert_eq!(classify(starting, 0), Activation::Starting);
         assert_eq!(classify(stopping, 0), Activation::Starting);
         assert_eq!(classify(missing, 0), Activation::Failed);
-        assert_eq!(classify(target, 0), Activation::Succeeded);
+        assert_eq!(classify(target, 0), Activation::Running);
         assert_eq!(classify(crash_loop, 0), Activation::Failed);
     }
 }

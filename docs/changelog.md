@@ -18,6 +18,11 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
+<!-- TODO(ruuda): A deploy now trusts an active unit only after it stays active
+for a 500ms settle window, so a service that dies during systemd's setup (e.g.
+a failing BindReadOnlyPaths= mount) is detected and rolled back instead of
+reported as deployed successfully. Deploys take up to 500ms longer. -->
+
 <!-- TODO(ruuda): Deploys now refuse hosts whose deployed commit has no config
 entry for their hostname (the state a hostname change leaves behind), instead
 of looping on 'stale' forever. Reference the new 'Renaming a host' page. -->

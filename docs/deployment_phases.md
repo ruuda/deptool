@@ -127,13 +127,17 @@ changed, we check the `systemctl status` of the units that are enabled in their
 manifest. If none of them failed, apply is complete on this host.
 
 <!-- TODO(ruuda): This is now a poll loop rather than one 300ms wait. It polls
-every 300ms, waits until each restart job's process has exited (each exit
+every 100ms, waits until each restart job's process has exited (each exit
 extends a 10s soak so a fast crash-after-start is still caught), and classifies
 each unit from LoadState/ActiveState/Result: a completed oneshot is
 inactive-but-successful, a unit blocked by a failed dependency is inactive with
 a non-success result, and a crash loop is caught by NRestarts rising above the
 count captured when the restart finished. Units still starting or stopping are
-shown live to the operator as "waiting for ...". -->
+shown live to the operator as "waiting for ...". An `active` unit only counts
+as succeeded after it stays active for a 500ms settle window past its own
+restart job finishing: systemd reports a unit active as soon as it forks the
+service process, so a fresh `active` can hide a process that already died
+during setup (e.g. a failing BindReadOnlyPaths= mount). -->
 
 
 ## Rollback
