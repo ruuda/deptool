@@ -6,9 +6,9 @@ pub fn build_platform_for(target: &str) -> &'static str {
         "aarch64-unknown-linux-musl" => "Linux aarch64",
         "armv7-unknown-linux-musleabihf" => "Linux armv7l",
         "x86_64-unknown-linux-musl" => "Linux x86_64",
+        "x86_64-unknown-openbsd" => "OpenBSD amd64",
         "aarch64-unknown-linux-gnu" => "Linux aarch64",
         "x86_64-unknown-linux-gnu" => "Linux x86_64",
-        "x86_64-unknown-openbsd" => "OpenBSD amd64",
         other => panic!("deptool: unsupported target triple {other:?}; add to build.rcl"),
     }
 }
