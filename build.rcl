@@ -8,6 +8,7 @@ let release_targets = [
   { uname = "Linux aarch64", triple = "aarch64-unknown-linux-musl" },
   { uname = "Linux armv7l", triple = "armv7-unknown-linux-musleabihf" },
   { uname = "Linux x86_64", triple = "x86_64-unknown-linux-musl" },
+  { uname = "OpenBSD amd64", triple = "x86_64-unknown-openbsd" },
 ];
 
 // Triples build.rs must also recognize so that plain `cargo build` /
