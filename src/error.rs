@@ -228,7 +228,7 @@ impl HostError {
                      (Deptool {} at commit {}). Build or download such a binary \n\
                      for each platform below, and place it at the path shown:",
                     crate::protocol::VERSION,
-                    &crate::setup::BUILD_COMMIT[..10],
+                    crate::setup::build_commit_suffix(crate::setup::BUILD_COMMIT),
                 ),
                 item: format!("  {platform}: {}", path.display()),
             }),

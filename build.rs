@@ -52,7 +52,10 @@ fn main() {
     // commit below. This is the default case for local development. We allow
     // bypassing Git by setting the env var, so that the application can be
     // built as a Nix flake as well. In that case the caller must also supply
-    // BUILD_COMMIT_DATE, and we assume the tree is not dirty.
+    // BUILD_COMMIT_DATE, and we assume the tree is not dirty. A caller may
+    // set BUILD_COMMIT to any value, including a short or non-hash one
+    // (e.g. `unknown` from a source distribution); consumers cap it at
+    // 10 characters rather than slicing, so it does not have to be a hash.
     if std::env::var("BUILD_COMMIT").is_ok() {
         return;
     }

@@ -203,11 +203,11 @@ impl RemoteConnector {
             .expect("remote store path is valid UTF-8")
             .to_string();
 
-        // First 10 hex chars of the build commit. Long enough to avoid
+        // First 10 chars of the build commit. Long enough to avoid
         // collisions, short enough to keep paths and commands readable.
         // Stable across cross-compiled targets built from the same source,
         // so per-arch binaries from one release share a name on the host.
-        let suffix = &setup::BUILD_COMMIT[..10];
+        let suffix = setup::build_commit_suffix(setup::BUILD_COMMIT);
         let bin_name = format!("deptool-{}-{suffix}", protocol::VERSION);
         let remote_bin_path = format!("{}/{bin_name}", setup::BIN_DIR);
 
@@ -1202,7 +1202,7 @@ fn main() {
         println!(
             "Deptool {} ({}, {})",
             env!("CARGO_PKG_VERSION"),
-            &setup::BUILD_COMMIT[..10],
+            setup::build_commit_suffix(setup::BUILD_COMMIT),
             setup::BUILD_COMMIT_DATE,
         );
         return;

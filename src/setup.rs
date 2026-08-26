@@ -46,11 +46,16 @@ pub fn ssh_command() -> Command {
     cmd
 }
 
-/// Git commit this binary was built from.
-///
-/// Release builds refuse to start from a dirty tree (see `build.rs`), so
-/// the commit alone identifies the source the binary was built from.
+/// Git commit this binary was built from, or `"unknown"` for builds
+/// without a usable commit (e.g. a dirty tree or a source distribution).
 pub const BUILD_COMMIT: &str = env!("BUILD_COMMIT");
+
+/// First 10 characters of a build commit, for binary names and version
+/// strings. Capped, not sliced, so a short or unknown commit does not
+/// panic.
+pub fn build_commit_suffix(commit: &str) -> &str {
+    &commit[..commit.len().min(10)]
+}
 
 /// Committer date of `BUILD_COMMIT` in `YYYY-MM-DD` form.
 pub const BUILD_COMMIT_DATE: &str = env!("BUILD_COMMIT_DATE");
@@ -326,4 +331,25 @@ pub fn gc_bin_dir(current_exe: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn suffix_caps_at_ten() {
+        assert_eq!(
+            build_commit_suffix("deadbeefcafebabe1234567890"),
+            "deadbeefca"
+        );
+    }
+
+    #[test]
+    fn suffix_of_short_commit_is_whole_commit() {
+        // `unknown` is what a dirty-tree build embeds; slicing it at 10
+        // used to panic at startup.
+        assert_eq!(build_commit_suffix("unknown"), "unknown");
+        assert_eq!(build_commit_suffix(""), "");
+    }
 }

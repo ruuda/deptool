@@ -18,6 +18,10 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
+<!-- TODO(ruuda): Add changelog entry: `deptool --version` no longer panics
+when built with a short or unknown `BUILD_COMMIT` (e.g. from a dirty tree);
+the 10-character suffix is now capped rather than sliced. -->
+
 <!-- TODO(ruuda): A deploy now trusts an active unit only after it stays active
 for a 500ms settle window, so a service that dies during systemd's setup (e.g.
 a failing BindReadOnlyPaths= mount) is detected and rolled back instead of
