@@ -53,7 +53,16 @@ fn main() {
     // bypassing Git by setting the env var, so that the application can be
     // built as a Nix flake as well. In that case the caller must also supply
     // BUILD_COMMIT_DATE, and we assume the tree is not dirty.
-    if std::env::var("BUILD_COMMIT").is_ok() {
+    println!("cargo:rerun-if-env-changed=BUILD_COMMIT");
+    if let Ok(commit) = std::env::var("BUILD_COMMIT") {
+        // The binary slices the first 10 characters of the hash (for the
+        // `--version` output and the installed binary name), so a shorter
+        // value panics at runtime. Require a full hash, which also rejects
+        // rev specs like `HEAD`: the value is baked in verbatim, not
+        // resolved.
+        if commit.len() != 40 || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+            panic!("BUILD_COMMIT must be a full 40-character commit hash, but it is {commit:?}.");
+        }
         return;
     }
 
