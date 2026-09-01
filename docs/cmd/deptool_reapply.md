@@ -20,7 +20,7 @@ Reapply proceeds as follows:
    reapply fails before making changes to any host, and Deptool fetches the
    latest state so that the next run can succeed.
  * If any hosts are defined in the [config tree](../directory_layout.md), but
-   the store has no local ref for them (we haven’t deployed or synced these
+   the store has no local ref for them (you haven’t deployed or synced these
    hosts yet, at least not from _this_ store), then the reapply aborts, and you
    need to run [`sync`](deptool_sync.md) first. Without this, Deptool would not
    be able to present ahead of time which revision it will reapply at the host.
@@ -33,7 +33,7 @@ Reapply proceeds as follows:
 If the conditions to reapply against the selected hosts are satisfied, reapply
 will:
 
- * Reconstruct the `/var/lib/deptool/apps/<app>/<revision>` directory, to remove
+ * Rebuild the `/var/lib/deptool/apps/<app>/<revision>` directory, to remove
    modifications made there outside of Deptool’s management.
  * Reconcile symlinks again, enable systemd units that should be enabled,
    and take the steps following the regular [deployment phases](../deployment_phases.md).

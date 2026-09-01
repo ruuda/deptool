@@ -14,32 +14,49 @@ compatibility impact will be clearly marked as such in the changelog.
 
 [semver]: https://semver.org/
 
-## Next
+## 1.1.0
 
-Unreleased.
+Released 2026-09-02. This release incorporates improvements and bugfixes from
+four months of production usage.
+
+### Compatibility
+
+ * Symlinks into `/etc/systemd/network` and `/etc/containers/systemd` are no
+   longer allowed directly. They have been superseded by the dedicated
+   [`networkd`](directory_layout.md#networkd) and
+   [`quadlets`](directory_layout.md#quadlets) directories, which trigger a
+   configuration reload in addition to linking the files in place. Deploying
+   with the new version handles this update transparently.
+ * The remote installation command that `deptool` runs on the target system has
+   changed: it removes shell brace expansion, to improve compatibility with
+   shells that do not support it. This can affect users who pin the exact
+   command used by Deptool in the `sudoers` file.
 
 ### New features
 
- * Add support for [Podman quadlets](directory_layout.md#quadlets).
  * Add support for [systemd-networkd config](directory_layout.md#networkd).
    Deptool executes `networkctl reload` after a managed networkd file
    changes.
+ * Add support for [Podman quadlets](directory_layout.md#quadlets).
  * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
    the currently deployed revision on every host in the cluster. This command
    should not be needed normally, but it helps to recover from manually created
    drift and bugs.
- * Add support for OpenBSD amd64. Thanks to Mikołaj Kucharski for contributing.
+ * Add support for building on OpenBSD amd64. Thanks to Mikołaj Kucharski for
+   contributing this feature.
 
 ### Improvements
 
  * The handling of systemd restarts has been improved with more reliable failure
-   detection and increased parallelism. Deptool now also reports which units it
-   is waiting for during a deploy. See the new [_Check systemd unit
-   status_](deployment_phases.md#check-systemd-unit-status) section for the
+   detection. Deptool now also restarts units simultaneously, and it reports
+   which units it is waiting for during a deploy. See the new [_Check systemd
+   unit status_](deployment_phases.md#check-systemd-unit-status) section for the
    details of the new behavior.
- * Deptool now has additional safety checks to avoid unintended behavior when
-   the hostname of a managed host has been changed. See the new [_Renaming a
-   host_ chapter](renaming_hosts.md) for more details.
+ * Deptool now performs additional safety checks that detect when the hostname
+   of a managed host has been changed. This prevents misinterpreting the
+   configuration deployed on the host, which will still hold the old name.
+   See the new [_Renaming a host_ chapter](renaming_hosts.md) for how to handle
+   renames.
  * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
    now handled correctly, see the [directory layout
    chapter](directory_layout.md#systemd).
@@ -56,44 +73,34 @@ Unreleased.
    debugging.
  * The `deploy` and `reapply` commands now prompt again for confirmation on
    invalid input, rather than treating any invalid input as “no”.
- * The `sync` and `ping` subcommand now exit with a non-zero exit code if there
+ * The `sync` and `ping` commands now exit with a non-zero exit code if there
    is an error on any host, just like `deploy` already did.
  * An empty `--limit` is now an error, instead of silently behaving as if no
    limit was passed and applying against the entire cluster.
 
 ### Bugfixes
 
- * Fix a bug where an inactive systemd unit could be masked by an active one
-   when multiple systemd units were affected in the same deployment.
+ * Fix two bugs that each prevented systemd units enabled by Deptool from
+   starting after a reboot. See the [_Update systemd
+   units_](deployment_phases.md#update-systemd-units) section for details about
+   the new behavior.
  * Files in the config tree that are outside app directories (e.g. a readme per
    host) are no longer committed to the store, and no longer cause empty plans
-   for a host when only such files changed.
- * Managed systemd units that are enabled are now re-enabled on every deploy.
-   This fixes a bug where units could fail to start after a reboot. This happens
-   because `systemctl enable` resolves symlinks, in particular it resolves
-   `/var/lib/deptool/apps/<app>/current` to a fixed version. This means the
-   symlink that systemd creates in `.wants` becomes stale after deploying a new
-   version, and may even point to a version that got garbage-collected after
-   a later deploy. Re-enabling after every change ensures that the `.wants`
-   symlinks point to the correct versions.
- * Furthermore, in order to ensure that enabled units start after a reboot, make
-   symlink reconciliation less aggressive. Deptool no longer removes symlinks in
-   `.wants` directories created by systemd. It now only removes symlinks that
-   point through `current`, as those are the only symlinks Deptool creates.
+   for a host when only such files changed. For hosts that had such files, the
+   first deploy with the new Deptool version can still show an empty plan.
  * Trigger `systemctl daemon-reload` after an app with a systemd unit changes.
    Previously it was triggered only when units were enabled or disabled.
  * Avoid a scenario where an existing symlink that points to a directory could
-   prevent Deptool from reconciling symlinks.
+   prevent Deptool from reconciling symlinks with an “Is a directory” error.
  * A symlink or special file in the config tree is now rejected with a clear
    error, rather than crashing Deptool during the planning phase.
  * Running Deptool with a config tree directory that does not exist, now fails
    with a clear error, and no longer saves the bad path as the default cluster
    for subsequent runs.
- * Ensure that output messages are technically correct even when `--limit` is
-   used, and correct a few more messages that could be misleading in certain
-   situations.
  * Validate the contents of the `BUILD_COMMIT` environment variable at build
    time to avoid a runtime crash in `deptool --version`.
+ * Correct output messages that could be misleading or not technically correct
+   in certain situations.
 
 ## 1.0.0
 
