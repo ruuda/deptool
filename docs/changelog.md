@@ -18,100 +18,53 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
-<!-- TODO(ruuda): A deploy now trusts an active unit only after it stays active
-for a 500ms settle window, so a service that dies during systemd's setup (e.g.
-a failing BindReadOnlyPaths= mount) is detected and rolled back instead of
-reported as deployed successfully. Deploys take up to 500ms longer; a reapply
-of units that were already running does not wait. -->
-
-<!-- TODO(ruuda): Deploys now refuse hosts whose deployed commit has no config
-entry for their hostname (the state a hostname change leaves behind), instead
-of looping on 'stale' forever. Reference the new 'Renaming a host' page. -->
-
-<!-- TODO(ruuda): The agent now records the hostname in the host store on every
-apply, and the lock check compares it against /etc/hostname. This makes rename
-detection exact (it also catches name swaps and reused names, which the
-tree-entry check missed); the error names the old hostname. Hosts deployed
-before this release use the tree-entry check until their next apply records
-the name. -->
-
-New features:
+### New features
 
  * Add support for [Podman quadlets](directory_layout.md#quadlets).
  * Add support for [systemd-networkd config](directory_layout.md#networkd).
-   Deptool executes `networkctl reload` after a managed networkd file changes.
+   Deptool executes `networkctl reload` after a managed networkd file
+   changes.
  * Add [`deptool reapply`](cmd/deptool_reapply.md), a command that re-applies
    the currently deployed revision on every host in the cluster. This command
    should not be needed normally, but it helps to recover from manually created
    drift and bugs.
+ * Add support for OpenBSD amd64. Thanks to Mikołaj Kucharski for contributing.
 
-Improvements:
+### Improvements
 
- <!-- TODO(ruuda): Passing a config tree directory that does not exist now
- fails with an error that includes the path, instead of a bare io error, and
- no longer records the bad path as the default for subsequent runs. -->
- * Do not depend on shell brace expansion when installing the agent to improve
-   compatibility, and print stderr when agent installation fails to aid
-   debugging.
- <!-- TODO(ruuda): The install-failure stderr is now captured at every step
- of the session (probing, sending the binary, reading the checksum), not
- only the missing-checksum case. Could fold into the bullet above. -->
- <!-- TODO(ruuda): Agent lock errors now include the lock file path ("failed
- to open lock file '<path>'", "failed to lock '<path>'") instead of a bare io
- error. -->
- <!-- TODO(ruuda): The systemd status report after a deploy now includes the
- status command's stderr, so an unknown unit shows its reason ("Unit x could
- not be found") instead of a blank block. -->
- <!-- TODO(ruuda): The deploy and reapply confirmation prompts now re-ask on
- unrecognized input, instead of treating any typo as no and aborting. Enter
- and an explicit no still abort. -->
-
-
- * List which specific systemd units failed to become active, if any.
- * Improve the error message for when symlink reconcile fails to remove an
-   existing path.
+ * The handling of systemd restarts has been improved with more reliable failure
+   detection and increased parallelism. Deptool now also reports which units it
+   is waiting for during a deploy. See the new [_Check systemd unit
+   status_](deployment_phases.md#check-systemd-unit-status) section for the
+   details of the new behavior.
+ * Deptool now has additional safety checks to avoid unintended behavior when
+   the hostname of a managed host has been changed. See the new [_Renaming a
+   host_ chapter](renaming_hosts.md) for more details.
  * Subdirectories in the `systemd` directory (used for systemd drop-ins) are
    now handled correctly, see the [directory layout
    chapter](directory_layout.md#systemd).
  * It is now possible to remove all apps from a host by leaving the host’s
    directory empty in the config tree. Previously this required creating a
    placeholder file in the directory as a workaround.
- * Deptool now reports IO errors that happen on the target host with more
-   context, in particular errors always include the path involved in the failed
-   operation.
- <!-- TODO(ruuda): With --limit, the up-to-date message from deploy and diff
- reads "All selected hosts" instead of claiming the whole cluster. -->
- <!-- TODO(ruuda): Same for sync --changed: with --limit, the no-changes
- message reads "No selected hosts" instead of claiming the whole cluster. -->
+ * List which specific systemd units failed to become active, if any.
+ * Deptool now reports errors that happen on the target host with clearer
+   messages and more context. In particular, <abbr>IO</abbr> errors always
+   include the path involved in the failed operation, and stderr of commands
+   that failed on the target host is forwarded to the operator.
+ * Do not depend on shell brace expansion when installing the agent to improve
+   compatibility, and print stderr when agent installation fails to aid
+   debugging.
+ * The `deploy` and `reapply` commands now prompt again for confirmation on
+   invalid input, rather than treating any invalid input as “no”.
+ * The `sync` and `ping` subcommand now exit with a non-zero exit code if there
+   is an error on any host, just like `deploy` already did.
+ * An empty `--limit` is now an error, instead of silently behaving as if no
+   limit was passed and applying against the entire cluster.
 
+### Bugfixes
 
-Bugfixes:
-
- <!-- TODO(ruuda): 'deptool sync' and 'deptool ping' now exit non-zero when a
- host fails, like deploy and reapply already did, instead of always exiting
- zero. -->
- <!-- TODO(ruuda): A successful Type=oneshot unit (which ends up inactive) is
- no longer reported as failed and rolled back; activation now checks each
- unit's load state and result rather than is-active. It also detects a crash
- loop (via NRestarts) and a unit blocked by a failed dependency. -->
- <!-- TODO(ruuda): Units are now restarted in parallel without blocking on each
- other, so a unit slow to stop (e.g. draining connections) no longer holds up
- the deploy; the status line shows "waiting for <units>" while it waits (up to
- 10s after the last restart settles). -->
- <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
- rejected, instead of silently widening the command to every host. -->
- <!-- TODO(ruuda): An empty --limit (an empty value or only commas) is now
- rejected, instead of silently widening the command to every host. -->
- <!-- TODO(ruuda): A symlink or special file in the config tree is now
- rejected with its path, instead of panicking (inside an app) or being
- silently dropped (at the host or app level, where it then planned as a
- removal). -->
- <!-- TODO(ruuda): Corrected misleading messages: reapply on a never-deployed
- host now suggests 'deptool deploy' (not only 'deptool sync', a dead end); and
- re-running 'deptool init' on an existing store reports "Using existing"
- instead of "Initialized". -->
- * Fix a bug where an inactive unit could be masked by an active one when
-   multiple systemd units were affected in the same deployment.
+ * Fix a bug where an inactive systemd unit could be masked by an active one
+   when multiple systemd units were affected in the same deployment.
  * Files in the config tree that are outside app directories (e.g. a readme per
    host) are no longer committed to the store, and no longer cause empty plans
    for a host when only such files changed.
@@ -123,20 +76,24 @@ Bugfixes:
    version, and may even point to a version that got garbage-collected after
    a later deploy. Re-enabling after every change ensures that the `.wants`
    symlinks point to the correct versions.
- * In addition in order to ensure that enabled units start after a reboot, make
+ * Furthermore, in order to ensure that enabled units start after a reboot, make
    symlink reconciliation less aggressive. Deptool no longer removes symlinks in
    `.wants` directories created by systemd. It now only removes symlinks that
    point through `current`, as those are the only symlinks Deptool creates.
- * Trigger `systemctl daemon-reload` after an app with systemd unit changes.
+ * Trigger `systemctl daemon-reload` after an app with a systemd unit changes.
    Previously it was triggered only when units were enabled or disabled.
- * Fix a bug where an existing symlink that points to the correct target
-   directory, caused deployment to fail with a vague _Is a directory_ error.
-   This could happen in particular when a rollback-unsafe deployment created the
-   symlink. A retry of that deployment would try to test if the contents of the
-   target path already matched the contents of the source path, but this failed
-   because the target path is a directory rather than a file. Now Deptool skips
-   symlinks that already point at the correct source, and it reports a clear
-   error when the target path is a directory.
+ * Avoid a scenario where an existing symlink that points to a directory could
+   prevent Deptool from reconciling symlinks.
+ * A symlink or special file in the config tree is now rejected with a clear
+   error, rather than crashing Deptool during the planning phase.
+ * Running Deptool with a config tree directory that does not exist, now fails
+   with a clear error, and no longer saves the bad path as the default cluster
+   for subsequent runs.
+ * Ensure that output messages are technically correct even when `--limit` is
+   used, and correct a few more messages that could be misleading in certain
+   situations.
+ * Validate the contents of the `BUILD_COMMIT` environment variable at build
+   time to avoid a runtime crash in `deptool --version`.
 
 ## 1.0.0
 
