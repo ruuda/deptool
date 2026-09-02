@@ -5,10 +5,10 @@
 
   # Flake adapted from Minimizer <https://codeberg.org/ruuda/minimizer>,
   # licensed Apache 2.0.
-  outputs = { self, nixpkgs }: 
+  outputs = { self, nixpkgs }:
     let
       name = "deptool";
-      version = "0.1.0";
+      version = "1.1.0";
       pkgs = (import nixpkgs { system = "x86_64-linux" ; });
       pkgss = pkgs.pkgsStatic;
     in
