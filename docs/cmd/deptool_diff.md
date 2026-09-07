@@ -1,6 +1,7 @@
 # deptool diff
 
-    deptool diff [--stat] [--limit <hosts>]... [--] [<dir>]
+    deptool diff [--stat | --word-diff | --word-diff-regex <regex>]
+                 [--limit <hosts>]... [--] [<dir>]
 
 ## Description
 
@@ -28,6 +29,24 @@ and `web5` from the diff even if they had changes.
 
 Pass `--stat` to `git diff` to produce a summarized diffstat instead of a full
 line-based diff.
+
+### `--word-diff`
+
+Pass `--word-diff` to `git diff`, which shows changed words within a line,
+rather than marking an entire line as removed and added. By default, Git splits
+lines on whitespace, but this can be changed with
+[`--word-diff-regex`](#-word-diff-regex-regex).
+See the [Git manual][word-diff] for details.
+
+[word-diff]: https://git-scm.com/docs/diff-options#Documentation/diff-options.txt---word-diffmode
+
+### `--word-diff-regex <regex>`
+
+Pass `--word-diff-regex` to `git diff`. Git then uses `<regex>` to decide what
+a word is, instead of considering runs of non-whitespace to be a word. See the
+[Git manual][word-diff-regex] for details.
+
+[word-diff-regex]: https://git-scm.com/docs/diff-options#Documentation/diff-options.txt---word-diff-regexregex
 
 ## Environment
 

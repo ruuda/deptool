@@ -249,10 +249,13 @@ pub enum Decision {
     Abort,
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffMode {
     Full,
     Stat,
+    Word,
+    /// Word diff where the regex defines what a word is.
+    WordRegex(String),
 }
 
 /// Interpret a yes/no answer to a confirmation prompt.
@@ -323,6 +326,12 @@ pub fn confirm_reapply(n_hosts: usize, cluster: &str) -> Result<Decision> {
 /// to N hosts means dismissing N pagers.
 pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -> Result<()> {
     println!();
+    let mode_args: Vec<String> = match mode {
+        DiffMode::Full => Vec::new(),
+        DiffMode::Stat => vec!["--stat".to_string()],
+        DiffMode::Word => vec!["--word-diff".to_string()],
+        DiffMode::WordRegex(regex) => vec![format!("--word-diff-regex={regex}")],
+    };
     let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
         let old_oid = host_tree_oid(store, host_plan.expected_current.as_ref(), host)?;
@@ -331,15 +340,11 @@ pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -
             writeln!(combined)?;
         }
         writeln!(combined, "{}", color.blue(&host.to_string()))?;
-        let mode_args: &[&str] = match mode {
-            DiffMode::Full => &[],
-            DiffMode::Stat => &["--stat"],
-        };
         let child = Command::new("git")
             .arg("--git-dir")
             .arg(store.path())
             .args(["diff", "--color=always"])
-            .args(mode_args)
+            .args(&mode_args)
             .arg(old_oid.to_string())
             .arg(new_oid.to_string())
             .stdout(Stdio::piped())

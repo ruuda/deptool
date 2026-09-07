@@ -14,6 +14,17 @@ compatibility impact will be clearly marked as such in the changelog.
 
 [semver]: https://semver.org/
 
+## Next
+
+Unreleased.
+
+### New features
+
+ * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)
+   and [`--word-diff-regex`](cmd/deptool_diff.md#-word-diff-regex-regex) for
+   more control over how the diff is rendered, in particular to inspect the diff
+   for changes in files with long lines.
+
 ## 1.1.0
 
 Released 2026-09-02. This release incorporates improvements and bugfixes from

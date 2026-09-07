@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use bpaf::{Bpaf, long};
+use bpaf::{Bpaf, Parser, construct, long};
 
 use deploy::Connection;
 use error::{ApplyError, Error, HostError, Result};
@@ -123,8 +123,7 @@ enum Cmd {
     /// Show the full diff that would be applied by the next deploy.
     #[bpaf(command)]
     Diff {
-        /// Show a per-file diffstat instead of the full diff.
-        #[bpaf(long("stat"), flag(display::DiffMode::Stat, display::DiffMode::Full))]
+        #[bpaf(external(diff_mode))]
         mode: display::DiffMode,
         /// Restrict to the listed hosts (comma-separated, repeatable).
         #[bpaf(long("limit"), argument("HOSTS"), many)]
@@ -158,6 +157,21 @@ enum Cmd {
 struct Args {
     #[bpaf(external(cmd))]
     cmd: Cmd,
+}
+
+/// Parse the mutually exclusive flags that select the diff mode.
+fn diff_mode() -> impl Parser<display::DiffMode> {
+    let stat = long("stat")
+        .help("Show a per-file diffstat instead of the full diff.")
+        .req_flag(display::DiffMode::Stat);
+    let word = long("word-diff")
+        .help("Mark the changed words within a line, not the entire line.")
+        .req_flag(display::DiffMode::Word);
+    let word_regex = long("word-diff-regex")
+        .help("Like --word-diff, with REGEX matching what counts as a word.")
+        .argument::<String>("REGEX")
+        .map(display::DiffMode::WordRegex);
+    construct!([stat, word, word_regex]).fallback(display::DiffMode::Full)
 }
 
 /// Resolve the local store path: `$DEPTOOL_STORE` if set, else `.deptool`.
@@ -1216,6 +1230,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use display::DiffMode;
 
     fn show_block(block: &str) -> UnitStatus {
         UnitStatus::from_show_block(block).expect("the fixture block parses")
@@ -1283,5 +1298,22 @@ mod tests {
         let enter = Duration::from_micros(2000000);
         assert!(!status.settled(enter + Duration::from_millis(499)));
         assert!(status.settled(enter + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn diff_accepts_one_mode_flag_at_a_time() {
+        let mode = |args: &[&str]| match cmd().to_options().run_inner(args) {
+            Ok(Cmd::Diff { mode, .. }) => Some(mode),
+            Ok(other) => panic!("the fixture parses as a diff command, not {other:?}"),
+            Err(_) => None,
+        };
+        assert_eq!(mode(&["diff"]), Some(DiffMode::Full));
+        assert_eq!(mode(&["diff", "--stat"]), Some(DiffMode::Stat));
+        assert_eq!(mode(&["diff", "--word-diff"]), Some(DiffMode::Word));
+        assert_eq!(
+            mode(&["diff", "--word-diff-regex=."]),
+            Some(DiffMode::WordRegex(".".to_string()))
+        );
+        assert_eq!(mode(&["diff", "--stat", "--word-diff"]), None);
     }
 }
