@@ -446,14 +446,15 @@ fn push_and_apply_host(
     host: &Hostname,
     conn: &mut Box<dyn Connection>,
     plan: &Plan,
-    packs: &BTreeMap<Option<Oid>, String>,
     progress: &DeployProgress,
 ) -> std::result::Result<(), HostError> {
+    let host_plan = &plan.hosts[host];
+    let store = Store::open(store_path)?;
+
     progress.update(host, HostState::Pushing);
-    let key = plan.hosts[host].expected_current;
-    let encoded = &packs[&key];
+    let pack = store.create_pack(host_plan.commit, host_plan.expected_current)?;
     conn.send_request(&Request::ReceivePack {
-        pack_data: encoded.clone(),
+        pack_data: BASE64.encode(&pack),
     })?;
     match conn.read_message()? {
         Some(Message::PackReceived) => {}
@@ -469,9 +470,9 @@ fn push_and_apply_host(
 
     progress.update(host, HostState::Applying);
     conn.send_request(&Request::Apply {
-        target_commit: plan.commit,
+        target_commit: host_plan.commit,
         mode: ApplyMode::Deploy {
-            is_rollback_safe: plan.hosts[host].is_rollback_safe,
+            is_rollback_safe: host_plan.is_rollback_safe,
         },
     })?;
     conn.close();
@@ -481,11 +482,10 @@ fn push_and_apply_host(
         ApplyOutcome::RolledBack => return Ok(()),
     };
     assert_eq!(
-        applied_commit, plan.commit,
+        applied_commit, host_plan.commit,
         "applied commit matches plan commit"
     );
 
-    let store = Store::open(store_path)?;
     store.set_ref(
         &format!("refs/remotes/{host}"),
         applied_commit,
@@ -570,22 +570,6 @@ pub fn read_apply_messages(
     }
 }
 
-/// Pre-compute deduplicated packfiles for all hosts in the plan.
-///
-/// Multiple hosts with the same `expected_current` need the same pack, so
-/// we build each unique pack once and base64-encode it for sending.
-pub fn build_packs(store: &Store, plan: &Plan) -> Result<BTreeMap<Option<Oid>, String>> {
-    let mut packs = BTreeMap::new();
-    for host_plan in plan.hosts.values() {
-        let key = host_plan.expected_current;
-        if !packs.contains_key(&key) {
-            let bytes = store.create_pack(plan.commit, key)?;
-            packs.insert(key, BASE64.encode(&bytes));
-        }
-    }
-    Ok(packs)
-}
-
 /// Run a full deployment: connect+lock all hosts, push packs, and apply.
 ///
 /// Connect and lock run together per-host in parallel threads. Push+apply
@@ -622,18 +606,11 @@ pub fn run_deploy(
         )));
     }
 
-    // All hosts locked -- anchor the commit so git gc won't collect it.
-    store.set_ref("refs/heads/main", plan.commit, RefUpdate::SetMain)?;
-
-    let packs = build_packs(store, plan)?;
     let store_path = store.path();
-
     std::thread::scope(|s| {
-        let packs = &packs;
         for (host, mut conn) in lock_result.locked {
             s.spawn(move || {
-                if let Err(err) =
-                    push_and_apply_host(store_path, &host, &mut conn, plan, packs, progress)
+                if let Err(err) = push_and_apply_host(store_path, &host, &mut conn, plan, progress)
                 {
                     progress.update(&host, err);
                 }
@@ -686,25 +663,36 @@ mod tests {
         test_progress,
     };
 
-    /// Run a deploy through run_deploy using in-memory connections.
-    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
+    /// Run a deploy through run_deploy using in-memory connections, and
+    /// keep the progress so the caller can inspect each host's outcome.
+    fn deploy_with_progress(
+        driver: &TestRepo,
+        targets: &[&TestHost],
+        plan: &Plan,
+    ) -> (Result<()>, DeployProgress) {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&hostnames);
         // Pre-build Sync-safe connection factories (TestHost is not Sync
         // because git2::Repository is not Sync).
         let connector = test_connector(targets);
-        run_deploy(
+        let result = run_deploy(
             &driver.store,
             plan,
             "deckard@spinner",
             &connector,
             &progress,
-        )
+        );
+        (result, progress)
     }
 
+    /// Run a deploy through run_deploy using in-memory connections.
+    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
+        deploy_with_progress(driver, targets, plan).0
+    }
+
+    /// A plan that deploys `commit`, a host-shaped commit, to every host.
     fn make_plan(commit: Oid, hosts: &[(&str, Option<Oid>)]) -> Plan {
         Plan {
-            commit,
             hosts: hosts
                 .iter()
                 .map(|(name, expected_current)| {
@@ -712,6 +700,7 @@ mod tests {
                         Hostname::from(*name),
                         HostPlan {
                             apps: BTreeMap::new(),
+                            commit,
                             expected_current: *expected_current,
                             is_rollback_safe: true,
                         },
@@ -721,11 +710,20 @@ mod tests {
         }
     }
 
+    /// Plan the config tree in `config` against `driver`'s tracking refs.
+    fn plan_config(driver: &TestRepo, config: &TempDir) -> Result<Option<Plan>> {
+        let tree_oid = driver.store.build_tree(config.path())?;
+        match crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)? {
+            Some(draft) => Ok(Some(draft.finalize(&driver.store)?)),
+            None => Ok(None),
+        }
+    }
+
     #[test]
     fn lock_push_pack_and_apply_with_separate_driver_and_target() -> Result<()> {
         // Driver has the commit, target starts empty.
         let driver = TestRepo::new();
-        let commit_oid = driver.commit(&[("web1/app/conf", b"hello")]);
+        let commit_oid = driver.commit(&[("app/conf", b"hello")]);
 
         let target = TestHost::new("web1");
         let plan = make_plan(commit_oid, &[("web1", None)]);
@@ -737,7 +735,7 @@ mod tests {
     #[test]
     fn deploy_of_emptied_host_removes_app_from_host() -> Result<()> {
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
         let target = TestHost::new("web1");
         deploy_to(&driver, &[&target], &make_plan(c1, &[("web1", None)]))?;
 
@@ -752,7 +750,10 @@ mod tests {
             .finalize(&driver.store)?;
         deploy_to(&driver, &[&target], &plan)?;
 
-        assert_eq!(driver.get_host_tracking_ref("web1"), Some(plan.commit));
+        assert_eq!(
+            driver.get_host_tracking_ref("web1"),
+            Some(plan.hosts[&"web1".into()].commit)
+        );
         assert_dir_contents(target.apps_path(), &[]);
         Ok(())
     }
@@ -763,7 +764,7 @@ mod tests {
         let driver_a = TestRepo::new();
 
         // Driver A deploys v1, pushes pack to target, applies.
-        let commit_v1 = driver_a.commit(&[("web1/app/conf", b"v1")]);
+        let commit_v1 = driver_a.commit(&[("app/conf", b"v1")]);
         deploy_to(
             &driver_a,
             &[&target],
@@ -774,7 +775,7 @@ mod tests {
         let driver_b = TestRepo::copy_from(&driver_a);
 
         // Driver A deploys v2.
-        let commit_v2 = driver_a.commit(&[("web1/app/conf", b"v2")]);
+        let commit_v2 = driver_a.commit(&[("app/conf", b"v2")]);
         deploy_to(
             &driver_a,
             &[&target],
@@ -783,17 +784,9 @@ mod tests {
 
         // Driver B commits v3 (diverges from A's v2) and tries to deploy.
         // B's plan still thinks current is commit_v1, but target has commit_v2.
-        let commit_v3 = driver_b.commit(&[("web1/app/conf", b"v3")]);
+        let commit_v3 = driver_b.commit(&[("app/conf", b"v3")]);
         let plan = make_plan(commit_v3, &[("web1", Some(commit_v1))]);
-        let progress = test_progress(&["web1"]);
-        let connector = test_connector(&[&target]);
-        let result = run_deploy(
-            &driver_b.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
-        );
+        let (result, progress) = deploy_with_progress(&driver_b, &[&target], &plan);
 
         // Deploy should abort because the host is stale.
         assert!(result.is_err());
@@ -847,12 +840,12 @@ mod tests {
         // delete the tracking ref so the next plan treats the host as fresh
         // and the deploy actually makes progress.
         let driver = TestRepo::new();
-        let commit_v1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let commit_v1 = driver.commit(&[("app/conf", b"v1")]);
         driver.set_host_tracking_ref("web1", commit_v1);
 
         let target = TestHost::new("web1"); // No current commit.
 
-        let commit_v2 = driver.commit(&[("web1/app/conf", b"v2")]);
+        let commit_v2 = driver.commit(&[("app/conf", b"v2")]);
         let plan = make_plan(commit_v2, &[("web1", Some(commit_v1))]);
         let result = deploy_to(&driver, &[&target], &plan);
 
@@ -872,30 +865,45 @@ mod tests {
     }
 
     #[test]
-    fn deploy_after_rename_reports_hostname_changed() -> Result<()> {
-        // Deploy to the host under its old name, then rename the machine.
+    fn deploy_after_rename_records_the_host_under_its_new_name() -> Result<()> {
+        // Deploy to the host under its old name, then rename the machine
+        // and its config dir. The operator has no tracking ref for the new
+        // name, so the deploy is stale; the stale fetch records the host's
+        // commit under the new name, which the config then matches.
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
         let web1 = TestHost::new("web1");
         deploy_to(&driver, &[&web1], &make_plan(c1, &[("web1", None)]))?;
+        // A hostname recorded by Deptool 1.2 outlives the conversion of the
+        // store; on the per-host format it must not cause a refusal.
+        web1.session.store.set_deployed_hostname(&"web1".into())?;
         let web2 = web1.renamed("web2");
 
-        // The config tree moves the host dir to the new name too.
         let config = config_with(&[("web2/app/conf", b"v1")]);
-        let tree_oid = driver.store.build_tree(config.path())?;
-        let plan = crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)?
-            .expect("plan has changes")
-            .finalize(&driver.store)?;
+        let plan = plan_config(&driver, &config)?.expect("plan has changes");
+        let (result, progress) = deploy_with_progress(&driver, &[&web2], &plan);
 
-        let progress = test_progress(&["web2"]);
-        let connector = test_connector(&[&web2]);
-        let result = run_deploy(
-            &driver.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
+        assert!(result.is_err(), "the deploy after a rename is stale");
+        assert!(matches!(*progress.state("web2"), HostState::Stale));
+        assert_eq!(driver.get_host_tracking_ref("web2"), Some(c1));
+        assert!(
+            plan_config(&driver, &config)?.is_none(),
+            "with its commit recorded under the new name, the host is up to date",
         );
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_refuses_to_convert_a_renamed_cluster_tree_store() -> Result<()> {
+        // Deployed as web1 by Deptool 1.2, then renamed to web2: the
+        // conversion cannot pick the host's config out of the cluster tree.
+        let driver = TestRepo::new();
+        let cluster = driver.commit(&[("web1/app/conf", b"v1")]);
+        let web2 = TestHost::with_cluster_tree_store(&driver, "web1", cluster).renamed("web2");
+
+        let config = config_with(&[("web2/app/conf", b"v1")]);
+        let plan = plan_config(&driver, &config)?.expect("plan has changes");
+        let (result, progress) = deploy_with_progress(&driver, &[&web2], &plan);
 
         assert!(result.is_err(), "deploy after a rename aborts");
         assert!(
@@ -907,35 +915,84 @@ mod tests {
             "the error identifies the hostname the state was deployed under",
         );
         // No tracking ref appears for the new name: the refusal happens
-        // before the stale-fetch path that would record one.
+        // before the stale-fetch path that would record one, and the host's
+        // store stays as it was.
         assert_eq!(driver.get_host_tracking_ref("web2"), None);
+        assert_eq!(web2.get_ref("refs/heads/current"), Some(cluster));
+        Ok(())
+    }
+
+    #[test]
+    fn deploy_converts_a_cluster_tree_store_in_one_stale_round() -> Result<()> {
+        // web1 was last deployed by Deptool 1.2: its current commit holds
+        // the whole cluster tree, and the operator's tracking ref points
+        // at that commit.
+        let driver = TestRepo::new();
+        let cluster = driver.commit(&[("web1/nginx/conf", b"v1"), ("web2/nginx/conf", b"v1")]);
+        let web1 = TestHost::with_cluster_tree_store(&driver, "web1", cluster);
+        driver.set_host_tracking_ref("web1", cluster);
+        let config = config_with(&[("web1/nginx/conf", b"v2")]);
+
+        // The operator plans against the cluster commit its tracking ref
+        // records.
+        let plan = plan_config(&driver, &config)?.expect("plan has changes");
+        assert_eq!(plan.hosts[&"web1".into()].expected_current, Some(cluster));
+
+        // The lock converts the store and reports the converted commit as
+        // the host's current commit, which the stale fetch records.
+        let (result, progress) = deploy_with_progress(&driver, &[&web1], &plan);
+        assert!(
+            result.is_err(),
+            "the deploy that converts the store is stale"
+        );
+        assert!(matches!(*progress.state("web1"), HostState::Stale));
+        let converted = driver
+            .get_host_tracking_ref("web1")
+            .expect("the stale fetch recorded the converted commit");
+        assert_eq!(
+            driver.store.repo.find_commit(converted)?.parent_id(0)?,
+            cluster
+        );
+        assert_eq!(web1.get_ref("refs/heads/current"), Some(converted));
+        assert_eq!(web1.session.store.get_store_version()?, Some(STORE_VERSION));
+        let reflog = "deploy by deckard@spinner: convert to per-host format";
+        assert_eq!(
+            web1.reflog("refs/heads/current")[0],
+            (converted, reflog.into())
+        );
+
+        // The re-run is an ordinary deploy on top of the converted commit.
+        let plan = plan_config(&driver, &config)?.expect("plan has changes");
+        let deployed = plan.hosts[&"web1".into()].commit;
+        deploy_to(&driver, &[&web1], &plan)?;
+        assert_eq!(web1.get_ref("refs/heads/current"), Some(deployed));
+        assert_eq!(
+            driver.store.repo.find_commit(deployed)?.parent_id(0)?,
+            converted
+        );
+        assert_eq!(
+            std::fs::read(web1.apps_path().join("nginx/current/conf"))?,
+            b"v2"
+        );
         Ok(())
     }
 
     #[test]
     fn deploy_refuses_an_unsupported_store_version() -> Result<()> {
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
         let web1 = TestHost::new("web1");
         let plan = make_plan(c1, &[("web1", None)]);
 
-        web1.session.store.set_store_version(2)?;
-        let progress = test_progress(&["web1"]);
-        let connector = test_connector(&[&web1]);
-        let result = run_deploy(
-            &driver.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
-        );
+        web1.session.store.set_store_version(3)?;
+        let (result, progress) = deploy_with_progress(&driver, &[&web1], &plan);
         assert!(
             result.is_err(),
             "deploy to a host with an unsupported store aborts"
         );
         assert!(matches!(
             &*progress.state("web1"),
-            HostState::Failed(HostError::StoreVersionUnsupported { version: 2 })
+            HostState::Failed(HostError::StoreVersionUnsupported { version: 3 })
         ));
 
         // The version this Deptool writes itself is accepted. This second
@@ -951,7 +1008,7 @@ mod tests {
         let driver = TestRepo::new();
 
         // Deploy v1 to both hosts.
-        let commit_v1 = driver.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let commit_v1 = driver.commit(&[("app/conf", b"v1")]);
         deploy_to(
             &driver,
             &[&web1, &web2],
@@ -960,7 +1017,7 @@ mod tests {
 
         // Another driver sneaks in and deploys v2 to web1 only.
         let other = TestRepo::copy_from(&driver);
-        let commit_v2 = other.commit(&[("web1/app/conf", b"v2"), ("web2/app/conf", b"v1")]);
+        let commit_v2 = other.commit(&[("app/conf", b"v2")]);
         deploy_to(
             &other,
             &[&web1],
@@ -968,20 +1025,12 @@ mod tests {
         )?;
 
         // Our driver tries to deploy v3 to both hosts. web1 is stale, web2 is fine.
-        let commit_v3 = driver.commit(&[("web1/app/conf", b"v3"), ("web2/app/conf", b"v3")]);
+        let commit_v3 = driver.commit(&[("app/conf", b"v3")]);
         let plan = make_plan(
             commit_v3,
             &[("web1", Some(commit_v1)), ("web2", Some(commit_v1))],
         );
-        let progress = test_progress(&["web1", "web2"]);
-        let connector = test_connector(&[&web1, &web2]);
-        let result = run_deploy(
-            &driver.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
-        );
+        let (result, progress) = deploy_with_progress(&driver, &[&web1, &web2], &plan);
 
         // Deploy should abort: web1 is stale.
         assert!(result.is_err());
@@ -1001,7 +1050,7 @@ mod tests {
     fn deploy_aborts_if_host_is_busy() -> Result<()> {
         let target = TestHost::new("web1");
         let driver = TestRepo::new();
-        let commit = driver.commit(&[("web1/app/conf", b"v1")]);
+        let commit = driver.commit(&[("app/conf", b"v1")]);
 
         // Simulate another driver holding the lock.
         let lock_path = target.session.store.get_lock_file_path();
@@ -1012,15 +1061,7 @@ mod tests {
         );
 
         let plan = make_plan(commit, &[("web1", None)]);
-        let progress = test_progress(&["web1"]);
-        let connector = test_connector(&[&target]);
-        let result = run_deploy(
-            &driver.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
-        );
+        let (result, progress) = deploy_with_progress(&driver, &[&target], &plan);
 
         assert!(result.is_err());
         assert!(matches!(*progress.state("web1"), HostState::LockBusy(_)));
@@ -1033,19 +1074,11 @@ mod tests {
     fn deploy_aborts_if_one_host_fails_to_connect() -> Result<()> {
         let web1 = TestHost::new("web1");
         let driver = TestRepo::new();
-        let commit = driver.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let commit = driver.commit(&[("app/conf", b"v1")]);
 
         // web2 is in the plan but unreachable.
         let plan = make_plan(commit, &[("web1", None), ("web2", None)]);
-        let progress = test_progress(&["web1", "web2"]);
-        let connector = test_connector(&[&web1]);
-        let result = run_deploy(
-            &driver.store,
-            &plan,
-            "deckard@spinner",
-            &connector,
-            &progress,
-        );
+        let (result, progress) = deploy_with_progress(&driver, &[&web1], &plan);
 
         // Deploy aborts because web2 is unreachable (not in TestConnector).
         assert!(result.is_err());
@@ -1105,31 +1138,6 @@ mod tests {
             &*progress.state("web1"),
             HostState::Failed(HostError::HostnameMismatch(h)) if h == "spinner"
         ));
-    }
-
-    #[test]
-    fn push_and_apply_reports_failure_on_bad_pack() -> Result<()> {
-        let driver = TestRepo::new();
-        let commit = driver.commit(&[("web1/app/conf", b"v1")]);
-        let plan = make_plan(commit, &[("web1", None)]);
-
-        let target = TestHost::new("web1");
-        let mut conn = target.connect();
-        conn.send_request(&Request::Lock {
-            expected_current_commit: None,
-            operator: "deckard@spinner".into(),
-        })?;
-        assert_eq!(conn.read_message()?, Some(Message::Locked));
-
-        // Send a corrupt pack so the agent fails during ReceivePack.
-        let packs = BTreeMap::from([(None, BASE64.encode(b"not a valid pack"))]);
-        let progress = test_progress(&["web1"]);
-        let host = Hostname::from("web1");
-        let store_path = driver.store.path();
-        let result = push_and_apply_host(store_path, &host, &mut conn, &plan, &packs, &progress);
-
-        assert!(result.is_err(), "push should fail on bad pack");
-        Ok(())
     }
 
     #[test]

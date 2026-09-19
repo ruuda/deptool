@@ -198,7 +198,7 @@ mod tests {
             ("web1/nginx/conf", b"v1"),
             ("web1/nginx/manifest.json", manifest),
         ]);
-        t.set_host_tracking_ref("web1", c1);
+        let deployed = t.mark_deployed(c1);
 
         // The config tree lists fewer apps than the deployed commit: what
         // gets reapplied must come from the tracking ref, not the config.
@@ -206,7 +206,7 @@ mod tests {
         let hosts = select_hosts_to_reapply(&t.store, config.path(), &HostFilter::All)?;
 
         let web1 = &hosts[&"web1".into()];
-        assert_eq!(web1.commit, c1);
+        assert_eq!(web1.commit, deployed.hosts[&"web1".into()].commit);
         assert_eq!(web1.n_apps, 2);
         assert_eq!(
             web1.units_enabled,
@@ -219,7 +219,7 @@ mod tests {
     fn select_errors_when_a_config_host_has_no_tracking_ref() {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/app/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         // web2 is in the config tree, but this store has no record of it.
         // Another operator may have deployed to it, so reapply must not
@@ -237,8 +237,7 @@ mod tests {
     fn select_with_limit_includes_only_listed_hosts() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/app/conf", b"a"), ("web2/app/conf", b"b")]);
-        t.set_host_tracking_ref("web1", c1);
-        t.set_host_tracking_ref("web2", c1);
+        t.mark_deployed(c1);
 
         let config = config_with(&[("web1/app/conf", b"a"), ("web2/app/conf", b"b")]);
         let filter = HostFilter::Only(vec!["web2".into()]);
@@ -301,9 +300,12 @@ mod tests {
         // here would make the next gc delete the real rollback target.
         assert_eq!(
             fs::read_link(target.apps_path().join("nginx/previous"))?,
-            Path::new(&oid_prefix(plan_v1.commit)),
+            Path::new(&oid_prefix(plan_v1.hosts[&"web1".into()].commit)),
         );
-        assert_eq!(driver.get_host_tracking_ref("web1"), Some(plan_v2.commit));
+        assert_eq!(
+            driver.get_host_tracking_ref("web1"),
+            Some(plan_v2.hosts[&"web1".into()].commit)
+        );
         Ok(())
     }
 
@@ -318,7 +320,7 @@ mod tests {
         // Simulate a deploy that died between setting the target ref and
         // completing: the host's target ref moved, current did not.
         let host_store = Store::open(target.session.store.path())?;
-        let c2 = commit_files(&host_store, &[("web1/nginx/nginx.conf", b"v2")])?;
+        let c2 = commit_files(&host_store, &[("nginx/nginx.conf", b"v2")])?;
         host_store.set_ref(
             "refs/heads/target",
             c2,
@@ -347,7 +349,7 @@ mod tests {
         // The host was not modified: current still points at the v1 deploy.
         assert_eq!(
             fs::read_link(target.apps_path().join("nginx/current"))?,
-            Path::new(&oid_prefix(plan_v1.commit)),
+            Path::new(&oid_prefix(plan_v1.hosts[&"web1".into()].commit)),
         );
         Ok(())
     }
@@ -355,8 +357,8 @@ mod tests {
     #[test]
     fn reapply_aborts_on_stale_host_and_updates_tracking_ref() -> Result<()> {
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
-        let c2 = driver.commit(&[("web1/app/conf", b"v2")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
+        let c2 = driver.commit(&[("app/conf", b"v2")]);
         // The host is at c2 (deployed from elsewhere), but our tracking
         // ref still says c1.
         let target = TestHost::at_commit(&driver, "web1", c2);

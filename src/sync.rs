@@ -215,8 +215,8 @@ mod tests {
     fn sync_updates_stale_tracking_ref() -> Result<()> {
         // Host has c2 deployed, but the driver only knows about c1.
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
-        let c2 = driver.commit(&[("web1/app/conf", b"v2")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
+        let c2 = driver.commit(&[("app/conf", b"v2")]);
         let host = TestHost::at_commit(&driver, "web1", c2);
         driver.set_host_tracking_ref("web1", c1);
 
@@ -241,7 +241,7 @@ mod tests {
         // new content -- so the host is in to_sync, yet there's nothing to
         // fetch. UpToDate (not Updated) reports that the ref didn't move.
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
         let host = TestHost::at_commit(&driver, "web1", c1);
         driver.set_host_tracking_ref("web1", c1);
 
@@ -259,7 +259,7 @@ mod tests {
     fn only_changed_excludes_hosts_whose_config_matches_tracking_ref() -> Result<()> {
         let driver = TestRepo::new();
         let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
-        driver.set_host_tracking_ref("web1", c1);
+        driver.mark_deployed(c1);
         // Config matches what the tracking ref already records.
         let config = config_with(&[("web1/app/conf", b"v1")]);
 
@@ -312,7 +312,7 @@ mod tests {
         // Models a reprovisioned host: the driver still has a tracking ref
         // from before, but the host's `refs/heads/current` is gone.
         let driver = TestRepo::new();
-        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let c1 = driver.commit(&[("app/conf", b"v1")]);
         driver.set_host_tracking_ref("web1", c1);
         let host = TestHost::new("web1"); // No current commit on the host.
 

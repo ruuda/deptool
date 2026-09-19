@@ -1,5 +1,8 @@
 # Renaming a host
 
+<!-- TODO(ruuda): Since 1.3 a rename costs one stale deploy; the refusal and
+store deletion below apply only to a host converted from 1.2 or older. -->
+
 Deptool encourages reprovisioning over renaming hosts. Renames often have
 far-reaching unintended consequences. Having said this, even though initial
 provisioning is fast with Deptool, reprovisioning is not always feasible,

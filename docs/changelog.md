@@ -29,6 +29,11 @@ the operator now sees "agent exited unexpectedly" with the agent's stderr
 (the panic message), instead of "protocol error: unexpected lock response:
 None". -->
 
+<!-- TODO(ruuda): Compatibility (1.3): per-host history, store version 2. The
+agent converts a 1.2 store at lock, which costs one stale deploy. A rename no
+longer needs the store deleted. `main` is no longer written. Commit messages
+gain a `Deploy-Run` trailer. -->
+
 ### New features
 
  * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)

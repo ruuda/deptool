@@ -334,8 +334,11 @@ pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -
     };
     let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
-        let old_oid = host_tree_oid(store, host_plan.expected_current.as_ref(), host)?;
-        let new_oid = host_tree_oid(store, Some(&plan.commit), host)?;
+        let old_oid = match host_plan.expected_current {
+            Some(commit) => store.deployed_host_tree(commit, host)?,
+            None => empty_tree_oid(),
+        };
+        let new_oid = store.get_commit_tree(host_plan.commit)?.id();
         if !combined.is_empty() {
             writeln!(combined)?;
         }
@@ -375,20 +378,6 @@ fn pipe_through_pager(content: &[u8]) -> Result<()> {
     }
     child.wait()?;
     Ok(())
-}
-
-/// Get the tree oid for a host's subtree from a given commit, or the empty tree.
-fn host_tree_oid(store: &Store, commit: Option<&Oid>, host: &Hostname) -> Result<Oid> {
-    match commit {
-        None => Ok(empty_tree_oid()),
-        Some(oid) => {
-            let tree = store.get_commit_tree(*oid)?;
-            match tree.get_name(&host.0) {
-                Some(tree) => Ok(tree.id()),
-                None => Ok(empty_tree_oid()),
-            }
-        }
-    }
 }
 
 /// Print unit actions in execution order: disable, unlink, link, enable, restart.

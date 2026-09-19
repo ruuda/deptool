@@ -12,7 +12,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use git2::{Commit, Oid, Repository, Tree};
+use git2::{Oid, Repository, Signature, Tree};
 
 use serde::Deserialize;
 
@@ -26,7 +26,19 @@ type Result<T> = std::result::Result<T, StoreError>;
 /// Every host store records the version it was last written with, so a
 /// Deptool that opens a store written in a newer format refuses it instead
 /// of misinterpreting its contents.
-pub const STORE_VERSION: u32 = 1;
+pub const STORE_VERSION: u32 = 2;
+
+/// The format of Deptool 1.2 and earlier: every commit's tree holds the
+/// config of the whole cluster, one entry per host. The agent converts a
+/// store in this format to the current one when it takes the deploy lock.
+pub const STORE_VERSION_CLUSTER_TREE: u32 = 1;
+
+/// Body of the commit the agent creates when converting a cluster-tree
+/// commit, below a subject that includes the hostname.
+const CONVERSION_MESSAGE_BODY: &str = "\
+Deptool 1.3 and later record one commit per host. This tree is the
+entry for this host in the parent's cluster-wide tree, unchanged.
+";
 
 /// Per-app manifest declaring runtime state that deptool should manage.
 ///
@@ -54,7 +66,7 @@ pub struct SystemdConfig {
 pub struct HostRef {
     /// The commit deployed to this host (`refs/remotes/{host}`).
     pub commit: Oid,
-    /// The host's own subtree within that commit's tree.
+    /// The host's tree in that commit, see [`Store::deployed_host_tree`].
     pub host_tree: Oid,
 }
 
@@ -129,15 +141,19 @@ impl Store {
         self.set_config_string("deptool.cluster", s)
     }
 
-    /// The hostname recorded by the most recent apply on this host.
+    /// The hostname recorded by the most recent apply of Deptool 1.1 or 1.2.
     ///
-    /// The lock check compares it against the current `/etc/hostname` to
-    /// detect renames. `None` on hosts deployed before recording existed.
+    /// Those versions found a host's config in the cluster tree by name,
+    /// so they refused to deploy after a rename. Converting such a store
+    /// looks the host up by name one last time, and checks this record
+    /// against the current `/etc/hostname` first. `None` on hosts deployed
+    /// before recording existed, and on hosts provisioned by 1.3 or later.
     pub fn get_deployed_hostname(&self) -> Result<Option<Hostname>> {
         Ok(self.get_config_string("deptool.hostname")?.map(Hostname))
     }
 
-    /// Record `hostname` as the name this host's state was deployed under.
+    /// Record `hostname` as the name this host's state was deployed under,
+    /// as the apply of Deptool 1.1 and 1.2 did. Only tests write it now.
     pub fn set_deployed_hostname(&self, hostname: &Hostname) -> Result<()> {
         self.set_config_string("deptool.hostname", &hostname.0)
     }
@@ -188,24 +204,77 @@ impl Store {
         build_tree_recursive(&self.repo, dir, depth_root)
     }
 
-    /// Create a commit with the given tree, parent commits, and message.
-    ///
-    /// Does not update any ref -- the caller decides where to point.
-    pub fn commit_tree(&self, tree_oid: Oid, parent_oids: &[Oid], message: &str) -> Result<Oid> {
-        let tree = self.repo.find_tree(tree_oid)?;
-        let author_sig = match self.repo.signature() {
-            Ok(sig) => sig,
-            Err(..) => git2::Signature::now("deptool", "bot@deptool")?,
-        };
-        let parents: Vec<Commit> = parent_oids
-            .iter()
-            .map(|&oid| self.repo.find_commit(oid))
-            .collect::<std::result::Result<_, _>>()?;
-        let parent_refs: Vec<&Commit> = parents.iter().collect();
+    /// The identity to commit as: the repo's configured user, or Deptool's
+    /// own when none is configured, as on a host.
+    pub fn signature(&self) -> Result<Signature<'static>> {
+        match self.repo.signature() {
+            Ok(sig) => Ok(sig),
+            Err(..) => Ok(Signature::now("deptool", "bot@deptool")?),
+        }
+    }
 
-        Ok(self
-            .repo
-            .commit(None, &author_sig, &author_sig, message, &tree, &parent_refs)?)
+    /// Create a commit with the given tree, parent, and message.
+    ///
+    /// Does not update any ref -- the caller decides where to point. The
+    /// signature is a parameter so that the commits of one deploy run all
+    /// record the same time.
+    pub fn commit_tree(
+        &self,
+        sig: &Signature,
+        tree_oid: Oid,
+        parent: Option<Oid>,
+        message: &str,
+    ) -> Result<Oid> {
+        let tree = self.repo.find_tree(tree_oid)?;
+        let parent = match parent {
+            Some(oid) => Some(self.repo.find_commit(oid)?),
+            None => None,
+        };
+        let parents: Vec<_> = parent.iter().collect();
+        Ok(self.repo.commit(None, sig, sig, message, &tree, &parents)?)
+    }
+
+    /// The host's tree in a commit deployed to it: the commit's tree, or for
+    /// commits of Deptool 1.2 and older, which hold the whole cluster, the
+    /// entry named after the host. TODO: Delete the cluster-tree case once
+    /// every host has been deployed to by 1.3 or later; until then an app
+    /// named after its host is mistaken for the old format.
+    pub fn deployed_host_tree(&self, commit_oid: Oid, host: &Hostname) -> Result<Oid> {
+        let tree = self.get_commit_tree(commit_oid)?;
+        match tree.get_name(&host.0) {
+            Some(entry) => Ok(entry.id()),
+            None => Ok(tree.id()),
+        }
+    }
+
+    /// A per-host commit with the host's entry of a cluster-tree commit,
+    /// with that commit as parent so its history stays reachable.
+    ///
+    /// `None` when the tree has no entry for the host: it was renamed after
+    /// the deploy. A conversion converts as its parent, so a lock that was
+    /// interrupted after moving one ref but before recording the version
+    /// brings every ref to one commit on the next attempt.
+    pub fn convert_cluster_commit(
+        &self,
+        sig: &Signature,
+        host: &Hostname,
+        commit_oid: Oid,
+    ) -> Result<Option<Oid>> {
+        let mut cluster = self.repo.find_commit(commit_oid)?;
+        if let Ok(parent) = cluster.parent(0) {
+            let converted_from = parent.tree()?.get_name(&host.0).map(|e| e.id());
+            if converted_from == Some(cluster.tree_id()) {
+                cluster = parent;
+            }
+        }
+        let host_tree = match cluster.tree()?.get_name(&host.0) {
+            Some(entry) => entry.id(),
+            None => return Ok(None),
+        };
+        let subject = format!("Convert {host} history to the per-host format");
+        let message = format!("{subject}\n\n{CONVERSION_MESSAGE_BODY}");
+        let parent = Some(cluster.id());
+        Ok(Some(self.commit_tree(sig, host_tree, parent, &message)?))
     }
 
     /// Map hostnames to their subtree OIDs from a config tree.
@@ -219,65 +288,26 @@ impl Store {
 
     /// Look up tracking refs for the given hosts.
     ///
-    /// For each host that has a `refs/remotes/{host}` ref, returns
-    /// the deployed commit and the host's own subtree within it.
+    /// For each host that has a `refs/remotes/{host}` ref, returns the
+    /// deployed commit and the host's tree in it.
     pub fn host_tracking_refs(&self, hosts: &[Hostname]) -> Result<BTreeMap<Hostname, HostRef>> {
         let mut result = BTreeMap::new();
         for host in hosts {
             let refname = format!("refs/remotes/{host}");
             let commit = match self.repo.find_reference(&refname) {
-                Ok(r) => r.peel_to_commit()?,
+                Ok(r) => r.peel_to_commit()?.id(),
                 Err(_) => continue,
             };
-            let tree = commit.tree()?;
-            let host_tree = match tree.get_name(&host.0) {
-                Some(entry) => entry.id(),
-                None => continue,
-            };
-            result.insert(
-                host.clone(),
-                HostRef {
-                    commit: commit.id(),
-                    host_tree,
-                },
-            );
+            let host_tree = self.deployed_host_tree(commit, host)?;
+            result.insert(host.clone(), HostRef { commit, host_tree });
         }
         Ok(result)
     }
 
-    /// Reduce a set of commits to the frontier -- the minimal subset where
-    /// no commit is an ancestor of another.
-    pub fn frontier(&self, commits: &[Oid]) -> Result<Vec<Oid>> {
-        let unique: BTreeSet<Oid> = commits.iter().copied().collect();
-        let mut frontier = Vec::new();
-        for &oid in &unique {
-            let mut dominated = false;
-            for &other in &unique {
-                if other != oid && self.repo.graph_descendant_of(other, oid)? {
-                    dominated = true;
-                    break;
-                }
-            }
-            if !dominated {
-                frontier.push(oid);
-            }
-        }
-        // Ensure the output is deterministic regardless of input order.
-        frontier.sort();
-        Ok(frontier)
-    }
-
-    /// Check out a subtree (host/app) from a commit into a target directory.
-    pub fn checkout_app(
-        &self,
-        commit_oid: Oid,
-        host: &Hostname,
-        app: &str,
-        target: &Path,
-    ) -> Result<()> {
-        let commit = self.repo.find_commit(commit_oid)?;
-        let tree = commit.tree()?;
-        let entry = tree.get_path(Path::new(&host.0).join(app).as_ref())?;
+    /// Check out an app's tree from a deployed commit into a target directory.
+    pub fn checkout_app(&self, commit_oid: Oid, app: &str, target: &Path) -> Result<()> {
+        let tree = self.get_commit_tree(commit_oid)?;
+        let entry = tree.get_path(Path::new(app))?;
         let subtree = self.repo.find_tree(entry.id())?;
         let mut cb = git2::build::CheckoutBuilder::new();
         cb.target_dir(target).force();
@@ -310,9 +340,11 @@ impl Store {
             RefUpdate::Rollback { operator } => {
                 format!("deploy by {operator}: rollback after failed apply")
             }
+            RefUpdate::Convert { operator } => {
+                format!("deploy by {operator}: convert to per-host format")
+            }
             RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
             RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
-            RefUpdate::SetMain => "deploy: lock acquired, deploying this commit".to_string(),
         };
         let force = true;
         self.repo.reference(refname, oid, force, &reflog_msg)?;
@@ -399,6 +431,11 @@ impl Store {
         Ok(())
     }
 
+    /// The app trees of a deployed commit, by app name.
+    pub fn commit_apps(&self, commit_oid: Oid) -> Result<BTreeMap<String, Oid>> {
+        Ok(tree_entries(&self.get_commit_tree(commit_oid)?))
+    }
+
     /// Collect desired symlinks for an app subdirectory across all apps.
     ///
     /// Maps each filename in `subdir` to the absolute symlink target path
@@ -406,14 +443,11 @@ impl Store {
     fn desired_subdir_symlinks(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
         subdir: &str,
     ) -> Result<BTreeMap<String, PathBuf>> {
-        let tree = self.get_commit_tree(commit_oid)?;
-        let apps = self.get_host_apps(&tree, host)?;
         let mut result = BTreeMap::new();
-        for (app, app_tree_oid) in &apps {
+        for (app, app_tree_oid) in &self.commit_apps(commit_oid)? {
             for name in self.subdir_entries(*app_tree_oid, subdir)? {
                 // `name` may be a slash-separated relative path (a drop-in file
                 // inside a `<unit>.d` directory); `join` extends the path.
@@ -436,10 +470,9 @@ impl Store {
     pub fn desired_units(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
-        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "systemd")
+        self.desired_subdir_symlinks(commit_oid, apps_dir, "systemd")
     }
 
     /// List all unit files in an app tree's `systemd/` directory.
@@ -456,10 +489,9 @@ impl Store {
     pub fn desired_sysusers(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
-        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "sysusers")
+        self.desired_subdir_symlinks(commit_oid, apps_dir, "sysusers")
     }
 
     /// List all quadlet files in an app tree's `quadlets/` directory.
@@ -471,10 +503,9 @@ impl Store {
     pub fn desired_quadlets(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
-        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "quadlets")
+        self.desired_subdir_symlinks(commit_oid, apps_dir, "quadlets")
     }
 
     /// List all networkd config files in an app tree's `networkd/` directory.
@@ -486,10 +517,9 @@ impl Store {
     pub fn desired_networkd(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
     ) -> Result<BTreeMap<String, PathBuf>> {
-        self.desired_subdir_symlinks(commit_oid, host, apps_dir, "networkd")
+        self.desired_subdir_symlinks(commit_oid, apps_dir, "networkd")
     }
 
     /// Read the enabled units from an app's manifest as a set.
@@ -505,13 +535,10 @@ impl Store {
     pub fn desired_symlinks(
         &self,
         commit_oid: Oid,
-        host: &Hostname,
         apps_dir: &Path,
     ) -> Result<BTreeMap<PathBuf, PathBuf>> {
-        let tree = self.get_commit_tree(commit_oid)?;
-        let apps = self.get_host_apps(&tree, host)?;
         let mut result = BTreeMap::new();
-        for (app, app_tree_oid) in &apps {
+        for (app, app_tree_oid) in &self.commit_apps(commit_oid)? {
             let manifest = self.read_manifest(*app_tree_oid)?;
             for (link, source) in &manifest.symlinks {
                 let source_path = apps_dir.join(app).join("current").join(source);
@@ -524,16 +551,15 @@ impl Store {
     /// Validate all hosts in a config tree.
     pub fn validate(&self, tree_oid: Oid) -> Result<()> {
         let tree = self.repo.find_tree(tree_oid)?;
-        for entry in tree.iter() {
-            let host = Hostname(entry.name().expect("tree entry name is utf-8").to_string());
-            self.validate_app_manifests(&tree, &host)?;
+        for host_tree_oid in tree_entries(&tree).into_values() {
+            self.validate_app_manifests(host_tree_oid)?;
         }
         Ok(())
     }
 
     /// Validate manifests for all apps on a single host.
-    fn validate_app_manifests(&self, config_tree: &Tree, host: &Hostname) -> Result<()> {
-        let apps = self.get_host_apps(config_tree, host)?;
+    fn validate_app_manifests(&self, host_tree_oid: Oid) -> Result<()> {
+        let apps = tree_entries(&self.repo.find_tree(host_tree_oid)?);
 
         // Track networkd config, quadlet, sysuser, unit, and symlink-target
         // conflicts across apps. Subdir-based dedup checks run first
@@ -638,18 +664,6 @@ impl Store {
         let blob = self.repo.find_blob(entry.id())?;
         Ok(serde_json::from_slice(blob.content())?)
     }
-
-    /// Get the app tree oids for a host from a config tree.
-    pub fn get_host_apps(
-        &self,
-        config_tree: &Tree,
-        host: &Hostname,
-    ) -> Result<BTreeMap<String, Oid>> {
-        match config_tree.get_name(&host.0) {
-            Some(e) => Ok(tree_entries(&self.repo.find_tree(e.id())?)),
-            None => Ok(BTreeMap::new()),
-        }
-    }
 }
 
 /// Drop write bits from every regular file under `dir`, recursively.
@@ -676,9 +690,9 @@ pub enum RefUpdate<'a> {
     SetTarget { operator: &'a str },
     SetCurrent { operator: &'a str },
     Rollback { operator: &'a str },
+    Convert { operator: &'a str },
     ApplyComplete,
     FetchStale,
-    SetMain,
 }
 
 /// Git's well-known empty tree oid.
@@ -695,9 +709,9 @@ pub fn empty_tree_oid() -> Oid {
 
 /// Get the subtree entries (name -> oid) one level deep.
 ///
-/// Only includes entries that are trees, not blobs. The config tree is
-/// structured as `{host}/{app}/{files}`, so the first two levels are
-/// always directories.
+/// Only includes entries that are trees, not blobs. A config tree is
+/// structured as `{host}/{app}/{files}` and a deployed commit's tree as
+/// `{app}/{files}`, so above the files every entry is a directory.
 pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
     let mut entries = BTreeMap::new();
     for entry in tree.iter() {
@@ -784,33 +798,21 @@ mod tests {
     use std::os::unix::fs::symlink;
 
     #[test]
-    fn commit_appends_to_main_branch() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/app/config", b"v1")]);
-        let c2 = t.commit(&[("web1/app/config", b"v2")]);
-
-        let commit = t.store.repo.find_commit(c2)?;
-        assert_eq!(commit.parent_count(), 1);
-        assert_eq!(commit.parent_id(0)?, c1);
-        Ok(())
-    }
-
-    #[test]
-    fn commit_tree_creates_commit_with_given_parents() {
+    fn commit_tree_creates_commit_with_given_parent() {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/app/config", b"v1")]);
         let c2 = t.commit(&[("web1/app/config", b"v2")]);
 
         let tree_oid = t.get_commit_tree_oid(c2);
+        let sig = t.store.signature().expect("signature is available");
         let c3 = t
             .store
-            .commit_tree(tree_oid, &[c1, c2], "test commit")
+            .commit_tree(&sig, tree_oid, Some(c1), "test commit")
             .expect("commit succeeds");
 
         let commit = t.store.repo.find_commit(c3).expect("commit exists");
-        assert_eq!(commit.parent_count(), 2);
+        assert_eq!(commit.parent_count(), 1);
         assert_eq!(commit.parent_id(0).expect("parent 0"), c1);
-        assert_eq!(commit.parent_id(1).expect("parent 1"), c2);
     }
 
     #[test]
@@ -932,14 +934,13 @@ mod tests {
     fn app_units_includes_dropin_files_by_relative_path() -> Result<()> {
         let t = TestRepo::new();
         let oid = t.commit(&[
-            ("host/postgres/systemd/postgresql.service", b"[Unit]"),
+            ("postgres/systemd/postgresql.service", b"[Unit]"),
             (
-                "host/postgres/systemd/postgresql.service.d/override.conf",
+                "postgres/systemd/postgresql.service.d/override.conf",
                 b"[Service]",
             ),
         ]);
-        let tree = t.store.get_commit_tree(oid)?;
-        let apps = t.store.get_host_apps(&tree, &Hostname("host".into()))?;
+        let apps = t.store.commit_apps(oid)?;
 
         let units = t.store.app_units(apps["postgres"])?;
 
@@ -1204,85 +1205,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn frontier_keeps_only_tips() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("h/app/f", b"v1")]);
-        let c2 = t.commit(&[("h/app/f", b"v2")]);
-        let c3 = t.commit(&[("h/app/f", b"v3")]);
-
-        // Linear chain: only the tip survives.
-        assert_eq!(t.store.frontier(&[c1, c2, c3])?, vec![c3]);
-        assert_eq!(t.store.frontier(&[c3, c1])?, vec![c3]);
-
-        // Single commit.
-        assert_eq!(t.store.frontier(&[c2])?, vec![c2]);
-
-        // Empty input.
-        assert_eq!(t.store.frontier(&[])?, vec![]);
-
-        // Duplicates are deduplicated.
-        assert_eq!(t.store.frontier(&[c3, c3])?, vec![c3]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn frontier_keeps_diverged_branches() -> Result<()> {
-        let t = TestRepo::new();
-        let base = t.commit(&[("h/app/f", b"base")]);
-        let c_a = t.commit(&[("h/app/f", b"branch-a")]);
-
-        // Branch from base so c_a and c_b are diverged.
+    /// The oid of a cluster commit's entry for `host`.
+    fn cluster_entry(t: &TestRepo, cluster: Oid, host: &str) -> Oid {
         t.store
-            .set_ref("refs/heads/main", base, RefUpdate::FetchStale)?;
-        let c_b = t.commit(&[("h/app/f", b"branch-b")]);
-
-        let result = t.store.frontier(&[c_a, c_b])?;
-        let mut expected = vec![c_a, c_b];
-        expected.sort();
-        assert_eq!(result, expected);
-
-        // Base is dominated by both, should be removed.
-        assert_eq!(t.store.frontier(&[base, c_a, c_b])?, expected);
-
-        Ok(())
+            .get_commit_tree(cluster)
+            .expect("commit has a tree")
+            .get_name(host)
+            .expect("cluster tree has an entry for the host")
+            .id()
     }
 
     #[test]
-    fn frontier_reports_unknown_commits_as_error() -> Result<()> {
+    fn host_tracking_refs_reads_the_host_tree_from_per_host_and_cluster_commits() -> Result<()> {
         let t = TestRepo::new();
-        let c1 = t.commit(&[("h/app/f", b"v1")]);
-        let bogus = Oid::from_str("badc0dedeadbeefbadc0dedeadbeefbadc0dedea")?;
+        // web1 was deployed by this version: the commit's tree is its own.
+        let per_host = t.commit(&[("nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", per_host);
+        // web2 was deployed by Deptool 1.2: the commit's tree holds the
+        // whole cluster, and web2's tree is its entry in it.
+        let cluster = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        t.set_host_tracking_ref("web2", cluster);
 
-        assert!(
-            t.store.frontier(&[c1, bogus]).is_err(),
-            "an ancestry check against a commit missing from the store is an error",
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn host_tracking_refs_collects_per_host_state() -> Result<()> {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
-        t.set_host_tracking_ref("web2", c1);
-
-        let hosts = vec!["web1".into(), "web2".into()];
-        let refs = t.store.host_tracking_refs(&hosts)?;
-        assert_eq!(refs.len(), 2);
-
-        // Both hosts point to the same commit.
-        assert_eq!(refs[&"web1".into()].commit, c1);
-        assert_eq!(refs[&"web2".into()].commit, c1);
-
-        // But their host subtree OIDs differ (different app content).
-        assert_ne!(
+        let refs = t
+            .store
+            .host_tracking_refs(&["web1".into(), "web2".into()])?;
+        assert_eq!(refs[&"web1".into()].commit, per_host);
+        assert_eq!(
             refs[&"web1".into()].host_tree,
-            refs[&"web2".into()].host_tree,
+            t.get_commit_tree_oid(per_host)
         );
+        assert_eq!(refs[&"web2".into()].commit, cluster);
+        assert_eq!(
+            refs[&"web2".into()].host_tree,
+            cluster_entry(&t, cluster, "web2")
+        );
+        Ok(())
+    }
 
+    #[test]
+    fn convert_cluster_commit_takes_the_host_entry_with_the_cluster_commit_as_parent() -> Result<()>
+    {
+        let t = TestRepo::new();
+        let cluster = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let sig = t.store.signature()?;
+
+        let converted = t
+            .store
+            .convert_cluster_commit(&sig, &"web1".into(), cluster)?
+            .expect("the cluster tree has an entry for web1");
+
+        let commit = t.store.repo.find_commit(converted)?;
+        assert_eq!(commit.parent_count(), 1);
+        assert_eq!(commit.parent_id(0)?, cluster);
+        assert_eq!(commit.tree_id(), cluster_entry(&t, cluster, "web1"));
+        assert_eq!(
+            commit.summary(),
+            Some("Convert web1 history to the per-host format")
+        );
         Ok(())
     }
 

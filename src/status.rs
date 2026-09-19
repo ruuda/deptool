@@ -174,11 +174,11 @@ mod tests {
 
         // host-a: tracking ref content matches config -> up to date.
         let c_a = driver.commit(&[("a/app/conf", b"v1")]);
-        driver.set_host_tracking_ref("a", c_a);
+        driver.mark_deployed(c_a);
 
         // host-b: nginx differs, caddy matches -> has changes (nginx only).
         let c_b = driver.commit(&[("b/nginx/conf", b"v1"), ("b/caddy/conf", b"v1")]);
-        driver.set_host_tracking_ref("b", c_b);
+        driver.mark_deployed(c_b);
 
         // host-c: no tracking ref -> new host.
 

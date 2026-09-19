@@ -8,6 +8,8 @@
 //! Deployment plan: diff the desired config against each host's current state.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use git2::Oid;
@@ -143,6 +145,10 @@ pub struct AppPlan {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostPlan {
     pub apps: BTreeMap<String, AppPlan>,
+    /// The commit to deploy to this host: its tree is the host's config
+    /// tree, its parent the commit at `expected_current`.
+    #[serde(with = "crate::prim::ser::oid")]
+    pub commit: Oid,
     #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
     /// Whether the host can be automatically rolled back on deploy failure.
@@ -155,8 +161,6 @@ pub struct HostPlan {
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub hosts: BTreeMap<Hostname, HostPlan>,
-    #[serde(with = "crate::prim::ser::oid")]
-    pub commit: Oid,
 }
 
 impl Plan {
@@ -170,15 +174,18 @@ impl Plan {
 }
 
 /// A plan that has not yet been committed to the store.
-///
-/// Carries everything `finalize` needs to create the commit: the host data,
-/// the tree the commit will point at, and the parent oids (frontier of the
-/// affected hosts' tracking refs).
 #[derive(Debug)]
 pub struct DraftPlan {
-    pub hosts: BTreeMap<Hostname, HostPlan>,
-    pub tree_oid: Oid,
-    pub parents: Vec<Oid>,
+    pub hosts: BTreeMap<Hostname, DraftHostPlan>,
+}
+
+/// One host's part of a `DraftPlan`; `finalize` turns it into a `HostPlan`.
+#[derive(Debug)]
+pub struct DraftHostPlan {
+    pub apps: BTreeMap<String, AppPlan>,
+    pub expected_current: Option<Oid>,
+    /// The host's config tree, which becomes the tree of the deploy commit.
+    pub tree: Oid,
 }
 
 /// Changes to a managed subdirectory between two commits, derived from Git
@@ -480,20 +487,18 @@ pub fn compute_app_plan(store: &Store, diff: AppDiff) -> Result<AppPlan> {
 /// Either commit can be None to represent an empty host (no apps).
 pub fn diff_host(
     store: &Store,
-    host: &Hostname,
     apps_dir: &Path,
     current_commit: Option<Oid>,
     target_commit: Option<Oid>,
 ) -> std::result::Result<(BTreeMap<String, AppDiff>, SystemDiff<PathBuf>), StoreError> {
-    let get_apps = |oid| -> std::result::Result<BTreeMap<String, Oid>, StoreError> {
-        let tree = store.get_commit_tree(oid)?;
-        store.get_host_apps(&tree, host)
+    let current_apps = match current_commit {
+        Some(oid) => store.commit_apps(oid)?,
+        None => BTreeMap::new(),
     };
-    let current_apps = current_commit
-        .map(get_apps)
-        .transpose()?
-        .unwrap_or_default();
-    let target_apps = target_commit.map(get_apps).transpose()?.unwrap_or_default();
+    let target_apps = match target_commit {
+        Some(oid) => store.commit_apps(oid)?,
+        None => BTreeMap::new(),
+    };
     let app_diffs = diff_apps(&current_apps, &target_apps);
 
     let mut system = SystemDiff::<PathBuf>::default();
@@ -562,10 +567,9 @@ impl HostFilter {
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
 /// Returns `None` if no hosts need changes. The returned `DraftPlan` is not
-/// yet committed -- the caller renders a commit message and calls `finalize`
-/// to create the commit. `filter` narrows the set of hosts considered; any
-/// limit name not in the tree is reported as an error before the plan is
-/// built.
+/// yet committed -- the caller calls `finalize` to create the deploy
+/// commits. `filter` narrows the set of hosts considered; any limit name
+/// not in the tree is reported as an error before the plan is built.
 pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Option<DraftPlan>> {
     // Validate first so we don't do diff work or create commits from
     // invalid config.
@@ -576,39 +580,29 @@ pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Op
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 
-    // Diff each host's target against its current state, collecting
-    // parent commits and per-host plans in a single pass.
-    let mut parent_commits: Vec<Oid> = Vec::new();
     let mut hosts = BTreeMap::new();
-
-    for (host, &target_tree_oid) in &config_hosts {
+    for (host, &tree) in &config_hosts {
         let (expected_current, current_apps) = match host_refs.get(host) {
-            Some(hr) if hr.host_tree == target_tree_oid => continue,
+            Some(hr) if hr.host_tree == tree => continue,
             Some(hr) => {
-                parent_commits.push(hr.commit);
                 let apps = tree_entries(&store.repo.find_tree(hr.host_tree)?);
                 (Some(hr.commit), apps)
             }
             None => (None, BTreeMap::new()),
         };
 
-        let target_apps = tree_entries(&store.repo.find_tree(target_tree_oid)?);
-        let diffs = diff_apps(&current_apps, &target_apps);
-
+        let target_apps = tree_entries(&store.repo.find_tree(tree)?);
         let mut apps = BTreeMap::new();
-        let mut is_rollback_safe = true;
-        for (name, diff) in diffs {
-            let plan = compute_app_plan(store, diff)?;
-            is_rollback_safe &= plan.system.is_rollback_safe();
-            apps.insert(name, plan);
+        for (name, diff) in diff_apps(&current_apps, &target_apps) {
+            apps.insert(name, compute_app_plan(store, diff)?);
         }
 
         hosts.insert(
             host.clone(),
-            HostPlan {
+            DraftHostPlan {
                 apps,
                 expected_current,
-                is_rollback_safe,
+                tree,
             },
         );
     }
@@ -616,13 +610,7 @@ pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Op
     if hosts.is_empty() {
         return Ok(None);
     }
-
-    let parents = store.frontier(&parent_commits)?;
-    Ok(Some(DraftPlan {
-        hosts,
-        tree_oid,
-        parents,
-    }))
+    Ok(Some(DraftPlan { hosts }))
 }
 
 /// Maximum width for a deploy commit's subject line.
@@ -641,77 +629,68 @@ fn oxford_join(names: &[&str]) -> String {
     }
 }
 
-impl DraftPlan {
-    /// The subject line for the deploy commit this draft will produce.
-    ///
-    /// Tries progressively terser candidates and returns the first that fits
-    /// `SUBJECT_BUDGET`. Apps are kept in full longer than hosts -- given the
-    /// app you usually know which hosts run it, but not the other way around.
-    pub fn subject(&self) -> String {
-        let unique_apps: BTreeSet<&str> = self
-            .hosts
-            .values()
-            .flat_map(|h| h.apps.keys().map(String::as_str))
-            .collect();
-        let app_names: Vec<&str> = unique_apps.iter().copied().collect();
-        let host_names: Vec<&str> = self.hosts.keys().map(|h| h.0.as_str()).collect();
-        let n_apps = app_names.len();
-        let n_hosts = host_names.len();
+/// The subject line for a host's deploy commit.
+///
+/// Lists the apps in full when that fits `SUBJECT_BUDGET`, otherwise counts
+/// them. The count form is used even when it overflows, for a long
+/// hostname.
+fn subject(host: &Hostname, plan: &DraftHostPlan) -> String {
+    let app_names: Vec<&str> = plan.apps.keys().map(String::as_str).collect();
+    let n_apps = app_names.len();
 
-        let full_apps = oxford_join(&app_names);
-        let full_hosts = oxford_join(&host_names);
-        let count_apps = format!("{n_apps} {}", if n_apps == 1 { "app" } else { "apps" });
-        let count_hosts = format!("{n_hosts} {}", if n_hosts == 1 { "host" } else { "hosts" });
-
-        // "Update" only when every change is an update; otherwise the deploy
-        // also adds or removes apps, and "Deploy" covers all three.
-        let mut verb = "Update";
-        for app in self.hosts.values().flat_map(|h| h.apps.values()) {
-            if !matches!(app.diff, AppDiff::Update { .. }) {
-                verb = "Deploy";
-                break;
-            }
-        }
-
-        // A plan can have no app changes at all: a fresh host with no apps
-        // yet, or a tracking ref that recorded stray files from before
-        // Deptool excluded them from the tree. Name only the hosts then,
-        // rather than render an empty app list.
-        let candidates = if app_names.is_empty() {
-            vec![
-                format!("Deploy {full_hosts}"),
-                format!("Deploy {count_hosts}"),
-            ]
-        } else {
-            vec![
-                format!("{verb} {full_apps} on {full_hosts}"),
-                format!("{verb} {full_apps} on {count_hosts}"),
-                format!("{verb} {count_apps} on {count_hosts}"),
-            ]
-        };
-
-        candidates
-            .into_iter()
-            .find(|s| s.len() <= SUBJECT_BUDGET)
-            .expect("count-only candidate always fits the budget")
+    // A plan can have no app changes at all: a fresh host with no apps
+    // yet, or a tracking ref that recorded stray files from before
+    // Deptool excluded them from the tree. Name only the host then,
+    // rather than render an empty app list.
+    if app_names.is_empty() {
+        return format!("Deploy {host}");
     }
 
-    /// The full commit message for the deploy commit this draft will produce.
-    ///
-    /// The subject is a short summary produced by [`Self::subject`]. The body
-    /// lists each affected host with its previous deployed commit (or "new
-    /// host"), and one line per app change (`add`, `update`, or `remove`).
-    pub fn commit_message(&self) -> String {
+    // "Update" only when every change is an update; otherwise the deploy
+    // also adds or removes apps, and "Deploy" covers all three.
+    let mut verb = "Update";
+    for app in plan.apps.values() {
+        if !matches!(app.diff, AppDiff::Update { .. }) {
+            verb = "Deploy";
+            break;
+        }
+    }
+
+    let descriptive = format!("{verb} {} on {host}", oxford_join(&app_names));
+    if descriptive.len() <= SUBJECT_BUDGET {
+        return descriptive;
+    }
+    let noun = if n_apps == 1 { "app" } else { "apps" };
+    format!("{verb} {n_apps} {noun} on {host}")
+}
+
+/// A random 128-bit token, hex encoded, that identifies one deploy run.
+///
+/// Every commit of the run records it in a `Deploy-Run` trailer, so that
+/// `git log --all --grep` finds them together. It is random rather than
+/// derived from the content, because two runs may deploy the same trees.
+fn deploy_run_token() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The commit message for `host`'s deploy commit: its own subject line,
+/// then the body that every commit of the run shares.
+fn commit_message(host: &Hostname, plan: &DraftHostPlan, body: &str) -> String {
+    format!("{}\n\n{body}", subject(host, plan))
+}
+
+impl DraftPlan {
+    /// The body that every commit of one deploy run shares: the changes
+    /// intended for every host, so a reader of one host's history sees the
+    /// run's scope. It does not record whether the other hosts succeeded.
+    fn run_body(&self, run: &str) -> String {
         use std::fmt::Write;
 
-        let mut out = self.subject();
-        out.push('\n');
+        let mut out = "Changes intended to be deployed in the same run:\n".to_string();
         for (host, host_plan) in &self.hosts {
-            match host_plan.expected_current {
-                Some(oid) => writeln!(out, "\n{host} (changed from {oid})"),
-                None => writeln!(out, "\n{host} (new host)"),
-            }
-            .expect("writes to String are infallible");
+            writeln!(out, "\n{host}").expect("writes to String are infallible");
             for (app, app_plan) in &host_plan.apps {
                 let action = match &app_plan.diff {
                     AppDiff::Add { .. } => "add",
@@ -721,17 +700,30 @@ impl DraftPlan {
                 writeln!(out, "    {action} {app}").expect("writes to String are infallible");
             }
         }
+        writeln!(out, "\nDeploy-Run: {run}").expect("writes to String are infallible");
         out
     }
 
-    /// Create the deploy commit and produce a finalized `Plan`.
+    /// Create each host's deploy commit and produce a finalized `Plan`.
+    ///
+    /// The commits of one run share a signature and a `Deploy-Run` token.
     pub fn finalize(self, store: &Store) -> Result<Plan> {
-        let message = self.commit_message();
-        let commit = store.commit_tree(self.tree_oid, &self.parents, &message)?;
-        Ok(Plan {
-            hosts: self.hosts,
-            commit,
-        })
+        let sig = store.signature()?;
+        let body = self.run_body(&deploy_run_token()?);
+        let mut hosts = BTreeMap::new();
+        for (host, draft) in self.hosts {
+            let message = commit_message(&host, &draft, &body);
+            let commit = store.commit_tree(&sig, draft.tree, draft.expected_current, &message)?;
+            let is_rollback_safe = draft.apps.values().all(|app| app.system.is_rollback_safe());
+            let host_plan = HostPlan {
+                apps: draft.apps,
+                commit,
+                expected_current: draft.expected_current,
+                is_rollback_safe,
+            };
+            hosts.insert(host, host_plan);
+        }
+        Ok(Plan { hosts })
     }
 }
 
@@ -739,7 +731,6 @@ impl DraftPlan {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::store::RefUpdate;
     use crate::testutil::{TempDir, TestRepo};
 
     #[test]
@@ -760,7 +751,7 @@ mod tests {
     fn plan_detects_updated_and_unchanged_apps() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         let c2 = t.commit(&[("web1/nginx/conf", b"v2"), ("web1/rofld/conf", b"v1")]);
 
@@ -775,7 +766,7 @@ mod tests {
     fn plan_detects_removed_apps() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a"), ("web1/rofld/conf", b"b")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         let c2 = t.commit(&[("web1/nginx/conf", b"a")]);
 
@@ -790,7 +781,7 @@ mod tests {
     fn plan_removes_apps_of_emptied_host_and_initializes_fresh_empty_host() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         // web1 was deployed to and its last app deleted; web2 is an empty
         // host dir that was never deployed to.
@@ -816,7 +807,7 @@ mod tests {
     fn plan_includes_new_host_alongside_up_to_date_host() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         let c2 = t.commit(&[("web1/nginx/conf", b"a"), ("web2/rofld/conf", b"b")]);
 
@@ -832,7 +823,7 @@ mod tests {
     fn plan_returns_none_when_up_to_date() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"a")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
 
         let tree_oid = t.get_commit_tree_oid(c1);
         assert!(make_plan(&t.store, tree_oid, &HostFilter::All)?.is_none());
@@ -896,7 +887,7 @@ mod tests {
     fn diff_update(before: &[(&str, &[u8])], after: &[(&str, &[u8])]) -> Result<SystemDiff> {
         let t = TestRepo::new();
         let c1 = t.commit(before);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         let c2 = t.commit(after);
         let plan = t.plan(c2);
         let host = plan.hosts.into_values().next().expect("plan has one host");
@@ -1104,7 +1095,7 @@ mod tests {
     fn host_rollback_safe_for_content_only_update() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         let c2 = t.commit(&[("web1/nginx/nginx.conf", b"v2")]);
 
         let plan = t.plan(c2);
@@ -1116,7 +1107,7 @@ mod tests {
     fn host_rollback_safe_when_app_added_without_system_effects() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         let c2 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/rofld/conf", b"v1")]);
 
         let plan = t.plan(c2);
@@ -1128,7 +1119,7 @@ mod tests {
     fn host_rollback_unsafe_when_any_app_is_unsafe() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         let c2 = t.commit(&[
             ("web1/nginx/conf", b"v2"),
             (
@@ -1144,36 +1135,56 @@ mod tests {
     }
 
     #[test]
-    fn diverged_hosts_produce_multi_parent_commit() -> Result<()> {
+    fn finalize_parents_each_host_commit_on_its_tracking_ref() -> Result<()> {
         let t = TestRepo::new();
-        let base = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", base);
-        t.set_host_tracking_ref("web2", base);
+        let c1 = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let deployed = t.mark_deployed(c1);
+        // web3 is new, so its commit has no parent.
+        let c2 = t.commit(&[
+            ("web1/app/conf", b"v2"),
+            ("web2/app/conf", b"v2"),
+            ("web3/app/conf", b"v1"),
+        ]);
 
-        // Simulate operator A deploying to web1 only.
-        let c_a = t.commit(&[("web1/app/conf", b"v2"), ("web2/app/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c_a);
+        let plan = t.plan(c2);
 
-        // Simulate operator B deploying to web2 only, branching from base.
-        t.store
-            .set_ref("refs/heads/main", base, RefUpdate::FetchStale)?;
-        let c_b = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v2")]);
-        t.set_host_tracking_ref("web2", c_b);
+        let config_tree = t.store.get_commit_tree(c2)?;
+        for (host, host_plan) in &plan.hosts {
+            let commit = t.store.repo.find_commit(host_plan.commit)?;
+            let host_tree = config_tree.get_name(&host.0).expect("config has the host");
+            assert_eq!(commit.tree_id(), host_tree.id(), "{host}");
+            let parent = deployed.hosts.get(host).map(|d| d.commit);
+            assert_eq!(commit.parent_ids().next(), parent, "{host}");
+        }
+        Ok(())
+    }
 
-        // Now deploy a new config that touches both hosts.
-        let c_new = t.commit(&[("web1/app/conf", b"v3"), ("web2/app/conf", b"v3")]);
-        let plan = t.plan(c_new);
-        assert!(plan.hosts.contains_key(&"web1".into()));
-        assert!(plan.hosts.contains_key(&"web2".into()));
+    #[test]
+    fn finalize_stamps_the_commits_of_a_run_with_one_token() -> Result<()> {
+        let t = TestRepo::new();
+        let c = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
+        let plan = t.plan(c);
 
-        // The commit should descend from both diverged tracking refs.
-        let commit = t.store.repo.find_commit(plan.commit)?;
-        assert_eq!(commit.parent_count(), 2, "commit has two parents");
-        let parents: Vec<Oid> = (0..commit.parent_count())
-            .map(|i| commit.parent_id(i).expect("parent exists"))
-            .collect();
-        assert!(parents.contains(&c_a), "commit descends from web1's ref");
-        assert!(parents.contains(&c_b), "commit descends from web2's ref");
+        let trailer_of = |host: &str| -> String {
+            let commit = t
+                .store
+                .repo
+                .find_commit(plan.hosts[&host.into()].commit)
+                .expect("commit exists");
+            let message = commit.message().expect("message is utf-8");
+            message
+                .lines()
+                .last()
+                .expect("message has lines")
+                .to_string()
+        };
+        let trailer = trailer_of("web1");
+        assert_eq!(trailer, trailer_of("web2"));
+        let token = trailer
+            .strip_prefix("Deploy-Run: ")
+            .expect("trailer records the run");
+        assert_eq!(token.len(), 32);
+        assert!(token.chars().all(|c| c.is_ascii_hexdigit()), "{token}");
         Ok(())
     }
 
@@ -1184,6 +1195,15 @@ mod tests {
             .expect("plan has changes")
     }
 
+    const RUN: &str = "3f0a9c2e7d1b4e6a8c5f0d2b9e7a1c4d";
+
+    /// The commit message for `host` when deploying `commit`'s tree.
+    fn message_for(t: &TestRepo, commit: Oid, host: &str) -> String {
+        let plan = draft(t, commit);
+        let host = Hostname::from(host);
+        commit_message(&host, &plan.hosts[&host], &plan.run_body(RUN))
+    }
+
     fn subject_of(message: &str) -> &str {
         message.lines().next().expect("message has a subject line")
     }
@@ -1192,18 +1212,27 @@ mod tests {
     fn commit_subject_renders_one_app_one_host_descriptively() {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/nginx/conf", b"v1")]);
-        let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy nginx on web1");
+        assert_eq!(
+            subject_of(&message_for(&t, c, "web1")),
+            "Deploy nginx on web1"
+        );
     }
 
     #[test]
-    fn commit_subject_oxford_joins_apps_and_hosts_when_descriptive_form_fits() {
+    fn commit_subject_lists_the_apps_of_its_own_host() {
         let t = TestRepo::new();
-        let c = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/lego/conf", b"v1")]);
-        let message = draft(&t, c).commit_message();
+        let c = t.commit(&[
+            ("web1/lego/conf", b"v1"),
+            ("web1/nginx/conf", b"v1"),
+            ("web2/lego/conf", b"v1"),
+        ]);
         assert_eq!(
-            subject_of(&message),
-            "Deploy lego and nginx on web1 and web2"
+            subject_of(&message_for(&t, c, "web1")),
+            "Deploy lego and nginx on web1"
+        );
+        assert_eq!(
+            subject_of(&message_for(&t, c, "web2")),
+            "Deploy lego on web2"
         );
     }
 
@@ -1211,92 +1240,53 @@ mod tests {
     fn commit_subject_uses_update_verb_when_all_changes_are_updates() {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
-        let message = draft(&t, c2).commit_message();
-        assert_eq!(subject_of(&message), "Update nginx on web1");
+        assert_eq!(
+            subject_of(&message_for(&t, c2, "web1")),
+            "Update nginx on web1"
+        );
     }
 
     #[test]
-    fn commit_subject_collapses_hosts_first_when_descriptive_form_too_long() {
+    fn commit_subject_counts_apps_when_listing_them_overflows_the_budget() {
         let t = TestRepo::new();
-        // Three long hostnames overflow the 52-col budget when listed in
-        // full, but the apps part is short, so apps stay full and hosts
-        // collapse to a count.
-        let c = t.commit(&[
-            ("verylongname01/nginx/conf", b"v1"),
-            ("verylongname02/nginx/conf", b"v1"),
-            ("verylongname03/nginx/conf", b"v1"),
-        ]);
-        let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy nginx on 3 hosts");
-    }
-
-    #[test]
-    fn commit_subject_falls_back_to_count_form_when_apps_too_long() {
-        let t = TestRepo::new();
-        // Many long-named apps push past the budget even with a single
-        // host, so apps collapse too.
         let c = t.commit(&[
             ("web1/superlongappname01/conf", b"v1"),
             ("web1/superlongappname02/conf", b"v1"),
             ("web1/superlongappname03/conf", b"v1"),
-            ("web1/superlongappname04/conf", b"v1"),
         ]);
-        let message = draft(&t, c).commit_message();
-        assert_eq!(subject_of(&message), "Deploy 4 apps on 1 host");
+        assert_eq!(
+            subject_of(&message_for(&t, c, "web1")),
+            "Deploy 3 apps on web1"
+        );
     }
 
     #[test]
-    fn commit_subject_names_hosts_when_plan_has_no_app_changes() -> Result<()> {
+    fn commit_subject_keeps_the_hostname_when_even_the_count_form_overflows() {
+        let t = TestRepo::new();
+        let host = "a-hostname-longer-than-the-subject-budget.example.com";
+        let path = format!("{host}/nginx/conf");
+        let c = t.commit(&[(path.as_str(), b"v1")]);
+        assert_eq!(
+            subject_of(&message_for(&t, c, host)),
+            format!("Deploy 1 app on {host}")
+        );
+    }
+
+    #[test]
+    fn commit_subject_names_host_when_plan_has_no_app_changes() -> Result<()> {
         let t = TestRepo::new();
         // A fresh empty host dir plans a deploy with no app changes at all.
         let config = TempDir::new("config");
         std::fs::create_dir_all(config.path().join("web2"))?;
         let tree_oid = t.store.build_tree(config.path())?;
 
-        let message = make_plan(&t.store, tree_oid, &HostFilter::All)?
-            .expect("plan has changes")
-            .commit_message();
+        let plan = make_plan(&t.store, tree_oid, &HostFilter::All)?.expect("plan has changes");
+        let web2 = Hostname::from("web2");
+        let message = commit_message(&web2, &plan.hosts[&web2], &plan.run_body(RUN));
         assert_eq!(subject_of(&message), "Deploy web2");
         Ok(())
-    }
-
-    #[test]
-    fn commit_body_shows_previous_oid_when_host_was_already_deployed() {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
-        let c2 = t.commit(&[("web1/nginx/conf", b"v2")]);
-        let message = draft(&t, c2).commit_message();
-        let expected = format!("web1 (changed from {c1})");
-        assert!(
-            message.contains(&expected),
-            "message must contain {expected:?}, got:\n{message}",
-        );
-    }
-
-    #[test]
-    fn commit_body_marks_new_host_when_no_previous_deploy() {
-        let t = TestRepo::new();
-        let c = t.commit(&[("web1/nginx/conf", b"v1")]);
-        let message = draft(&t, c).commit_message();
-        assert!(
-            message.contains("web1 (new host)"),
-            "message must mark web1 as new host, got:\n{message}",
-        );
-    }
-
-    #[test]
-    fn commit_body_uses_distinct_verbs_for_add_update_remove() {
-        let t = TestRepo::new();
-        let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/lego/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
-        let c2 = t.commit(&[("web1/nginx/conf", b"v2"), ("web1/foo/conf", b"v1")]);
-        let message = draft(&t, c2).commit_message();
-        assert!(message.contains("    add foo"), "got:\n{message}");
-        assert!(message.contains("    update nginx"), "got:\n{message}");
-        assert!(message.contains("    remove lego"), "got:\n{message}");
     }
 
     #[test]
@@ -1304,7 +1294,7 @@ mod tests {
         let t = TestRepo::new();
         // web1 was already deployed; web2 is brand new.
         let c1 = t.commit(&[("web1/nginx/conf", b"v1"), ("web1/lego/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", c1);
+        t.mark_deployed(c1);
         // Target: web1 updates nginx, removes lego, adds foo;
         // web2 is a new host with one app.
         let c2 = t.commit(&[
@@ -1312,25 +1302,27 @@ mod tests {
             ("web1/foo/conf", b"v1"),
             ("web2/lego/conf", b"v1"),
         ]);
-        // Commit oids depend on timestamps and are not stable across test
-        // runs. Substitute a fixed oid so the assertion is deterministic and
-        // the reader sees a realistic message.
-        let message = draft(&t, c2)
-            .commit_message()
-            .replace(&c1.to_string(), "b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f");
-        assert_eq!(
-            message,
-            "\
-Deploy foo, lego, and nginx on web1 and web2
+        // Each host's commit has its own subject; the body is the run's.
+        let body = "\
+Changes intended to be deployed in the same run:
 
-web1 (changed from b8a4c3df2a1e6f5b9d8c0a7e1b3f4d2c8e5a6b7f)
+web1
     add foo
     remove lego
     update nginx
 
-web2 (new host)
+web2
     add lego
-",
+
+Deploy-Run: 3f0a9c2e7d1b4e6a8c5f0d2b9e7a1c4d
+";
+        assert_eq!(
+            message_for(&t, c2, "web1"),
+            format!("Deploy foo, lego, and nginx on web1\n\n{body}"),
+        );
+        assert_eq!(
+            message_for(&t, c2, "web2"),
+            format!("Deploy lego on web2\n\n{body}"),
         );
     }
 }

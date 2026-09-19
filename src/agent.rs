@@ -17,12 +17,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
 use crate::checkout::{self, CheckoutMode, checkout};
-use crate::error::ApplyError;
+use crate::error::{ApplyError, StoreError};
 use crate::log::FileLog;
 use crate::plan::{AppDiff, DesiredState, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{ApplyMode, Message, Request};
-use crate::store::{RefUpdate, STORE_VERSION, Store};
+use crate::store::{RefUpdate, STORE_VERSION, STORE_VERSION_CLUSTER_TREE, Store};
 
 /// Configuration for a host-side agent session.
 ///
@@ -184,48 +184,53 @@ impl AgentSession {
         self.store.current_commit()
     }
 
-    /// The refusal to report when the host's deployed state belongs to a
-    /// different hostname, `None` when the identity checks pass.
+    /// Convert the store from the cluster-tree format to the current one,
+    /// see `STORE_VERSION_CLUSTER_TREE`.
     ///
-    /// Deploys diff the target against this host's subtree in the current
-    /// commit, looked up by hostname; under a changed name that lookup
-    /// finds another host's config or nothing at all, so the computed
-    /// changes would not match what is actually on this machine. The
-    /// hostname recorded at the last apply is the exact check; hosts
-    /// deployed before recording existed fall back to checking that the
-    /// commit has an entry for this host at all. The fallback misses a
-    /// name swap, but self-retires: the next apply records the name.
-    fn check_deployed_hostname(&self, current_commit: Option<Oid>) -> Option<Message> {
-        // Without a current commit there is no state to protect; a fresh
-        // deploy records the identity.
-        let commit = current_commit?;
-        match self
-            .store
-            .get_deployed_hostname()
-            .expect("host store config is readable")
-        {
+    /// Returns the refusal to report when the deployed state cannot be
+    /// converted, `None` once the store is converted. A store without
+    /// commits only gets the current version recorded.
+    fn convert_store(&self, operator: &str) -> Result<Option<Message>, StoreError> {
+        // The conversion picks this host's config out of the cluster tree
+        // by name, so under a changed hostname it would pick another
+        // host's config or nothing. The hostname recorded at the last
+        // apply is the exact check; a state deployed before recording
+        // existed is caught by the missing entry below, except for a swap
+        // of two names.
+        match self.store.get_deployed_hostname()? {
             Some(deployed_as) if deployed_as != self.hostname => {
-                Some(Message::LockHostnameChanged {
+                return Ok(Some(Message::LockHostnameChanged {
                     deployed_as: Some(deployed_as),
-                })
+                }));
             }
-            Some(_) => None,
-            // Fallback for hosts last deployed by an older Deptool that
-            // did not record the hostname yet.
-            None => {
-                let has_own_entry = self
-                    .store
-                    .get_commit_tree(commit)
-                    .expect("current commit resolves to a tree")
-                    .get_name(&self.hostname.0)
-                    .is_some();
-                if has_own_entry {
-                    None
-                } else {
-                    Some(Message::LockHostnameChanged { deployed_as: None })
-                }
-            }
+            _ => {}
         }
+
+        // One signature for both refs: when they point at the same cluster
+        // commit, they convert to the same commit and stay equal, as a
+        // completed deploy leaves them.
+        let sig = self.store.signature()?;
+        let refs = [
+            ("refs/heads/current", self.store.current_commit()),
+            ("refs/heads/target", self.store.target_commit()),
+        ];
+        for (refname, commit) in refs {
+            let commit = match commit {
+                Some(oid) => oid,
+                None => continue,
+            };
+            let converted = match self
+                .store
+                .convert_cluster_commit(&sig, &self.hostname, commit)?
+            {
+                Some(oid) => oid,
+                None => return Ok(Some(Message::LockHostnameChanged { deployed_as: None })),
+            };
+            self.store
+                .set_ref(refname, converted, RefUpdate::Convert { operator })?;
+        }
+        self.store.set_store_version(STORE_VERSION)?;
+        Ok(None)
     }
 
     fn handle_lock(
@@ -283,18 +288,27 @@ impl AgentSession {
         file.rewind().expect("seeking lockfile succeeds");
         let _ = write!(&file, "{operator}");
 
-        // Check the store version before interpreting any commit: a newer
-        // format may lay out its commits differently. Returning releases
-        // the lock by dropping `file`.
+        // Check the store version before interpreting any commit: an older
+        // format is converted first, a newer one may lay out its commits
+        // differently. Returning releases the lock by dropping `file`.
         match self
             .store
             .get_store_version()
             .expect("host store config is readable")
         {
-            None => self
-                .store
-                .set_store_version(STORE_VERSION)
-                .expect("host store config is writable"),
+            None | Some(STORE_VERSION_CLUSTER_TREE) => match self.convert_store(&operator) {
+                Ok(None) => {}
+                Ok(Some(refusal)) => {
+                    emit_message(refusal);
+                    return;
+                }
+                Err(err) => {
+                    emit_message(Message::ErrorPreApply(ApplyError::Store(format!(
+                        "failed to convert store to the per-host format: {err}"
+                    ))));
+                    return;
+                }
+            },
             Some(STORE_VERSION) => {}
             Some(other_version) => {
                 emit_message(Message::LockStoreVersionUnsupported {
@@ -305,16 +319,6 @@ impl AgentSession {
         }
 
         let actual_current_commit = self.current_commit();
-
-        // Refuse when the deployed state belongs to a different hostname
-        // (e.g. /etc/hostname changed after the deploy); the operator
-        // resolves this by reprovisioning the host or deleting its store.
-        // Release the lock by dropping `file`.
-        if let Some(refusal) = self.check_deployed_hostname(actual_current_commit) {
-            emit_message(refusal);
-            return;
-        }
-
         if actual_current_commit != expected_current_commit {
             // Stale: release the lock, the client won't be deploying.
             emit_message(Message::LockStale {
@@ -440,7 +444,6 @@ impl AgentSession {
         // make_plan but aggregated per-host.
         let (app_diffs, system_diff) = diff_host(
             &self.store,
-            &self.hostname,
             &self.apps_dir,
             diff_base,
             Some(ctx.target_commit),
@@ -495,18 +498,10 @@ impl AgentSession {
     /// Collect the desired managed-symlink state for a commit's config.
     fn desired_state(&self, commit_oid: Oid) -> Result<DesiredState, ApplyError> {
         Ok(DesiredState {
-            networkd: self
-                .store
-                .desired_networkd(commit_oid, &self.hostname, &self.apps_dir)?,
-            quadlets: self
-                .store
-                .desired_quadlets(commit_oid, &self.hostname, &self.apps_dir)?,
-            sysusers: self
-                .store
-                .desired_sysusers(commit_oid, &self.hostname, &self.apps_dir)?,
-            units: self
-                .store
-                .desired_units(commit_oid, &self.hostname, &self.apps_dir)?,
+            networkd: self.store.desired_networkd(commit_oid, &self.apps_dir)?,
+            quadlets: self.store.desired_quadlets(commit_oid, &self.apps_dir)?,
+            sysusers: self.store.desired_sysusers(commit_oid, &self.apps_dir)?,
+            units: self.store.desired_units(commit_oid, &self.apps_dir)?,
         })
     }
 
@@ -523,7 +518,6 @@ impl AgentSession {
             &self.store,
             Some(ctx.target_commit),
             app_diffs,
-            &self.hostname,
             &self.apps_dir,
             CheckoutMode::Fresh,
             |msg| self.log(msg),
@@ -563,9 +557,6 @@ impl AgentSession {
                 operator: &ctx.operator,
             },
         )?;
-        // Record which config entry this state belongs to; the lock check
-        // compares it against /etc/hostname to detect renames.
-        self.store.set_deployed_hostname(&self.hostname)?;
 
         checkout::gc_old_checkouts(&self.apps_dir, |msg| self.log(msg));
 
@@ -625,7 +616,6 @@ impl AgentSession {
     ) -> std::result::Result<(), ApplyError> {
         let (diffs, system_diff) = diff_host(
             &self.store,
-            &self.hostname,
             &self.apps_dir,
             Some(ctx.target_commit),
             ctx.current_commit,
@@ -635,7 +625,6 @@ impl AgentSession {
             &self.store,
             ctx.current_commit,
             &diffs,
-            &self.hostname,
             &self.apps_dir,
             CheckoutMode::Reuse,
             |msg| self.log(msg),
@@ -678,7 +667,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::testutil::{TempDir, TestHost, commit_files};
+    use crate::testutil::{TempDir, TestHost, TestRepo, commit_files};
 
     #[test]
     fn ping_returns_pong() {
@@ -705,7 +694,7 @@ mod tests {
 
     #[test]
     fn lock_succeeds_when_current_ref_matches_expected() {
-        let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit("web1", &[("nginx/conf", b"v1")]);
         host.set_current(oid);
         let responses = host.interact(Request::Lock {
             expected_current_commit: Some(oid),
@@ -716,7 +705,7 @@ mod tests {
 
     #[test]
     fn lock_reports_stale_when_current_ref_mismatches() {
-        let (mut host, oid) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
+        let (mut host, oid) = TestHost::with_commit("web1", &[("nginx/conf", b"v1")]);
         host.set_current(oid);
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
@@ -763,51 +752,124 @@ mod tests {
         drop(lock_holder);
     }
 
-    #[test]
-    fn lock_refuses_when_state_was_deployed_under_another_name() {
-        // The host was deployed as web1 and now reports the hostname web2.
-        // Without a recorded hostname (last deployed by an older Deptool)
-        // and no web2 entry in the commit, the tree-entry fallback refuses.
-        let (mut host, c1) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
-        host.set_current(c1);
-        let lock = Request::Lock {
-            expected_current_commit: None,
+    fn lock(expected_current_commit: Option<Oid>) -> Request {
+        Request::Lock {
+            expected_current_commit,
             operator: "deckard@spinner".into(),
-        };
-        assert_eq!(
-            host.interact(lock.clone()),
-            vec![Message::LockHostnameChanged { deployed_as: None }],
-        );
+        }
+    }
 
-        // A name swap: the commit also has a web2 entry (another machine's
-        // config). The fallback passes and the lock proceeds to the stale
-        // answer -- the swap goes undetected.
-        let store = Store::open(host.session.store.path()).expect("store opens");
-        let c2 = commit_files(
-            &store,
-            &[("web1/nginx/conf", b"v1"), ("web2/nginx/conf", b"v2")],
-        )
-        .expect("commit succeeds");
-        host.set_current(c2);
-        assert_eq!(
-            host.interact(lock.clone()),
-            vec![Message::LockStale {
-                expected_commit: None,
-                actual_commit: Some(c2),
-            }],
-        );
+    /// A host as Deptool 1.2 left it, with `files` as the cluster tree of
+    /// its current commit, deployed under `hostname`.
+    fn cluster_tree_host(hostname: &str, files: &[(&str, &[u8])]) -> (TestHost, Oid) {
+        let driver = TestRepo::new();
+        let cluster = driver.commit(files);
+        let host = TestHost::with_cluster_tree_store(&driver, hostname, cluster);
+        (host, cluster)
+    }
 
-        // With the recorded hostname the swap is refused, and the error
-        // identifies the old name.
+    fn store_version(host: &TestHost) -> Option<u32> {
         host.session
             .store
-            .set_deployed_hostname(&Hostname::from("web1"))
-            .expect("hostname is recorded");
+            .get_store_version()
+            .expect("host store config is readable")
+    }
+
+    fn parent_of(host: &TestHost, commit: Oid) -> Oid {
+        host.session
+            .store
+            .repo
+            .find_commit(commit)
+            .expect("commit exists")
+            .parent_id(0)
+            .expect("commit has a parent")
+    }
+
+    #[test]
+    fn lock_converts_a_diverged_target_on_its_own() {
+        // An incomplete deploy left target ahead of current.
+        let (mut host, cluster) = cluster_tree_host("web1", &[("web1/nginx/conf", b"v1")]);
+        let target = commit_files(&host.session.store, &[("web1/nginx/conf", b"v2")])
+            .expect("commit succeeds");
+        host.set_target(target);
+
+        host.interact(lock(Some(cluster)));
+
+        let current = host.get_ref("refs/heads/current").expect("current exists");
+        let converted_target = host.get_ref("refs/heads/target").expect("target exists");
+        assert_ne!(
+            current, converted_target,
+            "the incomplete deploy stays visible"
+        );
+        assert_eq!(parent_of(&host, current), cluster);
+        assert_eq!(parent_of(&host, converted_target), target);
+    }
+
+    #[test]
+    fn lock_brings_an_interrupted_conversion_to_one_commit() {
+        // A lock that moved `current` but was interrupted before it
+        // recorded the version leaves the store half converted.
+        let (mut host, cluster) = cluster_tree_host("web1", &[("web1/nginx/conf", b"v1")]);
+        let store = &host.session.store;
+        let sig = store.signature().expect("signature is available");
+        let half = store
+            .convert_cluster_commit(&sig, &"web1".into(), cluster)
+            .expect("host store is readable")
+            .expect("the cluster tree has an entry for web1");
+        store
+            .set_ref(
+                "refs/heads/current",
+                half,
+                RefUpdate::Convert {
+                    operator: "roy@nexus",
+                },
+            )
+            .expect("ref is set");
+
+        host.interact(lock(Some(cluster)));
+
+        let current = host.get_ref("refs/heads/current").expect("current exists");
+        assert_eq!(host.get_ref("refs/heads/target"), Some(current));
+        assert_eq!(parent_of(&host, current), cluster);
+        assert_eq!(store_version(&host), Some(STORE_VERSION));
+    }
+
+    #[test]
+    fn lock_infers_a_rename_from_a_missing_entry_when_no_hostname_was_recorded() {
+        // Deployed as web1 before Deptool recorded hostnames; the host now
+        // reports web2. Without a web2 entry the conversion has nothing to
+        // pick, so it refuses.
+        let (mut host, cluster) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
+        host.set_current(cluster);
+        host.session
+            .store
+            .set_store_version(STORE_VERSION_CLUSTER_TREE)
+            .expect("version is recorded");
+
         assert_eq!(
-            host.interact(lock),
-            vec![Message::LockHostnameChanged {
-                deployed_as: Some(Hostname::from("web1")),
-            }],
+            host.interact(lock(None)),
+            vec![Message::LockHostnameChanged { deployed_as: None }],
+        );
+        assert_eq!(
+            store_version(&host),
+            Some(STORE_VERSION_CLUSTER_TREE),
+            "nothing was converted"
+        );
+    }
+
+    #[test]
+    fn receive_pack_reports_an_error_for_invalid_pack_data() {
+        let mut host = TestHost::new("web1");
+        host.interact(lock(None));
+        let responses = host.interact(Request::ReceivePack {
+            pack_data: BASE64.encode(b"not a valid pack"),
+        });
+        assert!(
+            matches!(
+                responses.as_slice(),
+                [Message::ErrorPreApply(ApplyError::Store(_))]
+            ),
+            "{responses:?}",
         );
     }
 
@@ -886,8 +948,8 @@ mod tests {
     }
 
     #[test]
-    fn successful_apply_sets_refs_and_reflog_and_records_hostname() {
-        let (mut host, c1) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
+    fn successful_apply_sets_refs_and_reflog() {
+        let (mut host, c1) = TestHost::with_commit("web1", &[("nginx/conf", b"v1")]);
         lock_and_push(&mut host, c1);
 
         let msgs = host.interact(Request::Apply {
@@ -908,26 +970,17 @@ mod tests {
             [entry] => assert_eq!(*entry, (c1, "deploy by deckard@spinner: set target".into())),
             other => panic!("unexpected target reflog: {other:?}"),
         }
-
-        assert_eq!(
-            host.session
-                .store
-                .get_deployed_hostname()
-                .expect("host store config is readable"),
-            Some(Hostname::from("web1")),
-            "the apply records the hostname the state belongs to",
-        );
     }
 
     #[test]
     fn rollback_on_activate_failure() {
         // Two commits: c1 is the good state, c2 is the broken deploy.
         let activator = SequenceActivator::new(vec![Err(activation_failed()), Ok(())]);
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
+        let (mut host, c1) = test_host("web1", &[("nginx/nginx.conf", b"v1")], activator);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
-        let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
-            .expect("commit succeeds");
+        let c2 =
+            commit_files(&store, &[("nginx/nginx.conf", b"v2-broken")]).expect("commit succeeds");
 
         // Lock and push c2.
         host.interact(Request::Lock {
@@ -969,9 +1022,9 @@ mod tests {
         let (mut host, c1) = test_host(
             "web1",
             &[
-                ("web1/nginx/nginx.conf", b"v1"),
+                ("nginx/nginx.conf", b"v1"),
                 (
-                    "web1/nginx/manifest.json",
+                    "nginx/manifest.json",
                     br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
                 ),
             ],
@@ -993,7 +1046,7 @@ mod tests {
     fn rollback_to_empty_on_first_deploy_failure() {
         // First deploy: no current_commit.
         let activator = SequenceActivator::new(vec![Err(activation_failed()), Ok(())]);
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
+        let (mut host, c1) = test_host("web1", &[("nginx/nginx.conf", b"v1")], activator);
         lock_and_push(&mut host, c1);
 
         let msgs = host.interact(Request::Apply {
@@ -1024,11 +1077,11 @@ mod tests {
             Err(activation_failed()),
             Err(ApplyError::Store("rollback IO error".into())),
         ]);
-        let (mut host, c1) = test_host("web1", &[("web1/nginx/nginx.conf", b"v1")], activator);
+        let (mut host, c1) = test_host("web1", &[("nginx/nginx.conf", b"v1")], activator);
         host.set_current(c1);
         let store = Store::open(host.session.store.path()).expect("store opens");
-        let c2 = commit_files(&store, &[("web1/nginx/nginx.conf", b"v2-broken")])
-            .expect("commit succeeds");
+        let c2 =
+            commit_files(&store, &[("nginx/nginx.conf", b"v2-broken")]).expect("commit succeeds");
 
         host.interact(Request::Lock {
             expected_current_commit: Some(c1),
@@ -1066,9 +1119,9 @@ mod tests {
         let (mut host, c1) = TestHost::with_commit(
             "web1",
             &[
-                ("web1/nginx/nginx.conf", b"v1"),
+                ("nginx/nginx.conf", b"v1"),
                 (
-                    "web1/nginx/manifest.json",
+                    "nginx/manifest.json",
                     br#"{"systemd":{"units_enabled":["nginx.service"]}}"#,
                 ),
             ],
@@ -1127,7 +1180,7 @@ mod tests {
         // activate call would panic the sequence with "unexpected extra
         // activate call").
         let activator = SequenceActivator::new(vec![Err(activation_failed())]);
-        let (mut host, c1) = test_host("web1", &[("web1/app/conf", b"v1")], activator);
+        let (mut host, c1) = test_host("web1", &[("app/conf", b"v1")], activator);
         host.set_current(c1);
         host.session
             .store

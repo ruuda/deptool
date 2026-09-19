@@ -17,11 +17,17 @@ attempted to deploy. It carries metadata about who created it and when, and it
 enables Deptool to not just track what is currently deployed, but everything
 that was ever deployed to the cluster.
 
+<!-- TODO(ruuda): Since 1.3 a deployment is one commit per host: its tree is
+the host's apps, its parent the host's previous commit. The body lists the
+run's hosts; a `Deploy-Run` trailer groups its commits. -->
+
 ## Operator-side refs
 
  * `refs/heads/main` points to the last commit that we attempted to deploy.
  * `refs/remotes/<host>` points to the commit that is deployed at that
    host.
+
+<!-- TODO(ruuda): Deptool 1.3 no longer writes `main`. -->
 
 On the operator side, Deptool keeps a remote-tracking ref per target host.
 This enables Deptool to determine which hosts are affected by a change,
@@ -49,7 +55,8 @@ state is only partially applied.
 <!-- TODO(ruuda): Document the store format version: the host store's Git
 config records `deptool.storeVersion`, written when the agent takes the deploy
 lock. A Deptool that finds a version it does not support refuses to deploy to
-that host until Deptool is updated. -->
+that host until Deptool is updated. Version 1 is the cluster tree per commit
+(1.2 and older), version 2 is per host; the agent converts at lock. -->
 
 ## Transport
 
@@ -69,3 +76,6 @@ other hosts. Although you should never store secrets in your configuration, and
 your cluster should be secure even when its configuration is public, this still
 presents an information disclosure risk. To mitigate this somewhat, the store on
 managed hosts is accessible only to the `root` user.
+
+<!-- TODO(ruuda): Since 1.3 a host receives only its own commits; a converted
+host keeps the cluster history it already had. -->

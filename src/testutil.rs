@@ -20,7 +20,7 @@ use crate::error::{HostError, Result};
 use crate::prim::Hostname;
 use crate::protocol::{self, Hello, Message, Request};
 use crate::setup::{BUILD_COMMIT, HostConnector};
-use crate::store::{RefUpdate, Store};
+use crate::store::{RefUpdate, STORE_VERSION, STORE_VERSION_CLUSTER_TREE, Store};
 
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -81,21 +81,22 @@ fn build_tree_from_files(repo: &Repository, files: &[(&str, &[u8])]) -> Result<O
     Ok(builder.write()?)
 }
 
-/// Create a commit with the given files and advance main.
+/// Create a commit with the given files.
 ///
-/// Uses `refs/heads/main` as the parent (if it exists) to build a linear
-/// commit chain in tests.
+/// Chains the commits of one store through a test-only ref, so a later
+/// commit descends from an earlier one, as the agent asserts of a deploy
+/// target.
 pub fn commit_files(store: &Store, files: &[(&str, &[u8])]) -> Result<Oid> {
+    let chain = "refs/heads/test-chain";
     let tree_oid = build_tree_from_files(&store.repo, files)?;
-    let parent: Vec<Oid> = store
-        .repo
-        .find_reference("refs/heads/main")
-        .ok()
-        .map(|r| r.peel_to_commit().expect("main points to a commit").id())
-        .into_iter()
-        .collect();
-    let oid = store.commit_tree(tree_oid, &parent, "test commit")?;
-    store.set_ref("refs/heads/main", oid, RefUpdate::SetMain)?;
+    let parent = match store.repo.find_reference(chain) {
+        Ok(r) => Some(r.peel_to_commit()?.id()),
+        Err(..) => None,
+    };
+    let sig = store.signature()?;
+    let oid = store.commit_tree(&sig, tree_oid, parent, "test commit")?;
+    let force = true;
+    store.repo.reference(chain, oid, force, "test commit")?;
     Ok(oid)
 }
 
@@ -144,11 +145,11 @@ impl TestRepo {
         let app_plan = crate::plan::compute_app_plan(&self.store, diff)?;
         let is_rollback_safe = app_plan.system.is_rollback_safe();
         Ok(crate::plan::Plan {
-            commit,
             hosts: std::collections::BTreeMap::from([(
                 crate::prim::Hostname::from("web1"),
                 crate::plan::HostPlan {
                     apps: std::collections::BTreeMap::from([(app.into(), app_plan)]),
+                    commit,
                     expected_current: None,
                     is_rollback_safe,
                 },
@@ -172,6 +173,16 @@ impl TestRepo {
             .find_commit(commit_oid)
             .expect("commit exists")
             .tree_id()
+    }
+
+    /// Point every host's tracking ref at the deploy commit for its part of
+    /// the config tree of `commit`, as a completed deploy would.
+    pub fn mark_deployed(&self, commit: Oid) -> crate::plan::Plan {
+        let plan = self.plan(commit);
+        for (host, host_plan) in &plan.hosts {
+            self.set_host_tracking_ref(&host.0, host_plan.commit);
+        }
+        plan
     }
 
     /// Read the driver-side tracking ref for a host (`refs/remotes/{host}`).
@@ -259,6 +270,22 @@ impl TestHost {
         host
     }
 
+    /// Create a host as Deptool 1.2 left it: `commit`, a cluster-tree commit
+    /// fetched from `driver`, is deployed under `hostname`, and the store
+    /// records format version 1 and the hostname.
+    pub fn with_cluster_tree_store(driver: &TestRepo, hostname: &str, commit: Oid) -> Self {
+        let host = Self::at_commit(driver, hostname, commit);
+        host.set_target(commit);
+        let store = &host.session.store;
+        store
+            .set_store_version(STORE_VERSION_CLUSTER_TREE)
+            .expect("version is recorded");
+        store
+            .set_deployed_hostname(&Hostname::from(hostname))
+            .expect("hostname is recorded");
+        host
+    }
+
     /// Model a hostname change on the machine: same store and apps
     /// directory, new hostname.
     pub fn renamed(self, hostname: &str) -> TestHost {
@@ -271,7 +298,8 @@ impl TestHost {
         }
     }
 
-    /// Set the host-local `refs/heads/current` ref.
+    /// Set the host-local `refs/heads/current` ref, as an apply of this
+    /// version leaves it: the store then records the current store version.
     pub fn set_current(&self, commit_oid: Oid) {
         self.session
             .store
@@ -279,6 +307,25 @@ impl TestHost {
                 "refs/heads/current",
                 commit_oid,
                 RefUpdate::SetCurrent {
+                    operator: "deckard@spinner",
+                },
+            )
+            .expect("ref is set");
+        self.session
+            .store
+            .set_store_version(STORE_VERSION)
+            .expect("version is recorded");
+    }
+
+    /// Set the host-local `refs/heads/target` ref, as the start of a deploy
+    /// leaves it.
+    pub fn set_target(&self, commit_oid: Oid) {
+        self.session
+            .store
+            .set_ref(
+                "refs/heads/target",
+                commit_oid,
+                RefUpdate::SetTarget {
                     operator: "deckard@spinner",
                 },
             )

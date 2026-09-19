@@ -17,7 +17,6 @@ use git2::Oid;
 
 use crate::error::ApplyError;
 use crate::plan::{AppDiff, SymlinkChanges};
-use crate::prim::Hostname;
 use crate::store::Store;
 
 type Result<T> = std::result::Result<T, ApplyError>;
@@ -53,7 +52,6 @@ pub enum CheckoutMode {
 fn checkout_app(
     store: &Store,
     commit_oid: Oid,
-    host: &Hostname,
     app: &str,
     apps_dir: &Path,
     mode: CheckoutMode,
@@ -71,7 +69,7 @@ fn checkout_app(
             remove_dir_all(&version_dir)?;
         }
         create_dir_all(&version_dir)?;
-        store.checkout_app(commit_oid, host, app, &version_dir)?;
+        store.checkout_app(commit_oid, app, &version_dir)?;
     }
 
     let next = app_dir.join("next");
@@ -198,7 +196,6 @@ pub fn checkout(
     store: &Store,
     commit_oid: Option<Oid>,
     app_diffs: &BTreeMap<String, AppDiff>,
-    host: &Hostname,
     apps_dir: &Path,
     mode: CheckoutMode,
     mut log: impl FnMut(std::fmt::Arguments<'_>),
@@ -208,14 +205,12 @@ pub fn checkout(
             AppDiff::Add { .. } => {
                 log(format_args!("adding app {app}"));
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                checkout_app(store, oid, host, app, apps_dir, mode)
-                    .map_err(checkout_failed(app))?;
+                checkout_app(store, oid, app, apps_dir, mode).map_err(checkout_failed(app))?;
             }
             AppDiff::Update { .. } => {
                 log(format_args!("updating app {app}"));
                 let oid = commit_oid.expect("Add/Update requires a target commit");
-                checkout_app(store, oid, host, app, apps_dir, mode)
-                    .map_err(checkout_failed(app))?;
+                checkout_app(store, oid, app, apps_dir, mode).map_err(checkout_failed(app))?;
             }
             AppDiff::Remove { .. } => {
                 log(format_args!("removing app {app}"));
@@ -647,9 +642,9 @@ mod tests {
     #[test]
     fn checkout_app_creates_versioned_checkout_and_current_symlink() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"server {}")]);
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
 
         let prefix = oid_prefix(c1);
         let version_dir = t.apps.path().join("nginx").join(&prefix);
@@ -665,7 +660,7 @@ mod tests {
     #[test]
     fn checkout_app_replaces_existing_checkout() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"v1")]);
 
         // Create a partial/corrupt checkout dir.
         let prefix = oid_prefix(c1);
@@ -673,7 +668,7 @@ mod tests {
         fs::create_dir_all(&corrupt_dir)?;
         fs::write(corrupt_dir.join("garbage"), "bad")?;
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
 
         assert_dir_contents(&corrupt_dir, &[("nginx.conf", b"v1")]);
 
@@ -684,18 +679,18 @@ mod tests {
     fn reuse_mode_preserves_existing_checkout() -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("nginx/nginx.conf", b"v2")]);
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
-        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c2, CheckoutMode::Fresh)?;
 
         let prefix = oid_prefix(c1);
         let c1_conf = t.apps.path().join("nginx").join(prefix).join("nginx.conf");
         let inode_before = fs::metadata(&c1_conf)?.ino();
 
         // Reuse mode: repoints to c1 without re-checking out.
-        t.checkout("web1", "nginx", c1, CheckoutMode::Reuse)?;
+        t.checkout("nginx", c1, CheckoutMode::Reuse)?;
 
         let current = fs::read_link(t.apps.path().join("nginx/current"))?;
         assert_eq!(current.to_str().expect("utf-8"), oid_prefix(c1));
@@ -704,7 +699,7 @@ mod tests {
         assert_eq!(fs::metadata(&c1_conf)?.ino(), inode_before);
 
         // Fresh mode re-checkouts even though the dir exists.
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
         assert_ne!(fs::metadata(&c1_conf)?.ino(), inode_before);
 
         Ok(())
@@ -713,12 +708,12 @@ mod tests {
     #[test]
     fn checkout_app_swaps_symlink_on_update() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("nginx/nginx.conf", b"v2")]);
 
         let nginx = t.apps.path().join("nginx");
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
         assert_eq!(
             fs::read_link(nginx.join("current"))?,
             Path::new(&oid_prefix(c1))
@@ -726,7 +721,7 @@ mod tests {
         // No previous on first deploy.
         assert!(!nginx.join("previous").exists());
 
-        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c2, CheckoutMode::Fresh)?;
         assert_eq!(
             fs::read_link(nginx.join("current"))?,
             Path::new(&oid_prefix(c2))
@@ -742,19 +737,19 @@ mod tests {
     #[test]
     fn checkout_app_keeps_previous_when_current_already_at_target() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let c2 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v2")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"v1")]);
+        let c2 = t.repo.commit(&[("nginx/nginx.conf", b"v2")]);
 
         let nginx = t.apps.path().join("nginx");
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
-        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c2, CheckoutMode::Fresh)?;
 
         // Re-checkout of the version that is already current (a reapply).
         // Rotating here would point `previous` at the same version as
         // `current`, and the next gc would then delete the real rollback
         // target c1.
-        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c2, CheckoutMode::Fresh)?;
 
         assert_eq!(
             fs::read_link(nginx.join("current"))?,
@@ -772,13 +767,13 @@ mod tests {
     #[test]
     fn gc_removes_old_version_dirs() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/conf", b"v1")]);
-        let c2 = t.repo.commit(&[("web1/nginx/conf", b"v2")]);
-        let c3 = t.repo.commit(&[("web1/nginx/conf", b"v3")]);
+        let c1 = t.repo.commit(&[("nginx/conf", b"v1")]);
+        let c2 = t.repo.commit(&[("nginx/conf", b"v2")]);
+        let c3 = t.repo.commit(&[("nginx/conf", b"v3")]);
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
-        t.checkout("web1", "nginx", c2, CheckoutMode::Fresh)?;
-        t.checkout("web1", "nginx", c3, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c2, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c3, CheckoutMode::Fresh)?;
 
         // All three version dirs exist before GC.
         let nginx = t.apps.path().join("nginx");
@@ -800,9 +795,9 @@ mod tests {
     #[test]
     fn checkout_app_makes_files_readonly() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"server {}")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"server {}")]);
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
 
         let conf = t
             .apps
@@ -819,9 +814,9 @@ mod tests {
     #[test]
     fn remove_app_deletes_the_app_directory() -> Result<()> {
         let t = ApplyTest::new();
-        let c1 = t.repo.commit(&[("web1/nginx/nginx.conf", b"v1")]);
+        let c1 = t.repo.commit(&[("nginx/nginx.conf", b"v1")]);
 
-        t.checkout("web1", "nginx", c1, CheckoutMode::Fresh)?;
+        t.checkout("nginx", c1, CheckoutMode::Fresh)?;
         assert!(t.apps.path().join("nginx").exists());
 
         remove_app("nginx", t.apps.path())?;
@@ -1144,19 +1139,11 @@ mod tests {
 
         fn checkout(
             &self,
-            host: &str,
             app: &str,
             commit: Oid,
             mode: CheckoutMode,
         ) -> std::result::Result<(), ApplyError> {
-            checkout_app(
-                &self.repo.store,
-                commit,
-                &host.into(),
-                app,
-                self.apps.path(),
-                mode,
-            )
+            checkout_app(&self.repo.store, commit, app, self.apps.path(), mode)
         }
 
         fn apply(
@@ -1164,30 +1151,20 @@ mod tests {
             commit: git2::Oid,
             current: Option<git2::Oid>,
         ) -> Result<SystemDiff<PathBuf>> {
-            let host = &"web1".into();
-            let (app_diffs, system) = diff_host(
-                &self.repo.store,
-                host,
-                self.apps.path(),
-                current,
-                Some(commit),
-            )?;
+            let (app_diffs, system) =
+                diff_host(&self.repo.store, self.apps.path(), current, Some(commit))?;
             let ignore_log = |_: std::fmt::Arguments<'_>| {};
             checkout(
                 &self.repo.store,
                 Some(commit),
                 &app_diffs,
-                host,
                 self.apps.path(),
                 CheckoutMode::Fresh,
                 ignore_log,
             )?;
 
             // Reconcile here so tests that check unit symlinks still work.
-            let desired = self
-                .repo
-                .store
-                .desired_units(commit, host, self.apps.path())?;
+            let desired = self.repo.store.desired_units(commit, self.apps.path())?;
             reconcile_managed_symlinks(&desired, self.apps.path(), self.units.path())?;
             Ok(system)
         }
@@ -1197,10 +1174,10 @@ mod tests {
     fn diff_host_only_enables_units_from_systemd_json() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/nginx/systemd/nginx.service", b"[Service]"),
-            ("web1/nginx/systemd/nginx-reload.timer", b"[Timer]"),
+            ("nginx/systemd/nginx.service", b"[Service]"),
+            ("nginx/systemd/nginx-reload.timer", b"[Timer]"),
             (
-                "web1/nginx/manifest.json",
+                "nginx/manifest.json",
                 br#"{"systemd": {"units_enabled": ["nginx.service"]}}"#,
             ),
         ]);
@@ -1221,8 +1198,8 @@ mod tests {
     fn added_app_with_sysusers_links_and_sets_content_changed() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"key = true"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"key = true"),
         ]);
 
         let changes = t.apply(c1, None)?;
@@ -1237,12 +1214,12 @@ mod tests {
     fn sysusers_content_changed_when_file_modified() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"v1"),
         ]);
         let c2 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
+            ("myapp/config.toml", b"v1"),
         ]);
 
         let changes = t.apply(c2, Some(c1))?;
@@ -1258,8 +1235,8 @@ mod tests {
     fn sysusers_link_makes_deploy_rollback_unsafe() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"v1"),
         ]);
 
         let changes = t.apply(c1, None)?;
@@ -1275,12 +1252,12 @@ mod tests {
     fn sysusers_content_change_without_link_is_rollback_safe() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"v1"),
         ]);
         let c2 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp - \"My App\""),
+            ("myapp/config.toml", b"v1"),
         ]);
 
         let changes = t.apply(c2, Some(c1))?;
@@ -1294,12 +1271,12 @@ mod tests {
     fn sysusers_not_changed_when_only_other_files_change() -> Result<()> {
         let t = ApplyTest::new();
         let c1 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"v1"),
         ]);
         let c2 = t.repo.commit(&[
-            ("web1/myapp/sysusers/myapp.conf", b"u myapp -"),
-            ("web1/myapp/config.toml", b"v2"),
+            ("myapp/sysusers/myapp.conf", b"u myapp -"),
+            ("myapp/config.toml", b"v2"),
         ]);
 
         let changes = t.apply(c2, Some(c1))?;
@@ -1317,16 +1294,16 @@ mod tests {
     fn quadlet_content_changed_tracks_quadlets_subtree() -> Result<()> {
         let t = ApplyTest::new();
         let base = t.repo.commit(&[
-            ("web1/myapp/quadlets/myapp.container", b"Image=v1"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/quadlets/myapp.container", b"Image=v1"),
+            ("myapp/config.toml", b"v1"),
         ]);
         let only_sibling_changed = t.repo.commit(&[
-            ("web1/myapp/quadlets/myapp.container", b"Image=v1"),
-            ("web1/myapp/config.toml", b"v2"),
+            ("myapp/quadlets/myapp.container", b"Image=v1"),
+            ("myapp/config.toml", b"v2"),
         ]);
         let quadlet_changed = t.repo.commit(&[
-            ("web1/myapp/quadlets/myapp.container", b"Image=v2"),
-            ("web1/myapp/config.toml", b"v1"),
+            ("myapp/quadlets/myapp.container", b"Image=v2"),
+            ("myapp/config.toml", b"v1"),
         ]);
 
         assert!(

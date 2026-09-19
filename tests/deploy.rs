@@ -284,11 +284,12 @@ fn sync_then_deploy_avoids_staleness() {
     );
 }
 
-// The refusal itself is covered by unit tests in agent.rs and deploy.rs;
-// this exercises the documented recovery end to end through the real
-// binary: deleting the host's store unblocks the deploy.
+// The stale round is covered by unit tests in agent.rs and deploy.rs;
+// this exercises a rename end to end through the real binary: the first
+// deploy after the rename records the host under its new name, the next
+// one deploys to it.
 #[test]
-fn deleting_host_store_unblocks_deploy_after_hostname_change() {
+fn renamed_host_deploys_after_one_stale_round() {
     let mut env = LocalEnv::new("web1");
     env.write_config("nginx/nginx.conf", b"v1");
     let out = env.run(&["deploy", "--no-confirm", env.config_dir()]);
@@ -302,24 +303,23 @@ fn deleting_host_store_unblocks_deploy_after_hostname_change() {
         env.config.path().join("web2"),
     )
     .unwrap();
-
-    let out = env.run(&["deploy", "--no-confirm"]);
-    assert!(!out.status.success(), "deploy after a rename is refused");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("deployed as 'web1'"),
-        "the explanation identifies the old hostname, got: {stderr}",
-    );
-
-    // The documented recovery: delete the store on the host. The agent
-    // recreates an empty store, so the next deploy is a fresh install.
-    fs::remove_dir_all(env.remote_store.path()).unwrap();
     env.write_config("nginx/nginx.conf", b"v2");
+
+    // The operator has no record of web2, so the plan expects a fresh
+    // host; the deploy is stale and records the host's commit as web2.
+    let out = env.run(&["deploy", "--no-confirm"]);
+    assert!(
+        !out.status.success(),
+        "the first deploy after a rename is stale"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("stale"), "got: {stdout}");
+
     let out = env.run(&["deploy", "--no-confirm"]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "deploy after deleting the store succeeds: {stderr}",
+        "the next deploy after a rename succeeds: {stderr}",
     );
     let current = env.apps.path().join("nginx/current");
     assert_eq!(
