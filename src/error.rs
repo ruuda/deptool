@@ -9,6 +9,7 @@
 
 use std::fmt;
 use std::path::PathBuf;
+use std::process::ExitStatus;
 
 use serde::{Deserialize, Serialize};
 
@@ -151,6 +152,9 @@ pub enum HostError {
     /// binary is missing, but a runtime error from the binary exits 1 too),
     /// so we carry the agent's stderr for diagnosis.
     AgentNotInstalled { stderr: String },
+    /// The agent process exited with a failure status in the middle of a
+    /// session, for example on a panic. Includes its stderr for diagnosis.
+    AgentExited { status: ExitStatus, stderr: String },
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
     /// The hostname the host's state was deployed under differs from its
@@ -267,6 +271,12 @@ impl HostError {
                      Deptool {VERSION} supports version {STORE_VERSION}"
                 ),
             }),
+            HostError::AgentExited { stderr, .. } => Some(Explanation {
+                description: "The agent process on the host exited before the session was complete. The\n\
+                             host's stderr:"
+                    .to_string(),
+                item: stderr_item(host, stderr),
+            }),
             HostError::SetupInterrupted { stderr } => Some(Explanation {
                 description: "The install session ended before the binary could be verified.\n\
                              The host's stderr:"
@@ -348,6 +358,9 @@ impl fmt::Display for HostError {
                     "binary not installed on target host, or exited before \
                      hello: {stderr}",
                 )
+            }
+            HostError::AgentExited { status, .. } => {
+                write!(f, "agent exited unexpectedly, {status}")
             }
             HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
             HostError::HostnameChanged {

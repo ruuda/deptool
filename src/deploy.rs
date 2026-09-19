@@ -174,10 +174,20 @@ pub struct RemoteSession {
     writer: Option<ChildStdin>,
     reader: BufReader<ChildStdout>,
     hello: Hello,
-
-    // Not dead, needed to keep the child process alive.
-    #[allow(dead_code)]
     child: Child,
+}
+
+/// Read the child's remaining stderr, trimmed. Empty when nothing was written.
+///
+/// Reads to end of file, which blocks until the child closes its stderr,
+/// normally by exiting. Reading before waiting keeps a child with a full
+/// stderr pipe from blocking on its write while we wait for it to exit.
+fn read_stderr(child: &mut Child) -> String {
+    let mut stderr = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
+    }
+    stderr.trim().to_string()
 }
 
 impl RemoteSession {
@@ -203,17 +213,13 @@ impl RemoteSession {
                 // EOF before hello — the process exited without speaking
                 // our protocol. Read stderr for diagnostics and classify
                 // by exit code.
-                let mut stderr = String::new();
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut err, &mut stderr);
-                }
-                let stderr = stderr.trim();
+                let stderr = read_stderr(&mut child);
                 let code = child.wait().map_err(HostError::connection_failed)?.code();
                 match code {
                     // 255: SSH connection failure (host unreachable, DNS
                     // failure, connection refused, timeout, etc.)
                     Some(255) => {
-                        return Err(HostError::ConnectionFailed(stderr.to_string()));
+                        return Err(HostError::ConnectionFailed(stderr));
                     }
                     // When we run `deptool` directly and the shell reports that
                     // the binary is not found, the exit code is 127, but when
@@ -222,9 +228,7 @@ impl RemoteSession {
                     // the current user and the let it reexec itself under sudo
                     // if its uid is unexpected?
                     Some(1 | 127) => {
-                        return Err(HostError::AgentNotInstalled {
-                            stderr: stderr.to_string(),
-                        });
+                        return Err(HostError::AgentNotInstalled { stderr });
                     }
                     Some(code) => {
                         return Err(HostError::ProtocolError(format!(
@@ -275,7 +279,15 @@ impl Connection for RemoteSession {
             .read_line(&mut line)
             .map_err(HostError::protocol_error)?;
         if n == 0 {
-            return Ok(None);
+            // EOF: the agent exited. A clean exit ends the session, that
+            // is how every apply ends after we close its stdin. Anything
+            // else is a crash, report it with the agent's stderr.
+            let stderr = read_stderr(&mut self.child);
+            let status = self.child.wait().map_err(HostError::protocol_error)?;
+            if status.success() {
+                return Ok(None);
+            }
+            return Err(HostError::AgentExited { status, stderr });
         }
         let message: Message = serde_json::from_str(&line).map_err(HostError::protocol_error)?;
         Ok(Some(message))

@@ -24,6 +24,11 @@ and refuses to deploy to a host whose store records a version it does not
 support ("store format version N is too new"). Groundwork for the per-host
 history format in a later release. -->
 
+<!-- TODO(ruuda): Bugfix: when the agent crashes in the middle of a session,
+the operator now sees "agent exited unexpectedly" with the agent's stderr
+(the panic message), instead of "protocol error: unexpected lock response:
+None". -->
+
 ### New features
 
  * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)
