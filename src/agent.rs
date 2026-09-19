@@ -22,7 +22,7 @@ use crate::log::FileLog;
 use crate::plan::{AppDiff, DesiredState, SystemDiff, diff_host};
 use crate::prim::Hostname;
 use crate::protocol::{ApplyMode, Message, Request};
-use crate::store::{RefUpdate, Store};
+use crate::store::{RefUpdate, STORE_VERSION, Store};
 
 /// Configuration for a host-side agent session.
 ///
@@ -282,6 +282,27 @@ impl AgentSession {
         file.set_len(0).expect("truncating lockfile succeeds");
         file.rewind().expect("seeking lockfile succeeds");
         let _ = write!(&file, "{operator}");
+
+        // Check the store version before interpreting any commit: a newer
+        // format may lay out its commits differently. Returning releases
+        // the lock by dropping `file`.
+        match self
+            .store
+            .get_store_version()
+            .expect("host store config is readable")
+        {
+            None => self
+                .store
+                .set_store_version(STORE_VERSION)
+                .expect("host store config is writable"),
+            Some(STORE_VERSION) => {}
+            Some(other_version) => {
+                emit_message(Message::LockStoreVersionUnsupported {
+                    version: other_version,
+                });
+                return;
+            }
+        }
 
         let actual_current_commit = self.current_commit();
 
@@ -666,13 +687,20 @@ mod tests {
     }
 
     #[test]
-    fn lock_succeeds_on_fresh_host_with_no_expected_current() {
+    fn lock_succeeds_on_fresh_host_and_records_the_store_version() {
         let mut host = TestHost::new("web1");
         let responses = host.interact(Request::Lock {
             expected_current_commit: None,
             operator: "deckard@spinner".into(),
         });
         assert_eq!(responses, vec![Message::Locked]);
+        assert_eq!(
+            host.session
+                .store
+                .get_store_version()
+                .expect("host store config is readable"),
+            Some(STORE_VERSION),
+        );
     }
 
     #[test]

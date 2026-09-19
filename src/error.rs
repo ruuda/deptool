@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::prim::Hostname;
+use crate::protocol::VERSION;
+use crate::store::STORE_VERSION;
 
 /// An error from the Git store or its contents.
 #[derive(Debug)]
@@ -159,6 +161,9 @@ pub enum HostError {
         /// inferred from the current commit lacking an entry for the host.
         deployed_as: Option<Hostname>,
     },
+    /// The host's store records a format version this Deptool does not
+    /// support: a newer Deptool wrote it.
+    StoreVersionUnsupported { version: u32 },
     /// The installed binary doesn't match the expected checksum.
     SetupChecksumMismatch {
         expected_hash: String,
@@ -227,7 +232,7 @@ impl HostError {
                      host's platform, built from the same source as your operator binary\n\
                      (Deptool {} at commit {}). Build or download such a binary \n\
                      for each platform below, and place it at the path shown:",
-                    crate::protocol::VERSION,
+                    VERSION,
                     &crate::setup::BUILD_COMMIT[..10],
                 ),
                 item: format!("  {platform}: {}", path.display()),
@@ -252,6 +257,15 @@ impl HostError {
                     Some(name) => format!("  {host}: deployed as '{name}'"),
                     None => format!("  {host}: deployed under an unknown name"),
                 },
+            }),
+            HostError::StoreVersionUnsupported { version } => Some(Explanation {
+                description: "The host's store version is not supported by this version of Deptool.\n\
+                             Update Deptool to deploy to these hosts:"
+                    .to_string(),
+                item: format!(
+                    "  {host}: store format version {version}, \
+                     Deptool {VERSION} supports version {STORE_VERSION}"
+                ),
             }),
             HostError::SetupInterrupted { stderr } => Some(Explanation {
                 description: "The install session ended before the binary could be verified.\n\
@@ -341,6 +355,9 @@ impl fmt::Display for HostError {
             } => write!(f, "encountered previous deployment as '{name}'"),
             HostError::HostnameChanged { deployed_as: None } => {
                 f.write_str("encountered previous deployment as different host")
+            }
+            HostError::StoreVersionUnsupported { version } => {
+                write!(f, "store format version {version} is too new")
             }
             HostError::SetupChecksumMismatch { .. } => f.write_str("binary checksum mismatch"),
             HostError::SetupMissingBinary { platform, .. } => write!(

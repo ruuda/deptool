@@ -21,6 +21,13 @@ use crate::prim::Hostname;
 
 type Result<T> = std::result::Result<T, StoreError>;
 
+/// The version of the store format this Deptool reads and writes.
+///
+/// Every host store records the version it was last written with, so a
+/// Deptool that opens a store written in a newer format refuses it instead
+/// of misinterpreting its contents.
+pub const STORE_VERSION: u32 = 1;
+
 /// Per-app manifest declaring runtime state that deptool should manage.
 ///
 /// Unknown fields are rejected so typos and stale keys are caught early.
@@ -133,6 +140,18 @@ impl Store {
     /// Record `hostname` as the name this host's state was deployed under.
     pub fn set_deployed_hostname(&self, hostname: &Hostname) -> Result<()> {
         self.set_config_string("deptool.hostname", &hostname.0)
+    }
+
+    /// The store format version recorded on this host, `None` for stores
+    /// last written before versions were recorded.
+    pub fn get_store_version(&self) -> Result<Option<u32>> {
+        Ok(self
+            .get_config_string("deptool.storeVersion")?
+            .map(|s| s.parse().expect("store version is an integer")))
+    }
+
+    pub fn set_store_version(&self, version: u32) -> Result<()> {
+        self.set_config_string("deptool.storeVersion", &version.to_string())
     }
 
     /// Read the host-local `refs/heads/current` commit, if it exists.

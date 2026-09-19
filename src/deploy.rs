@@ -406,6 +406,9 @@ pub fn connect_and_lock(
                     Ok(Some(Message::LockHostnameChanged { deployed_as })) => {
                         progress.update(host, HostError::HostnameChanged { deployed_as });
                     }
+                    Ok(Some(Message::LockStoreVersionUnsupported { version })) => {
+                        progress.update(host, HostError::StoreVersionUnsupported { version });
+                    }
                     Ok(other) => {
                         progress.update(
                             host,
@@ -665,6 +668,7 @@ fn filter_systemd_status(output: &str) -> String {
 mod tests {
     use super::*;
     use crate::plan::{HostFilter, HostPlan};
+    use crate::store::STORE_VERSION;
     use crate::testutil::{
         TempDir, TestHost, TestRepo, assert_dir_contents, config_with, test_connector,
         test_progress,
@@ -894,6 +898,38 @@ mod tests {
         // before the stale-fetch path that would record one.
         assert_eq!(driver.get_host_tracking_ref("web2"), None);
         Ok(())
+    }
+
+    #[test]
+    fn deploy_refuses_an_unsupported_store_version() -> Result<()> {
+        let driver = TestRepo::new();
+        let c1 = driver.commit(&[("web1/app/conf", b"v1")]);
+        let web1 = TestHost::new("web1");
+        let plan = make_plan(c1, &[("web1", None)]);
+
+        web1.session.store.set_store_version(2)?;
+        let progress = test_progress(&["web1"]);
+        let connector = test_connector(&[&web1]);
+        let result = run_deploy(
+            &driver.store,
+            &plan,
+            "deckard@spinner",
+            &connector,
+            &progress,
+        );
+        assert!(
+            result.is_err(),
+            "deploy to a host with an unsupported store aborts"
+        );
+        assert!(matches!(
+            &*progress.state("web1"),
+            HostState::Failed(HostError::StoreVersionUnsupported { version: 2 })
+        ));
+
+        // The version this Deptool writes itself is accepted. This second
+        // deploy also proves the refusal released the file lock.
+        web1.session.store.set_store_version(STORE_VERSION)?;
+        deploy_to(&driver, &[&web1], &plan)
     }
 
     #[test]

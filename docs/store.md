@@ -46,6 +46,11 @@ deploy, while `current` only advances after the deploy is complete. When the two
 refs disagree, either a deploy is in progress, or a deploy failed and the target
 state is only partially applied.
 
+<!-- TODO(ruuda): Document the store format version: the host store's Git
+config records `deptool.storeVersion`, written when the agent takes the deploy
+lock. A Deptool that finds a version it does not support refuses to deploy to
+that host until Deptool is updated. -->
+
 ## Transport
 
 Deptool keeps the Git repositories synchronized between the operator machine and

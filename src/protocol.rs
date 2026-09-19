@@ -101,6 +101,12 @@ pub enum Message {
     LockHostnameChanged {
         deployed_as: Option<Hostname>,
     },
+    /// The host's store records a format version this Deptool does not
+    /// support: a newer Deptool wrote it. Deploys are refused in this
+    /// state.
+    LockStoreVersionUnsupported {
+        version: u32,
+    },
     /// Units still starting or stopping after the first activation check, so
     /// the driver can show the operator what the deploy is waiting on.
     WaitingForUnits {

@@ -18,6 +18,12 @@ compatibility impact will be clearly marked as such in the changelog.
 
 Unreleased.
 
+<!-- TODO(ruuda): Compatibility: the agent now records a store format version
+(`deptool.storeVersion = 1`) in the host store when it takes the deploy lock,
+and refuses to deploy to a host whose store records a version it does not
+support ("store format version N is too new"). Groundwork for the per-host
+history format in a later release. -->
+
 ### New features
 
  * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)
