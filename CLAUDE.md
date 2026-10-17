@@ -116,6 +116,7 @@ Post-generation checklist (run after writing code, before presenting):
 ## Session journal
 
  - Each session has a journal entry at `journal/YYYY-MM-DD-topic.md`. It is the bridge between sessions: a future session reads the journal to pick up context. Treat it as a working document, not an after-the-fact summary.
+ - At the start of the entry, below the title, state the model used in the session, e.g. "Model: Claude Opus 5.5."
  - Update the journal *as the session progresses*, not only at the end. After a meaningful step (a design pivot, a framing tool the user introduces, a substantive review pass), revisit the entry. The entry should be in a usable state at any moment in case the session is interrupted.
  - What to capture: the session's key topics, a running summary of what was done (decisions and rejected paths, not a play-by-play), reflections and learnings, and any framing tools (personas, mental models) the user established. Existing entries in `journal/` show the shape, including "What went well" / "What I should do differently" sections.
  - What to skip: per-edit blow-by-blows (`git log` covers that), restating things already in code or docs, filler.
