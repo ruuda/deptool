@@ -34,6 +34,9 @@ agent converts a 1.2 store at lock, which costs one stale deploy. A rename no
 longer needs the store deleted. `main` is no longer written. Commit messages
 gain a `Deploy-Run` trailer. -->
 
+<!-- TODO(ruuda): `--limit` no longer reads the config of excluded hosts, so
+invalid config for one host no longer blocks commands limited to others. -->
+
 ### New features
 
  * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)

@@ -16,6 +16,7 @@ pub mod checkout;
 pub mod deploy;
 pub mod display;
 pub mod error;
+pub mod filter;
 pub mod log;
 pub mod ping;
 pub mod plan;

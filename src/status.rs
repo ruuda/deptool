@@ -15,7 +15,8 @@ use git2::{Oid, Time};
 
 use crate::display::{UseColor, format_git_time};
 use crate::error::Result;
-use crate::plan::{HostFilter, diff_apps};
+use crate::filter::HostFilter;
+use crate::plan::{build_config_tree, diff_apps};
 use crate::prim::Hostname;
 use crate::store::{Store, tree_entries};
 
@@ -43,9 +44,8 @@ pub fn compute_status(
     dir: &Path,
     filter: &HostFilter,
 ) -> Result<BTreeMap<Hostname, HostState>> {
-    let tree_oid = store.build_tree(dir)?;
-    let mut config_hosts = store.host_trees(tree_oid)?;
-    filter.apply(&mut config_hosts)?;
+    let tree_oid = build_config_tree(store, dir, filter)?;
+    let config_hosts = store.host_trees(tree_oid)?;
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 

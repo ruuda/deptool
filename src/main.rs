@@ -18,7 +18,7 @@ use bpaf::{Bpaf, Parser, construct, long};
 
 use deploy::Connection;
 use error::{ApplyError, Error, HostError, Result};
-use plan::HostFilter;
+use filter::HostFilter;
 use prim::Hostname;
 use store::Store;
 
@@ -342,9 +342,9 @@ fn run_deploy(
 ) -> Result<()> {
     let repo = Store::open(&store)?;
     let dir = resolve_dir(&repo, dir)?;
-    let tree_oid = repo.build_tree(&dir)?;
+    let tree_oid = plan::build_config_tree(&repo, &dir, filter)?;
 
-    let plan = match plan::make_plan(&repo, tree_oid, filter)? {
+    let plan = match plan::make_plan(&repo, tree_oid)? {
         Some(draft) => draft.finalize(&repo)?,
         None => {
             print_up_to_date(&dir, filter);
@@ -463,10 +463,8 @@ fn run_ping(
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let tree_oid = store.build_tree(&dir)?;
-    let mut hosts_map = store.host_trees(tree_oid)?;
-    filter.apply(&mut hosts_map)?;
-    let hosts: Vec<_> = hosts_map.into_keys().collect();
+    let tree_oid = plan::build_config_tree(&store, &dir, filter)?;
+    let hosts: Vec<_> = store.host_trees(tree_oid)?.into_keys().collect();
     if hosts.is_empty() {
         eprintln!("No hosts to ping in cluster '{}'.", cluster_name(&dir));
         return Ok(());
@@ -531,8 +529,8 @@ fn run_diff(
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let tree_oid = store.build_tree(&dir)?;
-    match plan::make_plan(&store, tree_oid, filter)? {
+    let tree_oid = plan::build_config_tree(&store, &dir, filter)?;
+    match plan::make_plan(&store, tree_oid)? {
         Some(draft) => {
             // This creates a dangling commit in the store, but a GC will
             // collect it at some point, it's not worth complicating the code

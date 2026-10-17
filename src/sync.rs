@@ -17,7 +17,8 @@ use parking_lot::Mutex;
 
 use crate::deploy::{self, DeployProgress, HostState, StaleHost};
 use crate::error::{HostError, Result};
-use crate::plan::HostFilter;
+use crate::filter::HostFilter;
+use crate::plan::build_config_tree;
 use crate::prim::Hostname;
 use crate::protocol::{Message, Request};
 use crate::setup::HostConnector;
@@ -44,9 +45,8 @@ pub fn select_hosts_to_sync(
     mode: SyncMode,
     filter: &HostFilter,
 ) -> Result<BTreeMap<Hostname, Option<Oid>>> {
-    let tree_oid = store.build_tree(dir)?;
-    let mut config_hosts = store.host_trees(tree_oid)?;
-    filter.apply(&mut config_hosts)?;
+    let tree_oid = build_config_tree(store, dir, filter)?;
+    let config_hosts = store.host_trees(tree_oid)?;
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 

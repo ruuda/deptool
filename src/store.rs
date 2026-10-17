@@ -17,6 +17,7 @@ use git2::{Oid, Repository, Signature, Tree};
 use serde::Deserialize;
 
 use crate::error::StoreError;
+use crate::filter::HostFilter;
 use crate::prim::Hostname;
 
 type Result<T> = std::result::Result<T, StoreError>;
@@ -195,13 +196,15 @@ impl Store {
         Ok(self.repo.find_commit(commit_oid)?.tree()?)
     }
 
-    /// Recursively build a Git tree from a directory on disk.
+    /// Recursively build a Git tree from the host dirs that `filter` selects.
     ///
-    /// An entirely empty config directory is valid (no hosts configured)
-    /// and yields the empty tree.
-    pub fn build_tree(&self, dir: &Path) -> Result<Oid> {
+    /// Excluded host dirs are never read, so a broken config for one host does
+    /// not block commands limited to others. Skipping them is safe because
+    /// validation has no rules across hosts. An entirely empty config directory
+    /// is valid (no hosts configured) and yields the empty tree.
+    pub fn build_tree(&self, dir: &Path, filter: &HostFilter) -> Result<Oid> {
         let depth_root = 0;
-        build_tree_recursive(&self.repo, dir, depth_root)
+        build_tree_recursive(&self.repo, filter, dir, depth_root)
     }
 
     /// The identity to commit as: the repo's configured user, or Deptool's
@@ -732,7 +735,12 @@ pub fn tree_entries(tree: &Tree) -> BTreeMap<String, Oid> {
 /// anything else at those two levels (a stray readme) is excluded, because
 /// committing it would change a host's subtree without changing any app,
 /// making the host show up in every plan with nothing to do.
-fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid> {
+fn build_tree_recursive(
+    repo: &Repository,
+    filter: &HostFilter,
+    dir: &Path,
+    depth: u32,
+) -> Result<Oid> {
     let mut tb = repo.treebuilder(None)?;
 
     let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<std::result::Result<_, _>>()?;
@@ -744,8 +752,9 @@ fn build_tree_recursive(repo: &Repository, dir: &Path, depth: u32) -> Result<Oid
 
         let file_type = entry.file_type()?;
         match file_type {
+            ft if ft.is_dir() && depth == 0 && !filter.includes(&Hostname::from(name)) => {}
             ft if ft.is_dir() => {
-                let oid = build_tree_recursive(repo, &entry.path(), depth + 1)?;
+                let oid = build_tree_recursive(repo, filter, &entry.path(), depth + 1)?;
                 // Prune subtrees with no files below the host level:
                 // committing an empty app tree would make removing the
                 // app's files diff as an update to nothing instead of a
@@ -824,7 +833,10 @@ mod tests {
         let config = config_with(&[("web1/nginx/nginx.conf", b"v1")]);
         symlink("nginx", config.path().join("web1/caddy")).expect("symlink is created");
 
-        let err = t.store.build_tree(config.path()).unwrap_err();
+        let err = t
+            .store
+            .build_tree(config.path(), &HostFilter::All)
+            .unwrap_err();
         let StoreError::InvalidConfig(msg) = err else {
             panic!("expected InvalidConfig, got {err}")
         };
@@ -1100,7 +1112,8 @@ mod tests {
         fs::set_permissions(app_dir.join("hook.sh"), fs::Permissions::from_mode(0o755))?;
 
         let t = TestRepo::new();
-        let root = t.store.repo.find_tree(t.store.build_tree(dir.path())?)?;
+        let oid = t.store.build_tree(dir.path(), &HostFilter::All)?;
+        let root = t.store.repo.find_tree(oid)?;
         assert_eq!(
             root.get_path(Path::new("host/app/hook.sh"))?.filemode(),
             0o100755,
@@ -1127,7 +1140,7 @@ mod tests {
         fs::write(host_dir.join("app/kept.conf"), b"data")?;
 
         let t = TestRepo::new();
-        let oid = t.store.build_tree(dir.path())?;
+        let oid = t.store.build_tree(dir.path(), &HostFilter::All)?;
         let tree = t.store.repo.find_tree(oid)?;
         let host_tree = t
             .store
@@ -1151,7 +1164,8 @@ mod tests {
         fs::create_dir_all(dir.path().join("web1"))?;
 
         let t = TestRepo::new();
-        let tree = t.store.repo.find_tree(t.store.build_tree(dir.path())?)?;
+        let oid = t.store.build_tree(dir.path(), &HostFilter::All)?;
+        let tree = t.store.repo.find_tree(oid)?;
         let host = tree
             .get_name("web1")
             .expect("an empty host dir stays in the tree");
@@ -1166,14 +1180,14 @@ mod tests {
     fn build_tree_excludes_files_outside_app_dirs() -> Result<()> {
         let t = TestRepo::new();
         let clean = config_with(&[("web1/nginx/nginx.conf", b"server {}")]);
-        let clean_oid = t.store.build_tree(clean.path())?;
+        let clean_oid = t.store.build_tree(clean.path(), &HostFilter::All)?;
 
         let stray = config_with(&[
             ("web1/nginx/nginx.conf", b"server {}"),
             ("readme.md", b"file next to the host dirs"),
             ("web1/foo.txt", b"file next to the app dirs"),
         ]);
-        let stray_oid = t.store.build_tree(stray.path())?;
+        let stray_oid = t.store.build_tree(stray.path(), &HostFilter::All)?;
 
         assert_eq!(
             stray_oid, clean_oid,

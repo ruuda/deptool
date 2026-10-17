@@ -656,7 +656,8 @@ fn filter_systemd_status(output: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{HostFilter, HostPlan};
+    use crate::filter::HostFilter;
+    use crate::plan::HostPlan;
     use crate::store::STORE_VERSION;
     use crate::testutil::{
         TempDir, TestHost, TestRepo, assert_dir_contents, config_with, test_connector,
@@ -712,8 +713,8 @@ mod tests {
 
     /// Plan the config tree in `config` against `driver`'s tracking refs.
     fn plan_config(driver: &TestRepo, config: &TempDir) -> Result<Option<Plan>> {
-        let tree_oid = driver.store.build_tree(config.path())?;
-        match crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)? {
+        let tree_oid = driver.store.build_tree(config.path(), &HostFilter::All)?;
+        match crate::plan::make_plan(&driver.store, tree_oid)? {
             Some(draft) => Ok(Some(draft.finalize(&driver.store)?)),
             None => Ok(None),
         }
@@ -744,8 +745,8 @@ mod tests {
         // and the agent must cope with.
         let config = TempDir::new("config");
         std::fs::create_dir_all(config.path().join("web1"))?;
-        let tree_oid = driver.store.build_tree(config.path())?;
-        let plan = crate::plan::make_plan(&driver.store, tree_oid, &HostFilter::All)?
+        let tree_oid = driver.store.build_tree(config.path(), &HostFilter::All)?;
+        let plan = crate::plan::make_plan(&driver.store, tree_oid)?
             .expect("plan has changes")
             .finalize(&driver.store)?;
         deploy_to(&driver, &[&target], &plan)?;

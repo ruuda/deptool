@@ -16,6 +16,7 @@ use git2::Oid;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result, StoreError};
+use crate::filter::HostFilter;
 use crate::prim::Hostname;
 use crate::store::{Store, empty_tree_oid, tree_entries};
 
@@ -510,73 +511,40 @@ pub fn diff_host(
     Ok((app_diffs, system))
 }
 
-pub enum HostFilter {
-    All,
-    Only(Vec<Hostname>),
-}
-
-impl HostFilter {
-    /// Build a filter from repeated --limit values.
-    ///
-    /// We accept both repetition (`--limit a --limit b`) and comma-separated
-    /// values (`--limit a,b`), with append semantics. Empty pieces from a
-    /// stray comma (`--limit a,`) are dropped. No `--limit` at all yields
-    /// `HostFilter::All`; a `--limit` that lists no hosts (an empty value, or
-    /// only commas) is an error, since selecting zero hosts is never intended.
-    pub fn from_limit(args: &[String]) -> Result<Self> {
-        // Distinguish no --limit (All) from a --limit that resolved to nothing.
-        if args.is_empty() {
-            return Ok(HostFilter::All);
-        }
-        let hosts: Vec<Hostname> = args
-            .iter()
-            .flat_map(|s| s.split(','))
-            .filter(|s| !s.is_empty())
-            .map(Hostname::from)
-            .collect();
-        if hosts.is_empty() {
-            Err(Error::EmptyLimit)
-        } else {
-            Ok(HostFilter::Only(hosts))
-        }
+/// Build the config tree of the hosts in `dir` that `filter` selects.
+///
+/// Returns an error listing every name in the limit that has no host dir,
+/// so the operator can fix typos in one round trip rather than
+/// rerun-and-discover.
+pub fn build_config_tree(store: &Store, dir: &Path, filter: &HostFilter) -> Result<Oid> {
+    let tree_oid = store.build_tree(dir, filter)?;
+    let limit = match filter {
+        HostFilter::All => return Ok(tree_oid),
+        HostFilter::Only(limit) => limit,
+    };
+    let tree = store.repo.find_tree(tree_oid)?;
+    let unknown: Vec<Hostname> = limit
+        .iter()
+        .filter(|h| tree.get_name(&h.0).is_none())
+        .cloned()
+        .collect();
+    if !unknown.is_empty() {
+        return Err(Error::UnknownHosts(unknown));
     }
-
-    /// Drop entries from `hosts` that the filter excludes.
-    ///
-    /// Returns an error listing every name in the limit that does not
-    /// appear in `hosts`, so the operator can fix typos in one round trip
-    /// rather than rerun-and-discover.
-    pub fn apply<T>(&self, hosts: &mut BTreeMap<Hostname, T>) -> Result<()> {
-        let limit = match self {
-            HostFilter::All => return Ok(()),
-            HostFilter::Only(limit) => limit,
-        };
-        let unknown: Vec<Hostname> = limit
-            .iter()
-            .filter(|h| !hosts.contains_key(h))
-            .cloned()
-            .collect();
-        if !unknown.is_empty() {
-            return Err(Error::UnknownHosts(unknown));
-        }
-        hosts.retain(|h, _| limit.contains(h));
-        Ok(())
-    }
+    Ok(tree_oid)
 }
 
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
 /// Returns `None` if no hosts need changes. The returned `DraftPlan` is not
 /// yet committed -- the caller calls `finalize` to create the deploy
-/// commits. `filter` narrows the set of hosts considered; any limit name
-/// not in the tree is reported as an error before the plan is built.
-pub fn make_plan(store: &Store, tree_oid: Oid, filter: &HostFilter) -> Result<Option<DraftPlan>> {
+/// commits.
+pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<DraftPlan>> {
     // Validate first so we don't do diff work or create commits from
     // invalid config.
     store.validate(tree_oid)?;
 
-    let mut config_hosts = store.host_trees(tree_oid)?;
-    filter.apply(&mut config_hosts)?;
+    let config_hosts = store.host_trees(tree_oid)?;
     let host_names: Vec<Hostname> = config_hosts.keys().cloned().collect();
     let host_refs = store.host_tracking_refs(&host_names)?;
 
@@ -731,7 +699,8 @@ impl DraftPlan {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::testutil::{TempDir, TestRepo};
+    use crate::testutil::{TempDir, TestRepo, config_with};
+    use std::os::unix::fs::symlink;
 
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
@@ -788,9 +757,9 @@ mod tests {
         let config = TempDir::new("config");
         std::fs::create_dir_all(config.path().join("web1"))?;
         std::fs::create_dir_all(config.path().join("web2"))?;
-        let tree_oid = t.store.build_tree(config.path())?;
+        let tree_oid = t.store.build_tree(config.path(), &HostFilter::All)?;
 
-        let plan = make_plan(&t.store, tree_oid, &HostFilter::All)?.expect("plan has changes");
+        let plan = make_plan(&t.store, tree_oid)?.expect("plan has changes");
         let apps = &plan.hosts[&"web1".into()].apps;
         assert_eq!(apps.len(), 1);
         assert!(matches!(apps["nginx"].diff, AppDiff::Remove { .. }));
@@ -826,53 +795,43 @@ mod tests {
         t.mark_deployed(c1);
 
         let tree_oid = t.get_commit_tree_oid(c1);
-        assert!(make_plan(&t.store, tree_oid, &HostFilter::All)?.is_none());
+        assert!(make_plan(&t.store, tree_oid)?.is_none());
         Ok(())
     }
 
     #[test]
-    fn from_limit_rejects_a_limit_that_lists_no_hosts() {
-        // An empty value or only commas must error, not widen the blast
-        // radius to every host.
-        assert!(HostFilter::from_limit(&["".into()]).is_err());
-        assert!(HostFilter::from_limit(&[",".into()]).is_err());
-    }
-
-    #[test]
-    fn from_limit_maps_absent_and_present_values() {
-        assert!(matches!(HostFilter::from_limit(&[]), Ok(HostFilter::All)));
-        let Ok(HostFilter::Only(hosts)) = HostFilter::from_limit(&["web1,".into()]) else {
-            panic!("expected Only")
-        };
-        assert_eq!(hosts, vec![Hostname::from("web1")]);
-    }
-
-    #[test]
-    fn plan_with_limit_includes_only_listed_hosts() -> Result<()> {
+    fn config_tree_with_limit_reads_only_the_listed_host_dirs() -> Result<()> {
         let t = TestRepo::new();
-        let c = t.commit(&[
+        let config = config_with(&[
             ("web1/app/conf", b"a"),
             ("web2/app/conf", b"b"),
             ("web3/app/conf", b"c"),
         ]);
-        let tree_oid = t.get_commit_tree_oid(c);
+        symlink("app", config.path().join("web2/caddy")).expect("symlink is created");
+        assert!(
+            matches!(
+                build_config_tree(&t.store, config.path(), &HostFilter::All),
+                Err(Error::Store(StoreError::InvalidConfig(..)))
+            ),
+            "reading web2 fails on the symlink",
+        );
         let filter = HostFilter::Only(vec!["web1".into(), "web3".into()]);
-        let plan = make_plan(&t.store, tree_oid, &filter)?.expect("plan has changes");
+        let tree_oid = build_config_tree(&t.store, config.path(), &filter)?;
+        let hosts: Vec<_> = t.store.host_trees(tree_oid)?.into_keys().collect();
         assert_eq!(
-            plan.hosts.keys().cloned().collect::<Vec<_>>(),
+            hosts,
             vec![Hostname::from("web1"), Hostname::from("web3")],
-            "limit narrows the plan to exactly the listed hosts",
+            "limit narrows the tree to exactly the listed hosts",
         );
         Ok(())
     }
 
     #[test]
-    fn plan_errors_when_limit_contains_unknown_host() {
+    fn config_tree_errors_when_limit_contains_unknown_host() {
         let t = TestRepo::new();
-        let c = t.commit(&[("web1/app/conf", b"a")]);
-        let tree_oid = t.get_commit_tree_oid(c);
+        let config = config_with(&[("web1/app/conf", b"a")]);
         let filter = HostFilter::Only(vec!["nope".into(), "also_nope".into()]);
-        let result = make_plan(&t.store, tree_oid, &filter);
+        let result = build_config_tree(&t.store, config.path(), &filter);
         match result {
             Err(Error::UnknownHosts(hosts)) => assert_eq!(
                 hosts,
@@ -1190,7 +1149,7 @@ mod tests {
 
     fn draft(t: &TestRepo, commit: Oid) -> DraftPlan {
         let tree_oid = t.get_commit_tree_oid(commit);
-        make_plan(&t.store, tree_oid, &HostFilter::All)
+        make_plan(&t.store, tree_oid)
             .expect("plan succeeds")
             .expect("plan has changes")
     }
@@ -1280,9 +1239,9 @@ mod tests {
         // A fresh empty host dir plans a deploy with no app changes at all.
         let config = TempDir::new("config");
         std::fs::create_dir_all(config.path().join("web2"))?;
-        let tree_oid = t.store.build_tree(config.path())?;
+        let tree_oid = t.store.build_tree(config.path(), &HostFilter::All)?;
 
-        let plan = make_plan(&t.store, tree_oid, &HostFilter::All)?.expect("plan has changes");
+        let plan = make_plan(&t.store, tree_oid)?.expect("plan has changes");
         let web2 = Hostname::from("web2");
         let message = commit_message(&web2, &plan.hosts[&web2], &plan.run_body(RUN));
         assert_eq!(subject_of(&message), "Deploy web2");
