@@ -1,7 +1,13 @@
 # Renaming a host
 
-<!-- TODO(ruuda): Since 1.3 a rename costs one stale deploy; the refusal and
-store deletion below apply only to a host converted from 1.2 or older. -->
+<!-- TODO(ruuda): 1.3. Most of this page is outdated.
+ * rename = rename the config dir, `/etc/hostname`, DNS / SSH config, then deploy
+ * first deploy after the rename: stale (no tracking ref for the new name), records the host's commit under the new name
+ * next deploy: normal; host-side history kept across the rename
+ * name swap (web1 <-> web2): same, each host's own history decides
+ * refusal "encountered previous deployment as 'web1'": only for a host still on the 1.2 store format, renamed before its first 1.3 deploy
+ * that case: rename back and deploy once with 1.3, or delete the store (warning below still applies)
+ * "no mechanism to preserve the host-side history" at the end: outdated -->
 
 Deptool encourages reprovisioning over renaming hosts. Renames often have
 far-reaching unintended consequences. Having said this, even though initial

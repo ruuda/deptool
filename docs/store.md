@@ -17,9 +17,14 @@ attempted to deploy. It carries metadata about who created it and when, and it
 enables Deptool to not just track what is currently deployed, but everything
 that was ever deployed to the cluster.
 
-<!-- TODO(ruuda): Since 1.3 a deployment is one commit per host: its tree is
-the host's apps, its parent the host's previous commit. The body lists the
-run's hosts; a `Deploy-Run` trailer groups its commits. -->
+<!-- TODO(ruuda): 1.3, per-host history. Paragraph above is outdated.
+ * one commit per host per deploy, no cluster-wide commit
+ * tree: that host's apps only (no host directory level)
+ * parent: that host's previous commit; linear history per host
+ * "everything ever deployed to the cluster": union of per-host histories
+ * message: subject for this host; body lists every host and app of the run
+ * `Deploy-Run: <token>` trailer shared by one run's commits; `git log --all --grep`
+ * commits created only when a deploy proceeds; not for diff, plan-only, abort -->
 
 ## Operator-side refs
 
@@ -27,7 +32,10 @@ run's hosts; a `Deploy-Run` trailer groups its commits. -->
  * `refs/remotes/<host>` points to the commit that is deployed at that
    host.
 
-<!-- TODO(ruuda): Deptool 1.3 no longer writes `main`. -->
+<!-- TODO(ruuda): 1.3. The `main` bullet above is outdated.
+ * `refs/heads/main` no longer written or read
+ * an existing `main` in an older store stays, unused
+ * `refs/remotes/<host>` now points to that host's own commit -->
 
 On the operator side, Deptool keeps a remote-tracking ref per target host.
 This enables Deptool to determine which hosts are affected by a change,
@@ -52,11 +60,14 @@ deploy, while `current` only advances after the deploy is complete. When the two
 refs disagree, either a deploy is in progress, or a deploy failed and the target
 state is only partially applied.
 
-<!-- TODO(ruuda): Document the store format version: the host store's Git
-config records `deptool.storeVersion`, written when the agent takes the deploy
-lock. A Deptool that finds a version it does not support refuses to deploy to
-that host until Deptool is updated. Version 1 is the cluster tree per commit
-(1.2 and older), version 2 is per host; the agent converts at lock. -->
+<!-- TODO(ruuda): Store format version.
+ * host store Git config: `deptool.storeVersion`
+ * written by the agent when it takes the deploy lock
+ * unsupported (newer) version: deploy refused, "store format version N is too new"; fix: update Deptool
+ * version 1: cluster tree per commit (1.2)
+ * version 2: per-host commits (1.3)
+ * no version recorded (1.1 and older): treated as version 1
+ * 1 -> 2: agent converts `current` and `target` at lock; see deployment_phases.md -->
 
 ## Transport
 
@@ -77,5 +88,8 @@ your cluster should be secure even when its configuration is public, this still
 presents an information disclosure risk. To mitigate this somewhat, the store on
 managed hosts is accessible only to the `root` user.
 
-<!-- TODO(ruuda): Since 1.3 a host receives only its own commits; a converted
-host keeps the cluster history it already had. -->
+<!-- TODO(ruuda): 1.3. Paragraph above is outdated.
+ * a host receives only its own commits, so only its own config
+ * except the run body: lists other hosts' names and app names (not their files)
+ * a converted host keeps the cluster-wide history it already had
+ * to drop that: delete the host store (see renaming_hosts.md for the consequences) -->

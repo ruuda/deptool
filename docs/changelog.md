@@ -29,13 +29,21 @@ the operator now sees "agent exited unexpectedly" with the agent's stderr
 (the panic message), instead of "protocol error: unexpected lock response:
 None". -->
 
-<!-- TODO(ruuda): Compatibility (1.3): per-host history, store version 2. The
-agent converts a 1.2 store at lock, which costs one stale deploy. A rename no
-longer needs the store deleted. `main` is no longer written. Commit messages
-gain a `Deploy-Run` trailer. -->
+<!-- TODO(ruuda): Compatibility (1.3), per-host history.
+ * store format version 2: one commit per host, see store.md
+ * agent converts a 1.2 store at lock; costs one stale deploy per host
+ * a host store converted by 1.3 cannot be deployed to by 1.2 ("too new")
+ * host rename: no store deletion needed anymore, see renaming_hosts.md
+ * hosts no longer receive other hosts' config (new commits only)
+ * `refs/heads/main` no longer written
+ * commit messages: per-host subject, run body, `Deploy-Run` trailer -->
 
-<!-- TODO(ruuda): `--limit` no longer reads the config of excluded hosts, so
-invalid config for one host no longer blocks commands limited to others. -->
+<!-- TODO(ruuda): `--limit`.
+ * excluded hosts' config dirs are no longer read
+ * broken config for one host no longer blocks commands limited to others -->
+
+<!-- TODO(ruuda): `deptool diff`, `deploy --plan-only`, and an aborted deploy
+no longer create commits in the store. -->
 
 ### New features
 

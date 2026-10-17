@@ -10,6 +10,10 @@ compares the desired cluster state against the currently known state. This
 informs which hosts are affected, and what the changes are on that host. It
 displays this as the _plan_, and asks the operator to confirm before proceeding.
 
+<!-- TODO(ruuda): 1.3, plan phase.
+ * creates no commits
+ * deploy commits made after confirmation (`--no-confirm`: right away), before connecting -->
+
 ## Connect and lock
 
 If the operator approves the plan, Deptool connects to all affected hosts in
@@ -26,8 +30,13 @@ view was outdated, then the plan is stale, and the deploy aborts. Deptool
 fetches any missing commits so the next `deptool deploy` run has an up-to-date
 view of the cluster.
 
-<!-- TODO(ruuda): Since 1.3 the agent converts a 1.2-format store after
-taking the lock (see store.md); that deploy aborts as stale once. -->
+<!-- TODO(ruuda): 1.3, store conversion at lock.
+ * host store on version 1 (1.2 or older): agent converts after taking the lock
+ * `current` (and a diverged `target`) get a new per-host commit, parent = the old cluster commit
+ * reflog: "convert to per-host format"
+ * that deploy then aborts as stale; the operator fetches the converted commit
+ * re-run `deptool deploy`: a normal deploy; one stale round per host
+ * renamed before conversion: refused, see renaming_hosts.md -->
 
 Locks are implemented as a file lock held by the agent processes on the target
 host. Deptool spawns the agent process through an <abbr>SSH</abbr> session.
