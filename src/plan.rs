@@ -15,8 +15,7 @@ use std::path::{Path, PathBuf};
 use git2::Oid;
 use serde::{Deserialize, Serialize};
 
-use crate::error::{Error, Result, StoreError};
-use crate::filter::HostFilter;
+use crate::error::{Result, StoreError};
 use crate::prim::Hostname;
 use crate::store::{Store, empty_tree_oid, tree_entries};
 
@@ -511,29 +510,6 @@ pub fn diff_host(
     Ok((app_diffs, system))
 }
 
-/// Build the config tree of the hosts in `dir` that `filter` selects.
-///
-/// Returns an error listing every name in the limit that has no host dir,
-/// so the operator can fix typos in one round trip rather than
-/// rerun-and-discover.
-pub fn build_config_tree(store: &Store, dir: &Path, filter: &HostFilter) -> Result<Oid> {
-    let tree_oid = store.build_tree(dir, filter)?;
-    let limit = match filter {
-        HostFilter::All => return Ok(tree_oid),
-        HostFilter::Only(limit) => limit,
-    };
-    let tree = store.repo.find_tree(tree_oid)?;
-    let unknown: Vec<Hostname> = limit
-        .iter()
-        .filter(|h| tree.get_name(&h.0).is_none())
-        .cloned()
-        .collect();
-    if !unknown.is_empty() {
-        return Err(Error::UnknownHosts(unknown));
-    }
-    Ok(tree_oid)
-}
-
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
 /// Returns `None` if no hosts need changes. The returned `DraftPlan` is not
@@ -699,8 +675,8 @@ impl DraftPlan {
 mod tests {
     use super::*;
     use crate::error::Result;
-    use crate::testutil::{TempDir, TestRepo, config_with};
-    use std::os::unix::fs::symlink;
+    use crate::filter::HostFilter;
+    use crate::testutil::{TempDir, TestRepo};
 
     #[test]
     fn plan_shows_all_apps_as_add_for_new_host() -> Result<()> {
@@ -797,49 +773,6 @@ mod tests {
         let tree_oid = t.get_commit_tree_oid(c1);
         assert!(make_plan(&t.store, tree_oid)?.is_none());
         Ok(())
-    }
-
-    #[test]
-    fn config_tree_with_limit_reads_only_the_listed_host_dirs() -> Result<()> {
-        let t = TestRepo::new();
-        let config = config_with(&[
-            ("web1/app/conf", b"a"),
-            ("web2/app/conf", b"b"),
-            ("web3/app/conf", b"c"),
-        ]);
-        symlink("app", config.path().join("web2/caddy")).expect("symlink is created");
-        assert!(
-            matches!(
-                build_config_tree(&t.store, config.path(), &HostFilter::All),
-                Err(Error::Store(StoreError::InvalidConfig(..)))
-            ),
-            "reading web2 fails on the symlink",
-        );
-        let filter = HostFilter::Only(vec!["web1".into(), "web3".into()]);
-        let tree_oid = build_config_tree(&t.store, config.path(), &filter)?;
-        let hosts: Vec<_> = t.store.host_trees(tree_oid)?.into_keys().collect();
-        assert_eq!(
-            hosts,
-            vec![Hostname::from("web1"), Hostname::from("web3")],
-            "limit narrows the tree to exactly the listed hosts",
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn config_tree_errors_when_limit_contains_unknown_host() {
-        let t = TestRepo::new();
-        let config = config_with(&[("web1/app/conf", b"a")]);
-        let filter = HostFilter::Only(vec!["nope".into(), "also_nope".into()]);
-        let result = build_config_tree(&t.store, config.path(), &filter);
-        match result {
-            Err(Error::UnknownHosts(hosts)) => assert_eq!(
-                hosts,
-                vec![Hostname::from("nope"), Hostname::from("also_nope")],
-                "all unknown hosts are reported",
-            ),
-            other => panic!("expected UnknownHosts, got {other:?}"),
-        }
     }
 
     /// Plan a single-host update and return the resulting SystemDiff.

@@ -17,7 +17,7 @@ use crate::prim::Hostname;
 use crate::protocol::VERSION;
 use crate::store::STORE_VERSION;
 
-/// An error from the Git store or its contents.
+/// An error from the Git store, or from reading a config tree into it.
 #[derive(Debug)]
 pub enum StoreError {
     /// No store exists at the given path. Points the user at `deptool init`.
@@ -32,6 +32,8 @@ pub enum StoreError {
     NonUtf8FileName,
     /// A configuration value is structurally invalid.
     InvalidConfig(String),
+    /// Hostnames passed via --limit don't appear in the cluster.
+    UnknownHosts(Vec<Hostname>),
 }
 
 impl From<git2::Error> for StoreError {
@@ -65,6 +67,10 @@ impl fmt::Display for StoreError {
             StoreError::Json(e) => write!(f, "{e}"),
             StoreError::NonUtf8FileName => write!(f, "non-utf8 file name"),
             StoreError::InvalidConfig(msg) => write!(f, "invalid config: {msg}"),
+            StoreError::UnknownHosts(hosts) => {
+                let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
+                write!(f, "unknown hosts in --limit: {}", names.join(", "))
+            }
         }
     }
 }
@@ -413,8 +419,6 @@ pub enum Error {
     ClusterNotFound(PathBuf),
     /// The recorded default config tree directory does not exist.
     DefaultClusterNotFound(PathBuf),
-    /// Hostnames passed via --limit don't appear in the cluster.
-    UnknownHosts(Vec<Hostname>),
     /// A --limit was given but lists no hosts (an empty value or only commas).
     EmptyLimit,
     /// The store has no tracking ref for a host in the config tree.
@@ -484,10 +488,6 @@ impl fmt::Display for Error {
                  directory); pass a config tree directory to replace it",
                 dir.display(),
             ),
-            Error::UnknownHosts(hosts) => {
-                let names: Vec<&str> = hosts.iter().map(|h| h.0.as_str()).collect();
-                write!(f, "unknown hosts in --limit: {}", names.join(", "))
-            }
             Error::EmptyLimit => write!(
                 f,
                 "no host names were given to --limit; list the hosts to include \

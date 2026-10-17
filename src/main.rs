@@ -342,7 +342,7 @@ fn run_deploy(
 ) -> Result<()> {
     let repo = Store::open(&store)?;
     let dir = resolve_dir(&repo, dir)?;
-    let tree_oid = plan::build_config_tree(&repo, &dir, filter)?;
+    let tree_oid = repo.build_tree(&dir, filter)?;
 
     let plan = match plan::make_plan(&repo, tree_oid)? {
         Some(draft) => draft.finalize(&repo)?,
@@ -463,7 +463,7 @@ fn run_ping(
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let tree_oid = plan::build_config_tree(&store, &dir, filter)?;
+    let tree_oid = store.build_tree(&dir, filter)?;
     let hosts: Vec<_> = store.host_trees(tree_oid)?.into_keys().collect();
     if hosts.is_empty() {
         eprintln!("No hosts to ping in cluster '{}'.", cluster_name(&dir));
@@ -529,7 +529,7 @@ fn run_diff(
 ) -> Result<()> {
     let store = Store::open(&store)?;
     let dir = resolve_dir(&store, dir)?;
-    let tree_oid = plan::build_config_tree(&store, &dir, filter)?;
+    let tree_oid = store.build_tree(&dir, filter)?;
     match plan::make_plan(&store, tree_oid)? {
         Some(draft) => {
             // This creates a dangling commit in the store, but a GC will

@@ -202,9 +202,27 @@ impl Store {
     /// not block commands limited to others. Skipping them is safe because
     /// validation has no rules across hosts. An entirely empty config directory
     /// is valid (no hosts configured) and yields the empty tree.
+    ///
+    /// Returns an error listing every name in the limit that has no host dir,
+    /// so the operator can fix typos in one round trip rather than
+    /// rerun-and-discover.
     pub fn build_tree(&self, dir: &Path, filter: &HostFilter) -> Result<Oid> {
         let depth_root = 0;
-        build_tree_recursive(&self.repo, filter, dir, depth_root)
+        let tree_oid = build_tree_recursive(&self.repo, filter, dir, depth_root)?;
+        let limit = match filter {
+            HostFilter::All => return Ok(tree_oid),
+            HostFilter::Only(limit) => limit,
+        };
+        let tree = self.repo.find_tree(tree_oid)?;
+        let unknown: Vec<Hostname> = limit
+            .iter()
+            .filter(|h| tree.get_name(&h.0).is_none())
+            .cloned()
+            .collect();
+        if !unknown.is_empty() {
+            return Err(StoreError::UnknownHosts(unknown));
+        }
+        Ok(tree_oid)
     }
 
     /// The identity to commit as: the repo's configured user, or Deptool's
@@ -841,6 +859,48 @@ mod tests {
             panic!("expected InvalidConfig, got {err}")
         };
         assert!(msg.contains("caddy"), "{msg}");
+    }
+
+    #[test]
+    fn build_tree_with_limit_reads_only_the_listed_host_dirs() -> Result<()> {
+        let t = TestRepo::new();
+        let config = config_with(&[
+            ("web1/app/conf", b"a"),
+            ("web2/app/conf", b"b"),
+            ("web3/app/conf", b"c"),
+        ]);
+        symlink("app", config.path().join("web2/caddy")).expect("symlink is created");
+        assert!(
+            matches!(
+                t.store.build_tree(config.path(), &HostFilter::All),
+                Err(StoreError::InvalidConfig(..))
+            ),
+            "reading web2 fails on the symlink",
+        );
+        let filter = HostFilter::Only(vec!["web1".into(), "web3".into()]);
+        let tree_oid = t.store.build_tree(config.path(), &filter)?;
+        let hosts: Vec<_> = t.store.host_trees(tree_oid)?.into_keys().collect();
+        assert_eq!(
+            hosts,
+            vec![Hostname::from("web1"), Hostname::from("web3")],
+            "limit narrows the tree to exactly the listed hosts",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_tree_errors_when_limit_contains_unknown_host() {
+        let t = TestRepo::new();
+        let config = config_with(&[("web1/app/conf", b"a")]);
+        let filter = HostFilter::Only(vec!["nope".into(), "also_nope".into()]);
+        match t.store.build_tree(config.path(), &filter) {
+            Err(StoreError::UnknownHosts(hosts)) => assert_eq!(
+                hosts,
+                vec![Hostname::from("nope"), Hostname::from("also_nope")],
+                "all unknown hosts are reported",
+            ),
+            other => panic!("expected UnknownHosts, got {other:?}"),
+        }
     }
 
     #[test]
