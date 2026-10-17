@@ -669,6 +669,13 @@ mod tests {
     use super::*;
     use crate::testutil::{TempDir, TestHost, TestRepo, commit_files};
 
+    fn lock_expecting_current(expected_current_commit: Option<Oid>) -> Request {
+        Request::Lock {
+            expected_current_commit,
+            operator: "deckard@spinner".into(),
+        }
+    }
+
     #[test]
     fn ping_returns_pong() {
         let mut host = TestHost::new("web1");
@@ -678,10 +685,7 @@ mod tests {
     #[test]
     fn lock_succeeds_on_fresh_host_and_records_the_store_version() {
         let mut host = TestHost::new("web1");
-        let responses = host.interact(Request::Lock {
-            expected_current_commit: None,
-            operator: "deckard@spinner".into(),
-        });
+        let responses = host.interact(lock_expecting_current(None));
         assert_eq!(responses, vec![Message::Locked]);
         assert_eq!(
             host.session
@@ -696,10 +700,7 @@ mod tests {
     fn lock_succeeds_when_current_ref_matches_expected() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("nginx/conf", b"v1")]);
         host.set_current(oid);
-        let responses = host.interact(Request::Lock {
-            expected_current_commit: Some(oid),
-            operator: "deckard@spinner".into(),
-        });
+        let responses = host.interact(lock_expecting_current(Some(oid)));
         assert_eq!(responses, vec![Message::Locked]);
     }
 
@@ -707,10 +708,7 @@ mod tests {
     fn lock_reports_stale_when_current_ref_mismatches() {
         let (mut host, oid) = TestHost::with_commit("web1", &[("nginx/conf", b"v1")]);
         host.set_current(oid);
-        let responses = host.interact(Request::Lock {
-            expected_current_commit: None,
-            operator: "deckard@spinner".into(),
-        });
+        let responses = host.interact(lock_expecting_current(None));
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             Message::LockStale {
@@ -738,10 +736,7 @@ mod tests {
         use std::io::Write;
         write!(&lock_holder, "roy@nexus").expect("write succeeds");
 
-        let responses = host.interact(Request::Lock {
-            expected_current_commit: None,
-            operator: "deckard@spinner".into(),
-        });
+        let responses = host.interact(lock_expecting_current(None));
         assert_eq!(
             responses,
             vec![Message::LockBusy {
@@ -750,13 +745,6 @@ mod tests {
         );
 
         drop(lock_holder);
-    }
-
-    fn lock(expected_current_commit: Option<Oid>) -> Request {
-        Request::Lock {
-            expected_current_commit,
-            operator: "deckard@spinner".into(),
-        }
     }
 
     /// A host as Deptool 1.2 left it, with `files` as the cluster tree of
@@ -793,7 +781,7 @@ mod tests {
             .expect("commit succeeds");
         host.set_target(target);
 
-        host.interact(lock(Some(cluster)));
+        host.interact(lock_expecting_current(Some(cluster)));
 
         let current = host.get_ref("refs/heads/current").expect("current exists");
         let converted_target = host.get_ref("refs/heads/target").expect("target exists");
@@ -826,7 +814,7 @@ mod tests {
             )
             .expect("ref is set");
 
-        host.interact(lock(Some(cluster)));
+        host.interact(lock_expecting_current(Some(cluster)));
 
         let current = host.get_ref("refs/heads/current").expect("current exists");
         assert_eq!(host.get_ref("refs/heads/target"), Some(current));
@@ -847,7 +835,7 @@ mod tests {
             .expect("version is recorded");
 
         assert_eq!(
-            host.interact(lock(None)),
+            host.interact(lock_expecting_current(None)),
             vec![Message::LockHostnameChanged { deployed_as: None }],
         );
         assert_eq!(
@@ -860,7 +848,7 @@ mod tests {
     #[test]
     fn receive_pack_reports_an_error_for_invalid_pack_data() {
         let mut host = TestHost::new("web1");
-        host.interact(lock(None));
+        host.interact(lock_expecting_current(None));
         let responses = host.interact(Request::ReceivePack {
             pack_data: BASE64.encode(b"not a valid pack"),
         });
@@ -935,10 +923,7 @@ mod tests {
 
     /// Lock the host and push a pack containing `commit`.
     fn lock_and_push(host: &mut TestHost, commit: Oid) {
-        host.interact(Request::Lock {
-            expected_current_commit: None,
-            operator: "deckard@spinner".into(),
-        });
+        host.interact(lock_expecting_current(None));
         let store = Store::open(host.session.store.path()).expect("store opens");
         let pack = store
             .create_pack(commit, None)
@@ -983,10 +968,7 @@ mod tests {
             commit_files(&store, &[("nginx/nginx.conf", b"v2-broken")]).expect("commit succeeds");
 
         // Lock and push c2.
-        host.interact(Request::Lock {
-            expected_current_commit: Some(c1),
-            operator: "deckard@spinner".into(),
-        });
+        host.interact(lock_expecting_current(Some(c1)));
         let pack = store.create_pack(c2, Some(c1)).expect("pack succeeds");
         let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
         host.interact(Request::ReceivePack { pack_data: encoded });
@@ -1083,10 +1065,7 @@ mod tests {
         let c2 =
             commit_files(&store, &[("nginx/nginx.conf", b"v2-broken")]).expect("commit succeeds");
 
-        host.interact(Request::Lock {
-            expected_current_commit: Some(c1),
-            operator: "deckard@spinner".into(),
-        });
+        host.interact(lock_expecting_current(Some(c1)));
         let pack = store.create_pack(c2, Some(c1)).expect("pack succeeds");
         let encoded = base64::prelude::BASE64_STANDARD.encode(&pack);
         host.interact(Request::ReceivePack { pack_data: encoded });
@@ -1192,10 +1171,7 @@ mod tests {
                 },
             )
             .expect("ref is set");
-        host.interact(Request::Lock {
-            expected_current_commit: Some(c1),
-            operator: "deckard@spinner".into(),
-        });
+        host.interact(lock_expecting_current(Some(c1)));
 
         let msgs = host.interact(Request::Apply {
             target_commit: c1,
