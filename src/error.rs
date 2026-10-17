@@ -163,14 +163,9 @@ pub enum HostError {
     AgentExited { status: ExitStatus, stderr: String },
     /// The agent reported a different hostname than the driver expected.
     HostnameMismatch(String),
-    /// The hostname the host's state was deployed under differs from its
-    /// current hostname: the host was renamed after the deploy.
-    HostnameChanged {
-        /// The hostname the host's state was deployed under. `None` when
-        /// the host predates hostname recording and the rename was
-        /// inferred from the current commit lacking an entry for the host.
-        deployed_as: Option<Hostname>,
-    },
+    /// The host's store predates the per-host format: Deptool 1.2 or older
+    /// last deployed it.
+    StoreTooOld,
     /// The host's store records a format version this Deptool does not
     /// support: a newer Deptool wrote it.
     StoreVersionUnsupported { version: u32 },
@@ -255,18 +250,11 @@ impl HostError {
                     .to_string(),
                 item: format!("  {host}: /etc/hostname contains {actual:?}"),
             }),
-            HostError::HostnameChanged { deployed_as } => Some(Explanation {
-                description: "The host's state was deployed under a different hostname, so the\n\
-                             changes a deploy would compute do not match what is actually on the\n\
-                             host. This happens when /etc/hostname changes after a deploy. If\n\
-                             the rename is intended, delete the store on the host and deploy\n\
-                             again; the host is then treated as a fresh install. See 'Renaming\n\
-                             a host' in the manual."
+            HostError::StoreTooOld => Some(Explanation {
+                description: "The host's store was last deployed by Deptool 1.2 or older.\n\
+                             Run 'deptool reapply' with Deptool 1.3 to convert it, then retry with this version:"
                     .to_string(),
-                item: match deployed_as {
-                    Some(name) => format!("  {host}: deployed as '{name}'"),
-                    None => format!("  {host}: deployed under an unknown name"),
-                },
+                item: format!("  {host}"),
             }),
             HostError::StoreVersionUnsupported { version } => Some(Explanation {
                 description: "The host's store version is not supported by this version of Deptool.\n\
@@ -369,12 +357,7 @@ impl fmt::Display for HostError {
                 write!(f, "agent exited unexpectedly, {status}")
             }
             HostError::HostnameMismatch(_) => f.write_str("hostname mismatch"),
-            HostError::HostnameChanged {
-                deployed_as: Some(name),
-            } => write!(f, "encountered previous deployment as '{name}'"),
-            HostError::HostnameChanged { deployed_as: None } => {
-                f.write_str("encountered previous deployment as different host")
-            }
+            HostError::StoreTooOld => f.write_str("store format is too old"),
             HostError::StoreVersionUnsupported { version } => {
                 write!(f, "store format version {version} is too new")
             }

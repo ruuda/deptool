@@ -272,18 +272,14 @@ impl TestHost {
     }
 
     /// Create a host as Deptool 1.2 left it: `commit`, a cluster-tree commit
-    /// fetched from `driver`, is deployed under `hostname`, and the store
-    /// records format version 1 and the hostname.
+    /// fetched from `driver`, is deployed, and the store records format
+    /// version 1.
     pub fn with_cluster_tree_store(driver: &TestRepo, hostname: &str, commit: Oid) -> Self {
         let host = Self::at_commit(driver, hostname, commit);
-        host.set_target(commit);
-        let store = &host.session.store;
-        store
+        host.session
+            .store
             .set_store_version(STORE_VERSION_CLUSTER_TREE)
             .expect("version is recorded");
-        store
-            .set_deployed_hostname(&Hostname::from(hostname))
-            .expect("hostname is recorded");
         host
     }
 
@@ -316,21 +312,6 @@ impl TestHost {
             .store
             .set_store_version(STORE_VERSION)
             .expect("version is recorded");
-    }
-
-    /// Set the host-local `refs/heads/target` ref, as the start of a deploy
-    /// leaves it.
-    pub fn set_target(&self, commit_oid: Oid) {
-        self.session
-            .store
-            .set_ref(
-                "refs/heads/target",
-                commit_oid,
-                RefUpdate::SetTarget {
-                    operator: "deckard@spinner",
-                },
-            )
-            .expect("ref is set");
     }
 
     /// The commit a ref points to, if the ref exists.

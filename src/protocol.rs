@@ -11,7 +11,6 @@ use git2::Oid;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApplyError;
-use crate::prim::Hostname;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -92,15 +91,9 @@ pub enum Message {
         /// Who currently holds the lock, if known.
         held_by: Option<String>,
     },
-    /// The hostname the host's state was deployed under differs from its
-    /// current hostname: the host was renamed after the deploy. Deploys
-    /// are refused in this state. `deployed_as` is `None` for hosts last
-    /// deployed by an older Deptool that did not record the hostname; the
-    /// rename is then inferred from the current commit lacking an entry
-    /// for the host.
-    LockHostnameChanged {
-        deployed_as: Option<Hostname>,
-    },
+    /// The host's store predates the per-host format: Deptool 1.2 or older
+    /// last deployed it. Deploys are refused in this state.
+    LockStoreTooOld,
     /// The host's store records a format version this Deptool does not
     /// support: a newer Deptool wrote it. Deploys are refused in this
     /// state.

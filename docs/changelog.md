@@ -45,6 +45,14 @@ None". -->
 <!-- TODO(ruuda): `deptool diff`, `deploy --plan-only`, and an aborted deploy
 no longer create commits in the store. -->
 
+<!-- TODO(ruuda): Compatibility (1.4), upgrade path.
+ * 1.4 no longer converts 1.2 stores
+ * before updating to 1.4: run `deptool reapply` with 1.3 against each cluster
+ * first run: unconverted hosts are converted, reported stale, their commits fetched; it fails. A second run succeeds
+ * a host without a tracking ref: `deptool sync` first
+ * an unconverted host under 1.4: refused, "store format is too old", pointing at the 1.3 reapply
+ * hostname check gone (only the conversion needed it); `deptool.hostname` no longer read -->
+
 ### New features
 
  * `deptool diff` now accepts [`--word-diff`](cmd/deptool_diff.md#-word-diff)

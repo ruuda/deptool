@@ -7,7 +7,8 @@
  * name swap (web1 <-> web2): same, each host's own history decides
  * refusal "encountered previous deployment as 'web1'": only for a host still on the 1.2 store format, renamed before its first 1.3 deploy
  * that case: rename back and deploy once with 1.3, or delete the store (warning below still applies)
- * "no mechanism to preserve the host-side history" at the end: outdated -->
+ * "no mechanism to preserve the host-side history" at the end: outdated
+ * 1.4: refusal and store deletion gone entirely; a 1.2 host is refused as too old until 1.3 converts it -->
 
 Deptool encourages reprovisioning over renaming hosts. Renames often have
 far-reaching unintended consequences. Having said this, even though initial

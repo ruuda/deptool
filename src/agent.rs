@@ -17,7 +17,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use git2::Oid;
 
 use crate::checkout::{self, CheckoutMode, checkout};
-use crate::error::{ApplyError, StoreError};
+use crate::error::ApplyError;
 use crate::log::FileLog;
 use crate::plan::{AppDiff, DesiredState, SystemDiff, diff_host};
 use crate::prim::Hostname;
@@ -184,55 +184,6 @@ impl AgentSession {
         self.store.current_commit()
     }
 
-    /// Convert the store from the cluster-tree format to the current one,
-    /// see `STORE_VERSION_CLUSTER_TREE`.
-    ///
-    /// Returns the refusal to report when the deployed state cannot be
-    /// converted, `None` once the store is converted. A store without
-    /// commits only gets the current version recorded.
-    fn convert_store(&self, operator: &str) -> Result<Option<Message>, StoreError> {
-        // The conversion picks this host's config out of the cluster tree
-        // by name, so under a changed hostname it would pick another
-        // host's config or nothing. The hostname recorded at the last
-        // apply is the exact check; a state deployed before recording
-        // existed is caught by the missing entry below, except for a swap
-        // of two names.
-        match self.store.get_deployed_hostname()? {
-            Some(deployed_as) if deployed_as != self.hostname => {
-                return Ok(Some(Message::LockHostnameChanged {
-                    deployed_as: Some(deployed_as),
-                }));
-            }
-            _ => {}
-        }
-
-        // One signature for both refs: when they point at the same cluster
-        // commit, they convert to the same commit and stay equal, as a
-        // completed deploy leaves them.
-        let sig = self.store.signature()?;
-        let refs = [
-            ("refs/heads/current", self.store.current_commit()),
-            ("refs/heads/target", self.store.target_commit()),
-        ];
-        for (refname, commit) in refs {
-            let commit = match commit {
-                Some(oid) => oid,
-                None => continue,
-            };
-            let converted = match self
-                .store
-                .convert_cluster_commit(&sig, &self.hostname, commit)?
-            {
-                Some(oid) => oid,
-                None => return Ok(Some(Message::LockHostnameChanged { deployed_as: None })),
-            };
-            self.store
-                .set_ref(refname, converted, RefUpdate::Convert { operator })?;
-        }
-        self.store.set_store_version(STORE_VERSION)?;
-        Ok(None)
-    }
-
     fn handle_lock(
         &mut self,
         expected_current_commit: Option<Oid>,
@@ -289,26 +240,22 @@ impl AgentSession {
         let _ = write!(&file, "{operator}");
 
         // Check the store version before interpreting any commit: an older
-        // format is converted first, a newer one may lay out its commits
-        // differently. Returning releases the lock by dropping `file`.
+        // or newer format lays out its commits differently. Returning
+        // releases the lock by dropping `file`.
         match self
             .store
             .get_store_version()
             .expect("host store config is readable")
         {
-            None | Some(STORE_VERSION_CLUSTER_TREE) => match self.convert_store(&operator) {
-                Ok(None) => {}
-                Ok(Some(refusal)) => {
-                    emit_message(refusal);
-                    return;
-                }
-                Err(err) => {
-                    emit_message(Message::ErrorPreApply(ApplyError::Store(format!(
-                        "failed to convert store to the per-host format: {err}"
-                    ))));
-                    return;
-                }
-            },
+            // Nothing deployed yet, so there is no older format to refuse.
+            None if self.current_commit().is_none() => self
+                .store
+                .set_store_version(STORE_VERSION)
+                .expect("host store config is writable"),
+            None | Some(STORE_VERSION_CLUSTER_TREE) => {
+                emit_message(Message::LockStoreTooOld);
+                return;
+            }
             Some(STORE_VERSION) => {}
             Some(other_version) => {
                 emit_message(Message::LockStoreVersionUnsupported {
@@ -747,101 +694,40 @@ mod tests {
         drop(lock_holder);
     }
 
-    /// A host as Deptool 1.2 left it, with `files` as the cluster tree of
-    /// its current commit, deployed under `hostname`.
-    fn cluster_tree_host(hostname: &str, files: &[(&str, &[u8])]) -> (TestHost, Oid) {
+    #[test]
+    fn lock_refuses_a_store_older_than_the_per_host_format() {
+        // Deptool 1.2 recorded version 1.
         let driver = TestRepo::new();
-        let cluster = driver.commit(files);
-        let host = TestHost::with_cluster_tree_store(&driver, hostname, cluster);
-        (host, cluster)
-    }
-
-    fn store_version(host: &TestHost) -> Option<u32> {
-        host.session
-            .store
-            .get_store_version()
-            .expect("host store config is readable")
-    }
-
-    fn parent_of(host: &TestHost, commit: Oid) -> Oid {
-        host.session
-            .store
-            .repo
-            .find_commit(commit)
-            .expect("commit exists")
-            .parent_id(0)
-            .expect("commit has a parent")
-    }
-
-    #[test]
-    fn lock_converts_a_diverged_target_on_its_own() {
-        // An incomplete deploy left target ahead of current.
-        let (mut host, cluster) = cluster_tree_host("web1", &[("web1/nginx/conf", b"v1")]);
-        let target = commit_files(&host.session.store, &[("web1/nginx/conf", b"v2")])
-            .expect("commit succeeds");
-        host.set_target(target);
-
-        host.interact(lock_expecting_current(Some(cluster)));
-
-        let current = host.get_ref("refs/heads/current").expect("current exists");
-        let converted_target = host.get_ref("refs/heads/target").expect("target exists");
-        assert_ne!(
-            current, converted_target,
-            "the incomplete deploy stays visible"
+        let cluster = driver.commit(&[("web1/nginx/conf", b"v1")]);
+        let mut host = TestHost::with_cluster_tree_store(&driver, "web1", cluster);
+        assert_eq!(
+            host.interact(lock_expecting_current(Some(cluster))),
+            vec![Message::LockStoreTooOld],
         );
-        assert_eq!(parent_of(&host, current), cluster);
-        assert_eq!(parent_of(&host, converted_target), target);
-    }
 
-    #[test]
-    fn lock_brings_an_interrupted_conversion_to_one_commit() {
-        // A lock that moved `current` but was interrupted before it
-        // recorded the version leaves the store half converted.
-        let (mut host, cluster) = cluster_tree_host("web1", &[("web1/nginx/conf", b"v1")]);
+        // Deptool 1.1 and older recorded no version. Recording one now would
+        // make the next lock read the cluster commit as a per-host commit.
+        let (mut host, cluster) = TestHost::with_commit("web1", &[("web1/nginx/conf", b"v1")]);
         let store = &host.session.store;
-        let sig = store.signature().expect("signature is available");
-        let half = store
-            .convert_cluster_commit(&sig, &"web1".into(), cluster)
-            .expect("host store is readable")
-            .expect("the cluster tree has an entry for web1");
+        let operator = "roy@nexus";
         store
             .set_ref(
                 "refs/heads/current",
-                half,
-                RefUpdate::Convert {
-                    operator: "roy@nexus",
-                },
+                cluster,
+                RefUpdate::SetCurrent { operator },
             )
             .expect("ref is set");
-
-        host.interact(lock_expecting_current(Some(cluster)));
-
-        let current = host.get_ref("refs/heads/current").expect("current exists");
-        assert_eq!(host.get_ref("refs/heads/target"), Some(current));
-        assert_eq!(parent_of(&host, current), cluster);
-        assert_eq!(store_version(&host), Some(STORE_VERSION));
-    }
-
-    #[test]
-    fn lock_infers_a_rename_from_a_missing_entry_when_no_hostname_was_recorded() {
-        // Deployed as web1 before Deptool recorded hostnames; the host now
-        // reports web2. Without a web2 entry the conversion has nothing to
-        // pick, so it refuses.
-        let (mut host, cluster) = TestHost::with_commit("web2", &[("web1/nginx/conf", b"v1")]);
-        host.set_current(cluster);
-        host.session
-            .store
-            .set_store_version(STORE_VERSION_CLUSTER_TREE)
-            .expect("version is recorded");
-
         assert_eq!(
-            host.interact(lock_expecting_current(None)),
-            vec![Message::LockHostnameChanged { deployed_as: None }],
+            host.interact(lock_expecting_current(Some(cluster))),
+            vec![Message::LockStoreTooOld],
         );
         assert_eq!(
-            store_version(&host),
-            Some(STORE_VERSION_CLUSTER_TREE),
-            "nothing was converted"
+            host.session
+                .store
+                .get_store_version()
+                .expect("config is readable"),
+            None,
+            "the refusal records no version",
         );
     }
 

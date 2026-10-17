@@ -415,8 +415,8 @@ pub fn connect_and_lock(
                     Ok(Some(Message::LockBusy { held_by })) => {
                         progress.update(host, HostState::LockBusy(held_by));
                     }
-                    Ok(Some(Message::LockHostnameChanged { deployed_as })) => {
-                        progress.update(host, HostError::HostnameChanged { deployed_as });
+                    Ok(Some(Message::LockStoreTooOld)) => {
+                        progress.update(host, HostError::StoreTooOld);
                     }
                     Ok(Some(Message::LockStoreVersionUnsupported { version })) => {
                         progress.update(host, HostError::StoreVersionUnsupported { version });
@@ -875,9 +875,6 @@ mod tests {
         let c1 = driver.commit(&[("app/conf", b"v1")]);
         let web1 = TestHost::new("web1");
         deploy_to(&driver, &[&web1], &make_plan(c1, &[("web1", None)]))?;
-        // A hostname recorded by Deptool 1.2 outlives the conversion of the
-        // store; on the per-host format it must not cause a refusal.
-        web1.session.store.set_deployed_hostname(&"web1".into())?;
         let web2 = web1.renamed("web2");
 
         let config = config_with(&[("web2/app/conf", b"v1")]);
@@ -895,86 +892,18 @@ mod tests {
     }
 
     #[test]
-    fn deploy_refuses_to_convert_a_renamed_cluster_tree_store() -> Result<()> {
-        // Deployed as web1 by Deptool 1.2, then renamed to web2: the
-        // conversion cannot pick the host's config out of the cluster tree.
+    fn deploy_refuses_a_cluster_tree_store() -> Result<()> {
         let driver = TestRepo::new();
         let cluster = driver.commit(&[("web1/app/conf", b"v1")]);
-        let web2 = TestHost::with_cluster_tree_store(&driver, "web1", cluster).renamed("web2");
-
-        let config = config_with(&[("web2/app/conf", b"v1")]);
-        let plan = plan_config(&driver, &config)?.expect("plan has changes");
-        let (result, progress) = deploy_with_progress(&driver, &[&web2], &plan);
-
-        assert!(result.is_err(), "deploy after a rename aborts");
-        assert!(
-            matches!(
-                &*progress.state("web2"),
-                HostState::Failed(HostError::HostnameChanged { deployed_as })
-                    if *deployed_as == Some(Hostname::from("web1"))
-            ),
-            "the error identifies the hostname the state was deployed under",
-        );
-        // No tracking ref appears for the new name: the refusal happens
-        // before the stale-fetch path that would record one, and the host's
-        // store stays as it was.
-        assert_eq!(driver.get_host_tracking_ref("web2"), None);
-        assert_eq!(web2.get_ref("refs/heads/current"), Some(cluster));
-        Ok(())
-    }
-
-    #[test]
-    fn deploy_converts_a_cluster_tree_store_in_one_stale_round() -> Result<()> {
-        // web1 was last deployed by Deptool 1.2: its current commit holds
-        // the whole cluster tree, and the operator's tracking ref points
-        // at that commit.
-        let driver = TestRepo::new();
-        let cluster = driver.commit(&[("web1/nginx/conf", b"v1"), ("web2/nginx/conf", b"v1")]);
         let web1 = TestHost::with_cluster_tree_store(&driver, "web1", cluster);
-        driver.set_host_tracking_ref("web1", cluster);
-        let config = config_with(&[("web1/nginx/conf", b"v2")]);
+        let plan = make_plan(cluster, &[("web1", Some(cluster))]);
 
-        // The operator plans against the cluster commit its tracking ref
-        // records.
-        let plan = plan_config(&driver, &config)?.expect("plan has changes");
-        assert_eq!(plan.hosts[&"web1".into()].expected_current, Some(cluster));
-
-        // The lock converts the store and reports the converted commit as
-        // the host's current commit, which the stale fetch records.
         let (result, progress) = deploy_with_progress(&driver, &[&web1], &plan);
-        assert!(
-            result.is_err(),
-            "the deploy that converts the store is stale"
-        );
-        assert!(matches!(*progress.state("web1"), HostState::Stale));
-        let converted = driver
-            .get_host_tracking_ref("web1")
-            .expect("the stale fetch recorded the converted commit");
-        assert_eq!(
-            driver.store.repo.find_commit(converted)?.parent_id(0)?,
-            cluster
-        );
-        assert_eq!(web1.get_ref("refs/heads/current"), Some(converted));
-        assert_eq!(web1.session.store.get_store_version()?, Some(STORE_VERSION));
-        let reflog = "deploy by deckard@spinner: convert to per-host format";
-        assert_eq!(
-            web1.reflog("refs/heads/current")[0],
-            (converted, reflog.into())
-        );
-
-        // The re-run is an ordinary deploy on top of the converted commit.
-        let plan = plan_config(&driver, &config)?.expect("plan has changes");
-        let deployed = plan.hosts[&"web1".into()].commit;
-        deploy_to(&driver, &[&web1], &plan)?;
-        assert_eq!(web1.get_ref("refs/heads/current"), Some(deployed));
-        assert_eq!(
-            driver.store.repo.find_commit(deployed)?.parent_id(0)?,
-            converted
-        );
-        assert_eq!(
-            std::fs::read(web1.apps_path().join("nginx/current/conf"))?,
-            b"v2"
-        );
+        assert!(result.is_err(), "deploy to a host with a 1.2 store aborts");
+        assert!(matches!(
+            &*progress.state("web1"),
+            HostState::Failed(HostError::StoreTooOld)
+        ));
         Ok(())
     }
 

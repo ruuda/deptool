@@ -335,7 +335,7 @@ pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -
     let mut combined = Vec::new();
     for (host, host_plan) in &plan.hosts {
         let old_oid = match host_plan.expected_current {
-            Some(commit) => store.deployed_host_tree(commit, host)?,
+            Some(commit) => store.get_commit_tree(commit)?.id(),
             None => empty_tree_oid(),
         };
         if !combined.is_empty() {

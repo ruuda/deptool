@@ -36,7 +36,8 @@ view of the cluster.
  * reflog: "convert to per-host format"
  * that deploy then aborts as stale; the operator fetches the converted commit
  * re-run `deptool deploy`: a normal deploy; one stale round per host
- * renamed before conversion: refused, see renaming_hosts.md -->
+ * renamed before conversion: refused, see renaming_hosts.md
+ * 1.4: no conversion; such a host is refused at lock as too old -->
 
 Locks are implemented as a file lock held by the agent processes on the target
 host. Deptool spawns the agent process through an <abbr>SSH</abbr> session.

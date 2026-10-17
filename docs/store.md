@@ -67,7 +67,9 @@ state is only partially applied.
  * version 1: cluster tree per commit (1.2)
  * version 2: per-host commits (1.3)
  * no version recorded (1.1 and older): treated as version 1
- * 1 -> 2: agent converts `current` and `target` at lock; see deployment_phases.md -->
+ * 1 -> 2: agent converts `current` and `target` at lock; see deployment_phases.md
+ * 1.4: no conversion; version 1, or no version with a deployed commit, refused: "store format is too old"
+ * 1.4: no version and nothing deployed: a fresh store, version 2 recorded -->
 
 ## Transport
 

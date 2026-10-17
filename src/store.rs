@@ -30,16 +30,9 @@ type Result<T> = std::result::Result<T, StoreError>;
 pub const STORE_VERSION: u32 = 2;
 
 /// The format of Deptool 1.2 and earlier: every commit's tree holds the
-/// config of the whole cluster, one entry per host. The agent converts a
-/// store in this format to the current one when it takes the deploy lock.
+/// config of the whole cluster, one entry per host. Deptool 1.3 converts a
+/// store in this format; this version refuses it.
 pub const STORE_VERSION_CLUSTER_TREE: u32 = 1;
-
-/// Body of the commit the agent creates when converting a cluster-tree
-/// commit, below a subject that includes the hostname.
-const CONVERSION_MESSAGE_BODY: &str = "\
-Deptool 1.3 and later record one commit per host. This tree is the
-entry for this host in the parent's cluster-wide tree, unchanged.
-";
 
 /// Per-app manifest declaring runtime state that deptool should manage.
 ///
@@ -67,7 +60,7 @@ pub struct SystemdConfig {
 pub struct HostRef {
     /// The commit deployed to this host (`refs/remotes/{host}`).
     pub commit: Oid,
-    /// The host's tree in that commit, see [`Store::deployed_host_tree`].
+    /// The tree of that commit.
     pub host_tree: Oid,
 }
 
@@ -140,23 +133,6 @@ impl Store {
     pub fn set_default_cluster(&self, path: &Path) -> Result<()> {
         let s = path.to_str().expect("cluster path is valid UTF-8");
         self.set_config_string("deptool.cluster", s)
-    }
-
-    /// The hostname recorded by the most recent apply of Deptool 1.1 or 1.2.
-    ///
-    /// Those versions found a host's config in the cluster tree by name,
-    /// so they refused to deploy after a rename. Converting such a store
-    /// looks the host up by name one last time, and checks this record
-    /// against the current `/etc/hostname` first. `None` on hosts deployed
-    /// before recording existed, and on hosts provisioned by 1.3 or later.
-    pub fn get_deployed_hostname(&self) -> Result<Option<Hostname>> {
-        Ok(self.get_config_string("deptool.hostname")?.map(Hostname))
-    }
-
-    /// Record `hostname` as the name this host's state was deployed under,
-    /// as the apply of Deptool 1.1 and 1.2 did. Only tests write it now.
-    pub fn set_deployed_hostname(&self, hostname: &Hostname) -> Result<()> {
-        self.set_config_string("deptool.hostname", &hostname.0)
     }
 
     /// The store format version recorded on this host, `None` for stores
@@ -255,49 +231,6 @@ impl Store {
         Ok(self.repo.commit(None, sig, sig, message, &tree, &parents)?)
     }
 
-    /// The host's tree in a commit deployed to it: the commit's tree, or for
-    /// commits of Deptool 1.2 and older, which hold the whole cluster, the
-    /// entry named after the host. TODO: Delete the cluster-tree case once
-    /// every host has been deployed to by 1.3 or later; until then an app
-    /// named after its host is mistaken for the old format.
-    pub fn deployed_host_tree(&self, commit_oid: Oid, host: &Hostname) -> Result<Oid> {
-        let tree = self.get_commit_tree(commit_oid)?;
-        match tree.get_name(&host.0) {
-            Some(entry) => Ok(entry.id()),
-            None => Ok(tree.id()),
-        }
-    }
-
-    /// A per-host commit with the host's entry of a cluster-tree commit,
-    /// with that commit as parent so its history stays reachable.
-    ///
-    /// `None` when the tree has no entry for the host: it was renamed after
-    /// the deploy. A conversion converts as its parent, so a lock that was
-    /// interrupted after moving one ref but before recording the version
-    /// brings every ref to one commit on the next attempt.
-    pub fn convert_cluster_commit(
-        &self,
-        sig: &Signature,
-        host: &Hostname,
-        commit_oid: Oid,
-    ) -> Result<Option<Oid>> {
-        let mut cluster = self.repo.find_commit(commit_oid)?;
-        if let Ok(parent) = cluster.parent(0) {
-            let converted_from = parent.tree()?.get_name(&host.0).map(|e| e.id());
-            if converted_from == Some(cluster.tree_id()) {
-                cluster = parent;
-            }
-        }
-        let host_tree = match cluster.tree()?.get_name(&host.0) {
-            Some(entry) => entry.id(),
-            None => return Ok(None),
-        };
-        let subject = format!("Convert {host} history to the per-host format");
-        let message = format!("{subject}\n\n{CONVERSION_MESSAGE_BODY}");
-        let parent = Some(cluster.id());
-        Ok(Some(self.commit_tree(sig, host_tree, parent, &message)?))
-    }
-
     /// Map hostnames to their subtree OIDs from a config tree.
     pub fn host_trees(&self, tree_oid: Oid) -> Result<BTreeMap<Hostname, Oid>> {
         let tree = self.repo.find_tree(tree_oid)?;
@@ -319,7 +252,7 @@ impl Store {
                 Ok(r) => r.peel_to_commit()?.id(),
                 Err(_) => continue,
             };
-            let host_tree = self.deployed_host_tree(commit, host)?;
+            let host_tree = self.get_commit_tree(commit)?.id();
             result.insert(host.clone(), HostRef { commit, host_tree });
         }
         Ok(result)
@@ -360,9 +293,6 @@ impl Store {
             }
             RefUpdate::Rollback { operator } => {
                 format!("deploy by {operator}: rollback after failed apply")
-            }
-            RefUpdate::Convert { operator } => {
-                format!("deploy by {operator}: convert to per-host format")
             }
             RefUpdate::ApplyComplete => "deploy: host applied, update tracking ref".to_string(),
             RefUpdate::FetchStale => "deploy: fetched stale commit from host".to_string(),
@@ -711,7 +641,6 @@ pub enum RefUpdate<'a> {
     SetTarget { operator: &'a str },
     SetCurrent { operator: &'a str },
     Rollback { operator: &'a str },
-    Convert { operator: &'a str },
     ApplyComplete,
     FetchStale,
 }
@@ -1279,62 +1208,19 @@ mod tests {
         );
     }
 
-    /// The oid of a cluster commit's entry for `host`.
-    fn cluster_entry(t: &TestRepo, cluster: Oid, host: &str) -> Oid {
-        t.store
-            .get_commit_tree(cluster)
-            .expect("commit has a tree")
-            .get_name(host)
-            .expect("cluster tree has an entry for the host")
-            .id()
-    }
-
     #[test]
-    fn host_tracking_refs_reads_the_host_tree_from_per_host_and_cluster_commits() -> Result<()> {
+    fn host_tracking_refs_reads_the_commit_tree_as_the_host_tree() -> Result<()> {
         let t = TestRepo::new();
-        // web1 was deployed by this version: the commit's tree is its own.
-        let per_host = t.commit(&[("nginx/conf", b"v1")]);
-        t.set_host_tracking_ref("web1", per_host);
-        // web2 was deployed by Deptool 1.2: the commit's tree holds the
-        // whole cluster, and web2's tree is its entry in it.
-        let cluster = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
-        t.set_host_tracking_ref("web2", cluster);
+        // An app named after its host must not be mistaken for the host's
+        // entry in a cluster-wide tree.
+        let commit = t.commit(&[("web1/conf", b"v1"), ("nginx/conf", b"v1")]);
+        t.set_host_tracking_ref("web1", commit);
 
-        let refs = t
-            .store
-            .host_tracking_refs(&["web1".into(), "web2".into()])?;
-        assert_eq!(refs[&"web1".into()].commit, per_host);
+        let refs = t.store.host_tracking_refs(&["web1".into()])?;
+        assert_eq!(refs[&"web1".into()].commit, commit);
         assert_eq!(
             refs[&"web1".into()].host_tree,
-            t.get_commit_tree_oid(per_host)
-        );
-        assert_eq!(refs[&"web2".into()].commit, cluster);
-        assert_eq!(
-            refs[&"web2".into()].host_tree,
-            cluster_entry(&t, cluster, "web2")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn convert_cluster_commit_takes_the_host_entry_with_the_cluster_commit_as_parent() -> Result<()>
-    {
-        let t = TestRepo::new();
-        let cluster = t.commit(&[("web1/nginx/conf", b"v1"), ("web2/app/conf", b"v1")]);
-        let sig = t.store.signature()?;
-
-        let converted = t
-            .store
-            .convert_cluster_commit(&sig, &"web1".into(), cluster)?
-            .expect("the cluster tree has an entry for web1");
-
-        let commit = t.store.repo.find_commit(converted)?;
-        assert_eq!(commit.parent_count(), 1);
-        assert_eq!(commit.parent_id(0)?, cluster);
-        assert_eq!(commit.tree_id(), cluster_entry(&t, cluster, "web1"));
-        assert_eq!(
-            commit.summary(),
-            Some("Convert web1 history to the per-host format")
+            t.get_commit_tree_oid(commit)
         );
         Ok(())
     }
