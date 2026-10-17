@@ -182,7 +182,7 @@ mod tests {
 
     use super::*;
     use crate::checkout::oid_prefix;
-    use crate::plan::Plan;
+    use crate::plan::CommittedPlan;
     use crate::store::RefUpdate;
     use crate::testutil::{
         TestHost, TestRepo, commit_files, config_with, test_connector, test_progress,
@@ -251,7 +251,7 @@ mod tests {
     }
 
     /// Deploy `plan` to the targets through the real deploy machinery.
-    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
+    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &CommittedPlan) -> Result<()> {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&hostnames);
         let connector = test_connector(targets);

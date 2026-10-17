@@ -143,7 +143,7 @@ pub struct AppPlan {
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HostPlan {
+pub struct CommittedHostPlan {
     pub apps: BTreeMap<String, AppPlan>,
     /// The commit to deploy to this host: its tree is the host's config
     /// tree, its parent the commit at `expected_current`.
@@ -151,19 +151,17 @@ pub struct HostPlan {
     pub commit: Oid,
     #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
-    /// Whether the host can be automatically rolled back on deploy failure.
-    ///
-    /// True when every app's `SystemDiff` is rollback-safe. See
-    /// [`SystemDiff::is_rollback_safe`] for what that means.
+    /// See [`HostPlan::is_rollback_safe`].
     pub is_rollback_safe: bool,
 }
 
+/// A plan whose deploy commits exist in the store, ready to deploy.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Plan {
-    pub hosts: BTreeMap<Hostname, HostPlan>,
+pub struct CommittedPlan {
+    pub hosts: BTreeMap<Hostname, CommittedHostPlan>,
 }
 
-impl Plan {
+impl CommittedPlan {
     /// The commit each host is expected to be at before this plan applies.
     pub fn expected_commits(&self) -> BTreeMap<Hostname, Option<Oid>> {
         self.hosts
@@ -175,17 +173,22 @@ impl Plan {
 
 /// A plan that has not yet been committed to the store.
 #[derive(Debug)]
-pub struct DraftPlan {
-    pub hosts: BTreeMap<Hostname, DraftHostPlan>,
+pub struct Plan {
+    pub hosts: BTreeMap<Hostname, HostPlan>,
 }
 
-/// One host's part of a `DraftPlan`; `finalize` turns it into a `HostPlan`.
+/// One host's part of a `Plan`; `commit` turns it into a `CommittedHostPlan`.
 #[derive(Debug)]
-pub struct DraftHostPlan {
+pub struct HostPlan {
     pub apps: BTreeMap<String, AppPlan>,
     pub expected_current: Option<Oid>,
     /// The host's config tree, which becomes the tree of the deploy commit.
     pub tree: Oid,
+    /// Whether the host can be automatically rolled back on deploy failure.
+    ///
+    /// True when every app's `SystemDiff` is rollback-safe. See
+    /// [`SystemDiff::is_rollback_safe`] for what that means.
+    pub is_rollback_safe: bool,
 }
 
 /// Changes to a managed subdirectory between two commits, derived from Git
@@ -512,10 +515,10 @@ pub fn diff_host(
 
 /// Diff a config tree against the deployed state and build a deploy plan.
 ///
-/// Returns `None` if no hosts need changes. The returned `DraftPlan` is not
-/// yet committed -- the caller calls `finalize` to create the deploy
+/// Returns `None` if no hosts need changes. The returned `Plan` is not
+/// yet committed -- the caller calls `commit` to create the deploy
 /// commits.
-pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<DraftPlan>> {
+pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<Plan>> {
     // Validate first so we don't do diff work or create commits from
     // invalid config.
     store.validate(tree_oid)?;
@@ -541,12 +544,14 @@ pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<DraftPlan>> {
             apps.insert(name, compute_app_plan(store, diff)?);
         }
 
+        let is_rollback_safe = apps.values().all(|app| app.system.is_rollback_safe());
         hosts.insert(
             host.clone(),
-            DraftHostPlan {
+            HostPlan {
                 apps,
                 expected_current,
                 tree,
+                is_rollback_safe,
             },
         );
     }
@@ -554,7 +559,7 @@ pub fn make_plan(store: &Store, tree_oid: Oid) -> Result<Option<DraftPlan>> {
     if hosts.is_empty() {
         return Ok(None);
     }
-    Ok(Some(DraftPlan { hosts }))
+    Ok(Some(Plan { hosts }))
 }
 
 /// Maximum width for a deploy commit's subject line.
@@ -578,7 +583,7 @@ fn oxford_join(names: &[&str]) -> String {
 /// Lists the apps in full when that fits `SUBJECT_BUDGET`, otherwise counts
 /// them. The count form is used even when it overflows, for a long
 /// hostname.
-fn subject(host: &Hostname, plan: &DraftHostPlan) -> String {
+fn subject(host: &Hostname, plan: &HostPlan) -> String {
     let app_names: Vec<&str> = plan.apps.keys().map(String::as_str).collect();
     let n_apps = app_names.len();
 
@@ -621,11 +626,11 @@ fn deploy_run_token() -> Result<String> {
 
 /// The commit message for `host`'s deploy commit: its own subject line,
 /// then the body that every commit of the run shares.
-fn commit_message(host: &Hostname, plan: &DraftHostPlan, body: &str) -> String {
+fn commit_message(host: &Hostname, plan: &HostPlan, body: &str) -> String {
     format!("{}\n\n{body}", subject(host, plan))
 }
 
-impl DraftPlan {
+impl Plan {
     /// The body that every commit of one deploy run shares: the changes
     /// intended for every host, so a reader of one host's history sees the
     /// run's scope. It does not record whether the other hosts succeeded.
@@ -648,26 +653,25 @@ impl DraftPlan {
         out
     }
 
-    /// Create each host's deploy commit and produce a finalized `Plan`.
+    /// Create each host's deploy commit in the store.
     ///
     /// The commits of one run share a signature and a `Deploy-Run` token.
-    pub fn finalize(self, store: &Store) -> Result<Plan> {
+    pub fn commit(self, store: &Store) -> Result<CommittedPlan> {
         let sig = store.signature()?;
         let body = self.run_body(&deploy_run_token()?);
         let mut hosts = BTreeMap::new();
-        for (host, draft) in self.hosts {
-            let message = commit_message(&host, &draft, &body);
-            let commit = store.commit_tree(&sig, draft.tree, draft.expected_current, &message)?;
-            let is_rollback_safe = draft.apps.values().all(|app| app.system.is_rollback_safe());
-            let host_plan = HostPlan {
-                apps: draft.apps,
+        for (host, plan) in self.hosts {
+            let message = commit_message(&host, &plan, &body);
+            let commit = store.commit_tree(&sig, plan.tree, plan.expected_current, &message)?;
+            let committed = CommittedHostPlan {
+                apps: plan.apps,
                 commit,
-                expected_current: draft.expected_current,
-                is_rollback_safe,
+                expected_current: plan.expected_current,
+                is_rollback_safe: plan.is_rollback_safe,
             };
-            hosts.insert(host, host_plan);
+            hosts.insert(host, committed);
         }
-        Ok(Plan { hosts })
+        Ok(CommittedPlan { hosts })
     }
 }
 
@@ -1027,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_parents_each_host_commit_on_its_tracking_ref() -> Result<()> {
+    fn commit_parents_each_host_commit_on_its_tracking_ref() -> Result<()> {
         let t = TestRepo::new();
         let c1 = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
         let deployed = t.mark_deployed(c1);
@@ -1052,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_stamps_the_commits_of_a_run_with_one_token() -> Result<()> {
+    fn commit_stamps_the_commits_of_a_run_with_one_token() -> Result<()> {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
         let plan = t.plan(c);
@@ -1080,18 +1084,14 @@ mod tests {
         Ok(())
     }
 
-    fn draft(t: &TestRepo, commit: Oid) -> DraftPlan {
-        let tree_oid = t.get_commit_tree_oid(commit);
-        make_plan(&t.store, tree_oid)
-            .expect("plan succeeds")
-            .expect("plan has changes")
-    }
-
     const RUN: &str = "3f0a9c2e7d1b4e6a8c5f0d2b9e7a1c4d";
 
     /// The commit message for `host` when deploying `commit`'s tree.
     fn message_for(t: &TestRepo, commit: Oid, host: &str) -> String {
-        let plan = draft(t, commit);
+        let tree_oid = t.get_commit_tree_oid(commit);
+        let plan = make_plan(&t.store, tree_oid)
+            .expect("plan succeeds")
+            .expect("plan has changes");
         let host = Hostname::from(host);
         commit_message(&host, &plan.hosts[&host], &plan.run_body(RUN))
     }

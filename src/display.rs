@@ -338,7 +338,6 @@ pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -
             Some(commit) => store.deployed_host_tree(commit, host)?,
             None => empty_tree_oid(),
         };
-        let new_oid = store.get_commit_tree(host_plan.commit)?.id();
         if !combined.is_empty() {
             writeln!(combined)?;
         }
@@ -349,7 +348,7 @@ pub fn print_diff(store: &Store, plan: &Plan, mode: DiffMode, color: UseColor) -
             .args(["diff", "--color=always"])
             .args(&mode_args)
             .arg(old_oid.to_string())
-            .arg(new_oid.to_string())
+            .arg(host_plan.tree.to_string())
             .stdout(Stdio::piped())
             .spawn()?;
         let output = child.wait_with_output()?;

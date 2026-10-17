@@ -345,7 +345,7 @@ fn run_deploy(
     let tree_oid = repo.build_tree(&dir, filter)?;
 
     let plan = match plan::make_plan(&repo, tree_oid)? {
-        Some(draft) => draft.finalize(&repo)?,
+        Some(plan) => plan,
         None => {
             print_up_to_date(&dir, filter);
             return Ok(());
@@ -366,6 +366,7 @@ fn run_deploy(
     if decision == display::Decision::Abort {
         return Ok(());
     }
+    let plan = plan.commit(&repo)?;
 
     let connector = make_connector(mode)?;
 
@@ -531,13 +532,7 @@ fn run_diff(
     let dir = resolve_dir(&store, dir)?;
     let tree_oid = store.build_tree(&dir, filter)?;
     match plan::make_plan(&store, tree_oid)? {
-        Some(draft) => {
-            // This creates a dangling commit in the store, but a GC will
-            // collect it at some point, it's not worth complicating the code
-            // to avoid this.
-            let plan = draft.finalize(&store)?;
-            display::print_diff(&store, &plan, mode, display::UseColor::from_env())?;
-        }
+        Some(plan) => display::print_diff(&store, &plan, mode, display::UseColor::from_env())?,
         None => print_up_to_date(&dir, filter),
     }
     Ok(())

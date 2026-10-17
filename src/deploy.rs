@@ -21,7 +21,7 @@ use git2::Oid;
 use parking_lot::Mutex;
 
 use crate::error::{ApplyError, Error, Explanation, HostError, Result};
-use crate::plan::Plan;
+use crate::plan::CommittedPlan;
 use crate::prim::Hostname;
 use crate::protocol::{self, ApplyMode, Hello, Message, Request};
 use crate::setup::{BUILD_COMMIT, HostConnector};
@@ -445,7 +445,7 @@ fn push_and_apply_host(
     store_path: &Path,
     host: &Hostname,
     conn: &mut Box<dyn Connection>,
-    plan: &Plan,
+    plan: &CommittedPlan,
     progress: &DeployProgress,
 ) -> std::result::Result<(), HostError> {
     let host_plan = &plan.hosts[host];
@@ -585,7 +585,7 @@ pub fn read_apply_messages(
 /// this invariant.
 pub fn run_deploy(
     store: &Store,
-    plan: &Plan,
+    plan: &CommittedPlan,
     operator: &str,
     connector: &dyn HostConnector,
     progress: &DeployProgress,
@@ -657,7 +657,7 @@ fn filter_systemd_status(output: &str) -> String {
 mod tests {
     use super::*;
     use crate::filter::HostFilter;
-    use crate::plan::HostPlan;
+    use crate::plan::CommittedHostPlan;
     use crate::store::STORE_VERSION;
     use crate::testutil::{
         TempDir, TestHost, TestRepo, assert_dir_contents, config_with, test_connector,
@@ -669,7 +669,7 @@ mod tests {
     fn deploy_with_progress(
         driver: &TestRepo,
         targets: &[&TestHost],
-        plan: &Plan,
+        plan: &CommittedPlan,
     ) -> (Result<()>, DeployProgress) {
         let hostnames: Vec<_> = plan.hosts.keys().map(|h| h.0.as_str()).collect();
         let progress = test_progress(&hostnames);
@@ -687,19 +687,19 @@ mod tests {
     }
 
     /// Run a deploy through run_deploy using in-memory connections.
-    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &Plan) -> Result<()> {
+    fn deploy_to(driver: &TestRepo, targets: &[&TestHost], plan: &CommittedPlan) -> Result<()> {
         deploy_with_progress(driver, targets, plan).0
     }
 
     /// A plan that deploys `commit`, a host-shaped commit, to every host.
-    fn make_plan(commit: Oid, hosts: &[(&str, Option<Oid>)]) -> Plan {
-        Plan {
+    fn make_plan(commit: Oid, hosts: &[(&str, Option<Oid>)]) -> CommittedPlan {
+        CommittedPlan {
             hosts: hosts
                 .iter()
                 .map(|(name, expected_current)| {
                     (
                         Hostname::from(*name),
-                        HostPlan {
+                        CommittedHostPlan {
                             apps: BTreeMap::new(),
                             commit,
                             expected_current: *expected_current,
@@ -712,10 +712,10 @@ mod tests {
     }
 
     /// Plan the config tree in `config` against `driver`'s tracking refs.
-    fn plan_config(driver: &TestRepo, config: &TempDir) -> Result<Option<Plan>> {
+    fn plan_config(driver: &TestRepo, config: &TempDir) -> Result<Option<CommittedPlan>> {
         let tree_oid = driver.store.build_tree(config.path(), &HostFilter::All)?;
         match crate::plan::make_plan(&driver.store, tree_oid)? {
-            Some(draft) => Ok(Some(draft.finalize(&driver.store)?)),
+            Some(plan) => Ok(Some(plan.commit(&driver.store)?)),
             None => Ok(None),
         }
     }
@@ -748,7 +748,7 @@ mod tests {
         let tree_oid = driver.store.build_tree(config.path(), &HostFilter::All)?;
         let plan = crate::plan::make_plan(&driver.store, tree_oid)?
             .expect("plan has changes")
-            .finalize(&driver.store)?;
+            .commit(&driver.store)?;
         deploy_to(&driver, &[&target], &plan)?;
 
         assert_eq!(

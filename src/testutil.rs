@@ -144,26 +144,27 @@ impl TestRepo {
     ) -> crate::error::Result<crate::plan::Plan> {
         let app_plan = crate::plan::compute_app_plan(&self.store, diff)?;
         let is_rollback_safe = app_plan.system.is_rollback_safe();
+        let tree = self.store.get_commit_tree(commit)?;
         Ok(crate::plan::Plan {
             hosts: std::collections::BTreeMap::from([(
                 crate::prim::Hostname::from("web1"),
                 crate::plan::HostPlan {
                     apps: std::collections::BTreeMap::from([(app.into(), app_plan)]),
-                    commit,
                     expected_current: None,
+                    tree: tree.get_name("web1").expect("commit has web1").id(),
                     is_rollback_safe,
                 },
             )]),
         })
     }
 
-    /// Plan a deploy from a commit's tree.
-    pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
+    /// Plan a deploy from a commit's tree and commit the plan.
+    pub fn plan(&self, commit: Oid) -> crate::plan::CommittedPlan {
         let tree_oid = self.get_commit_tree_oid(commit);
-        let draft = crate::plan::make_plan(&self.store, tree_oid)
+        let plan = crate::plan::make_plan(&self.store, tree_oid)
             .expect("plan succeeds")
             .expect("plan has changes");
-        draft.finalize(&self.store).expect("finalize succeeds")
+        plan.commit(&self.store).expect("plan is committed")
     }
 
     /// Get the tree OID for a commit.
@@ -177,7 +178,7 @@ impl TestRepo {
 
     /// Point every host's tracking ref at the deploy commit for its part of
     /// the config tree of `commit`, as a completed deploy would.
-    pub fn mark_deployed(&self, commit: Oid) -> crate::plan::Plan {
+    pub fn mark_deployed(&self, commit: Oid) -> crate::plan::CommittedPlan {
         let plan = self.plan(commit);
         for (host, host_plan) in &plan.hosts {
             self.set_host_tracking_ref(&host.0, host_plan.commit);
