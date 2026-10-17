@@ -158,13 +158,19 @@ impl TestRepo {
         })
     }
 
-    /// Plan a deploy from a commit's tree and commit the plan.
-    pub fn plan(&self, commit: Oid) -> crate::plan::CommittedPlan {
+    /// Plan a deploy from a commit's tree.
+    pub fn plan(&self, commit: Oid) -> crate::plan::Plan {
         let tree_oid = self.get_commit_tree_oid(commit);
-        let plan = crate::plan::make_plan(&self.store, tree_oid)
+        crate::plan::make_plan(&self.store, tree_oid)
             .expect("plan succeeds")
-            .expect("plan has changes");
-        plan.commit(&self.store).expect("plan is committed")
+            .expect("plan has changes")
+    }
+
+    /// Plan a deploy from a commit's tree and commit the plan.
+    pub fn committed_plan(&self, commit: Oid) -> crate::plan::CommittedPlan {
+        self.plan(commit)
+            .commit(&self.store)
+            .expect("plan is committed")
     }
 
     /// Get the tree OID for a commit.
@@ -179,7 +185,7 @@ impl TestRepo {
     /// Point every host's tracking ref at the deploy commit for its part of
     /// the config tree of `commit`, as a completed deploy would.
     pub fn mark_deployed(&self, commit: Oid) -> crate::plan::CommittedPlan {
-        let plan = self.plan(commit);
+        let plan = self.committed_plan(commit);
         for (host, host_plan) in &plan.hosts {
             self.set_host_tracking_ref(&host.0, host_plan.commit);
         }

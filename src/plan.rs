@@ -13,28 +13,16 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use git2::Oid;
-use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, StoreError};
 use crate::prim::Hostname;
 use crate::store::{Store, empty_tree_oid, tree_entries};
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppDiff {
-    Add {
-        #[serde(with = "crate::prim::ser::oid")]
-        new_tree: Oid,
-    },
-    Remove {
-        #[serde(with = "crate::prim::ser::oid")]
-        old_tree: Oid,
-    },
-    Update {
-        #[serde(with = "crate::prim::ser::oid")]
-        old_tree: Oid,
-        #[serde(with = "crate::prim::ser::oid")]
-        new_tree: Oid,
-    },
+    Add { new_tree: Oid },
+    Remove { old_tree: Oid },
+    Update { old_tree: Oid, new_tree: Oid },
 }
 
 impl AppDiff {
@@ -60,7 +48,7 @@ impl AppDiff {
 /// Side effects to apply to the host system for a set of app changes.
 ///
 /// Per-app instances can be combined via `merge` into a host-level aggregate.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct SystemDiff<T = String> {
     /// Networkd config file changes.
     pub networkd: SubdirChanges,
@@ -136,27 +124,24 @@ impl SystemDiff {
 }
 
 /// Per-app diff and precomputed actions, produced during planning.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AppPlan {
     pub diff: AppDiff,
     pub system: SystemDiff,
 }
 
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct CommittedHostPlan {
-    pub apps: BTreeMap<String, AppPlan>,
     /// The commit to deploy to this host: its tree is the host's config
     /// tree, its parent the commit at `expected_current`.
-    #[serde(with = "crate::prim::ser::oid")]
     pub commit: Oid,
-    #[serde(with = "crate::prim::ser::oid_option")]
     pub expected_current: Option<Oid>,
     /// See [`HostPlan::is_rollback_safe`].
     pub is_rollback_safe: bool,
 }
 
 /// A plan whose deploy commits exist in the store, ready to deploy.
-#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug)]
 pub struct CommittedPlan {
     pub hosts: BTreeMap<Hostname, CommittedHostPlan>,
 }
@@ -199,7 +184,7 @@ pub struct HostPlan {
 /// disappeared, and whether the directory's content changed at all. We don't
 /// query the live system -- changes come from comparing the previous and
 /// target trees.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct SubdirChanges {
     /// Files newly provided by this app.
     pub link: Vec<String>,
@@ -244,7 +229,7 @@ impl SubdirChanges {
 /// exist. We don't query live system state; a manual change (e.g. a human
 /// disabling a unit) surfaces in the `systemctl status` output we report after
 /// applying.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct UnitActions {
     /// Newly enabled units: `systemctl enable`, then `systemctl restart`.
     pub enable: Vec<String>,
@@ -316,7 +301,7 @@ pub fn diff_enabled(prev: &BTreeSet<String>, target: &BTreeSet<String>) -> UnitA
 }
 
 /// Manifest symlink actions, derived from comparing two commits' manifests.
-#[derive(Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, PartialEq, Eq)]
 pub struct SymlinkChanges<T> {
     /// New symlinks to create: (link_path, source_path).
     pub create: Vec<(T, T)>,
@@ -664,7 +649,6 @@ impl Plan {
             let message = commit_message(&host, &plan, &body);
             let commit = store.commit_tree(&sig, plan.tree, plan.expected_current, &message)?;
             let committed = CommittedHostPlan {
-                apps: plan.apps,
                 commit,
                 expected_current: plan.expected_current,
                 is_rollback_safe: plan.is_rollback_safe,
@@ -1042,7 +1026,7 @@ mod tests {
             ("web3/app/conf", b"v1"),
         ]);
 
-        let plan = t.plan(c2);
+        let plan = t.committed_plan(c2);
 
         let config_tree = t.store.get_commit_tree(c2)?;
         for (host, host_plan) in &plan.hosts {
@@ -1059,7 +1043,7 @@ mod tests {
     fn commit_stamps_the_commits_of_a_run_with_one_token() -> Result<()> {
         let t = TestRepo::new();
         let c = t.commit(&[("web1/app/conf", b"v1"), ("web2/app/conf", b"v1")]);
-        let plan = t.plan(c);
+        let plan = t.committed_plan(c);
 
         let trailer_of = |host: &str| -> String {
             let commit = t
@@ -1088,10 +1072,7 @@ mod tests {
 
     /// The commit message for `host` when deploying `commit`'s tree.
     fn message_for(t: &TestRepo, commit: Oid, host: &str) -> String {
-        let tree_oid = t.get_commit_tree_oid(commit);
-        let plan = make_plan(&t.store, tree_oid)
-            .expect("plan succeeds")
-            .expect("plan has changes");
+        let plan = t.plan(commit);
         let host = Hostname::from(host);
         commit_message(&host, &plan.hosts[&host], &plan.run_body(RUN))
     }

@@ -700,7 +700,6 @@ mod tests {
                     (
                         Hostname::from(*name),
                         CommittedHostPlan {
-                            apps: BTreeMap::new(),
                             commit,
                             expected_current: *expected_current,
                             is_rollback_safe: true,

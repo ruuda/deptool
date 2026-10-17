@@ -271,10 +271,10 @@ mod tests {
         // Deploys apply the plan's own deploy commit, so name checkout
         // version dirs after the plan commits, not c1 and c2.
         let c1 = driver.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let plan_v1 = driver.plan(c1);
+        let plan_v1 = driver.committed_plan(c1);
         deploy_to(&driver, &[&target], &plan_v1)?;
         let c2 = driver.commit(&[("web1/nginx/nginx.conf", b"v2")]);
-        let plan_v2 = driver.plan(c2);
+        let plan_v2 = driver.committed_plan(c2);
         deploy_to(&driver, &[&target], &plan_v2)?;
 
         // Drift: the checked-out config file vanished.
@@ -313,7 +313,7 @@ mod tests {
         let driver = TestRepo::new();
         let target = TestHost::new("web1");
         let c1 = driver.commit(&[("web1/nginx/nginx.conf", b"v1")]);
-        let plan_v1 = driver.plan(c1);
+        let plan_v1 = driver.committed_plan(c1);
         deploy_to(&driver, &[&target], &plan_v1)?;
 
         // Simulate a deploy that died between setting the target ref and
